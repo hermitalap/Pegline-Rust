@@ -90,6 +90,7 @@
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
 | 1.7 | 首次运行 | 首次运行自动放下空线带显示提示，5 s 后无卡自动收起；`visual/line-welcome.png` |
 | 1.5 | 全屏应用 | 已显示的线带在全屏窗口取得前台后也会立即收起；关闭全屏、碰顶边后恢复；`visual/fullscreen-suppressed.png` |
+| 1.8/2.6 | 点击穿透 | 空白线带点击落到下层绿色窗口（日志 `50,400`）；卡片图片上的点击被线带接住；`visual/clickthrough.png` |
 | — | 接管询问 | 1.2 s 后出现一次 MessageBox；点“是”写 `catchClipboard=1`，`catchOffered` 只写一次；`visual/first-run-offer.png` |
 | 9.1 | 左键托盘 | 展开任务栏溢出面板后真实左键点击 Pegline 图标，空线带放下；`visual/line-tray-click.png` |
 | 9.2 | 托盘菜单 | 真实右键托盘图标打开菜单：热键占用提示、清空计数 0、接管截图勾选；`visual/tray-menu-real.png` |
