@@ -146,9 +146,14 @@
 ### 3.3 声音（未做听感结论）
 
 - `sound::tests` 通过；真实进程触发便签 Tink 时 `PlaySoundW` 返回 **TRUE**。
-- 本机默认输出是 Realtek 扬声器；`dshow` 只能采集 VB-Cable Output，录到的
-  7 s 波形仍是静音。因此没有“已经听到”的证据，听感仍待有音频回环的机器确认；
-  不把 API 成功当成听感通过。
+- 进一步查清：本机默认渲染端点是 **`U32T1`**（`43cea139-…` 的显示音频），
+  不是 Realtek 扬声器，也不是 VB-Cable。
+- 自写 WASAPI loopback（48 kHz / 2 ch / 32-bit float）直接录这个默认端点：
+  连 Windows 自带提示音都只有 0 峰值；`dshow` 只有 VB-Cable Output，同样静音。
+- 尝试用 `IPolicyConfig` 临时把默认端点切到 CABLE Input 再录，但本机没有注册
+  该 COM 类（`REGDB_E_CLASSNOTREG`），没有改动系统默认值。
+- 因此没有“已经听到”的证据，听感仍待有可用音频回环的机器确认；不把 API 成功
+  当成听感通过。
 
 ### 3.4 三语界面
 
