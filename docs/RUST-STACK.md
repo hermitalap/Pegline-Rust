@@ -25,10 +25,15 @@
 | crate | 版本 | 用途 | 备注 |
 |:--|--:|:--|:--|
 | `windows` | 0.62 | 全部 Win32 / COM API | 只依赖这一个，`windows-core` 由它再导出 |
+| `windows-numerics` | 0.3 | `Matrix3x2` / `Vector2` | D2D 签名需要；它是 `windows` 自己的依赖 |
 | `tray-icon` | 0.26 | 托盘图标 | 底层就是 `Shell_NotifyIcon`；也可自己写 |
 | `muda` | 0.21 | 托盘菜单 / 右键菜单 | 若不想要依赖，可退化为 `TrackPopupMenu` |
-| `embed-resource` | 2.x | 构建时嵌入 `.ico` 与清单 | build-dependency |
+| `embed-resource` | 3.x | 构建时嵌入 `.ico` 与清单 | build-dependency；M0 用 3.0.12 |
 | `anyhow` | 1.x | 应用层错误 | 只在边界用，不进入热路径 |
+
+M0 的 `Cargo.toml` 只启用了实际用到的 `windows` feature（Foundation、D3D11、DXGI、
+D2D、DComp、DWM、GDI、COM、线程/进程、HiDpi、窗口消息）。DirectWrite、WIC、Shell、
+Ole 等 M1+ 用到时再补；不要一次把整个 feature 表打开。
 
 **不引入**：`winit`、`egui`、`iced`、`image`（用 WIC）、`serde`、`tokio`、
 `log`/`env_logger`（自己写 30 行文件日志）。依赖越少，单文件越小、审计越容易。
@@ -92,8 +97,8 @@ path = "src/main.rs"
 # #![windows_subsystem = "windows"] in main.rs
 
 [[bin]]
-name = "probe"
-path = "src/probe.rs"
+name = "spike"
+path = "src/bin/spike.rs"
 
 [profile.release]
 opt-level = 3
@@ -101,18 +106,23 @@ lto = "thin"
 codegen-units = 1
 panic = "unwind"      # UI 线程需要 catch_unwind 兜底
 strip = "symbols"
+```
 
+`+crt-static` 放在 `.cargo/config.toml`，不要放 `Cargo.toml`（Cargo 不识别
+`[target.*] rustflags`，会报 unused manifest key）：
+
+```toml
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 ```
 
-`build.rs` 用 `embed-resource` 嵌入：
+`build.rs` 用 `embed-resource` 3.x 嵌入：
 
 - `assets/pegline.manifest`（Per-Monitor V2 DPI 感知、`longPathAware`、`supportedOS` 全列）；
 - `assets/pegline.ico`（16–256 多尺寸，PNG 压缩条目）。
 
-图标由 `tools/make-icon`（Rust bin，D2D 或 GDI+ 绘制）在构建前生成，
-和 WPF 版“代码画图标”保持一致；生成物放 `target/` 或 `assets/generated/`，不入库。
+M0 先提交一个占位 `assets/pegline.ico`。M1 再做 `tools/make-icon`（Rust bin，D2D 或
+GDI+ 绘制），生成物放 `target/` 或 `assets/generated/`，不入库。
 
 ---
 

@@ -28,9 +28,9 @@ number.
 
 ## Status
 
-Design phase finished; **no Rust code yet**. Do not start features before M0
-(`docs/SPIKE-01.md`) passes: the whole architecture depends on GPU-composited
-per-pixel transparency working.
+Design phase finished. **M0 (`docs/SPIKE-01.md`) passed on 2026-11-02** — see
+`docs/SPIKE-01-RESULTS.md`. The crate, manifest, icon and static CRT build exist.
+Next milestone is M1 (shell); do not start M2+ features before M1 exits.
 
 ## Read first
 

@@ -76,11 +76,16 @@ WS_EX_NOREDIRECTIONBITMAP   // 不要 DWM 重定向表面，内容由 DComp 提�
 WS_EX_TOOLWINDOW            // 不进任务栏 / Alt+Tab
 WS_EX_NOACTIVATE            // 不抢焦点
 WS_EX_TRANSPARENT           // 按需，点击穿透
+WS_EX_LAYERED               // 按需，和上一行一起用于跨进程点击穿透（只作输入标志）
 ```
 
 - `WM_MOUSEACTIVATE` 返回 `MA_NOACTIVATE`。
-- 点击穿透：指针不在任何照片上时加 `WS_EX_TRANSPARENT`，在照片上时去掉；
-  同时 `WM_NCHITTEST` 对非照片区域返回 `HTTRANSPARENT` 作为双保险。
+- 点击穿透：指针不在任何照片上时加 `WS_EX_TRANSPARENT | WS_EX_LAYERED`，在照片上时去掉；
+  同时 `WM_NCHITTEST` 对非照片区域返回 `HTTRANSPARENT` 作为同线程双保险。
+  M0 实测：只有 `WS_EX_TRANSPARENT` 时点击不会穿过到其他进程；`HTTRANSPARENT` 也只沿
+  同一线程的窗口链传递。`WS_EX_LAYERED` 在这里不引入重定向位图，也不调用
+  `UpdateLayeredWindow`，像素仍由 DComp 交换链提供。动态切换后需要
+  `SetWindowPos(..., SWP_FRAMECHANGED)` 让命中测试生效。
 - 置顶：显示时 `SetWindowPos(HWND_TOPMOST, SWP_NOACTIVATE)`；全屏应用切回后重试。
 - DPI：清单声明 Per-Monitor V2；处理 `WM_DPICHANGED`，重建交换链尺寸，
   按新缩放重算 DIP→像素。
@@ -90,6 +95,10 @@ WS_EX_TRANSPARENT           // 按需，点击穿透
 普通分层窗口（`WS_EX_LAYERED` + `UpdateLayeredWindow`）必须由进程提供一张 CPU 位图；
 `NOREDIRECTIONBITMAP` + DComp 则把 GPU 表面直接交给 DWM，没有整窗 CPU 光栅，也没有回读。
 这是本次重写最核心的一条。
+
+`WS_EX_LAYERED` 只在需要点击穿透时作为输入透明标志出现，不改变渲染路径：没有
+`UpdateLayeredWindow`，没有 `SetLayeredWindowAttributes`，也没有整窗 CPU 位图。M0 实测
+加上它之后 static 私有内存仍在 37.8–38.2 MB，和未加时一致。
 
 ---
 
@@ -315,10 +324,14 @@ src/
 
 1. `WS_EX_NOREDIRECTIONBITMAP` + `CreateSwapChainForComposition` + 预乘 alpha 在 Intel 6K 屏上能正确透出桌面。
 2. 去掉 `WS_EX_TRANSPARENT` 时点击能命中窗口，加上后能穿透到下层应用。
+   M0 实测：还需要 `WS_EX_LAYERED`；`HTTRANSPARENT` 只对同线程窗口有效。
 3. `WS_EX_NOACTIVATE` + `MA_NOACTIVATE` 下，点击不抢焦点，前台应用继续接收键盘。
 4. 6016×420 与 2442×2344 两种交换链在 60 Hz 下稳定 `Present(1,0)`，且在 120 Hz 屏上
    自动跑满 120（没有 120 Hz 屏时，至少验证单帧绘制 ≤ 8 ms）。
 5. 私有工作集与显存占用达到 §8 的预算。
 6. DComp 跨线程用法可行（否则退化为 DComp 调用集中在渲染线程、UI 线程只发命令）。
+
+M0（2026-11-02）结果：1–6 全部验证通过，6 不需要退化方案。详细数字与截图见
+`docs/SPIKE-01-RESULTS.md`。
 
 任一条不成立，先解决再进入 M1；这些是重写的根基。

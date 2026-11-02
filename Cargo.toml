@@ -1,0 +1,54 @@
+[package]
+name = "pegline"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Screenshots hanging on a clothesline at the top of the screen"
+license = "MIT"
+build = "build.rs"
+
+[[bin]]
+name = "pegline"
+path = "src/main.rs"
+
+[[bin]]
+name = "spike"
+path = "src/bin/spike.rs"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Foundation_Numerics",
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_DirectComposition",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Performance",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+]
+
+# Matrix3x2/Vector2 are the numeric types the Direct2D signatures use. This is
+# the same crate the windows crate depends on, pinned by the lock file.
+[dependencies.windows-numerics]
+version = "0.3"
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"

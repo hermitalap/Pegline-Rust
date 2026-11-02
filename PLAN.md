@@ -1,6 +1,6 @@
 # PLAN.md — Rust 重写
 
-状态：**Phase 0 完成**（文档与归档）。代码尚未开始，下一个 session 从 M0 开始。
+状态：**M0 完成**（透明合成 spike 通过）。Rust 工程已存在，下一步 M1（外壳）。
 
 ---
 
@@ -39,7 +39,7 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 
 | # | 阶段 | 名称 | 内容 | 出口条件 | 状态 |
 |:--|:--|:--|:--|:--|:--|
-| M0 | A | Spike | 透明 DComp 窗口、交换链、点击穿透、不抢焦点、60/120 Hz 帧循环、内存测量 | `docs/SPIKE-01.md` §4 全过 | ⬜ 未开始 |
+| M0 | A | Spike | 透明 DComp 窗口、交换链、点击穿透、不抢焦点、60/120 Hz 帧循环、内存测量 | `docs/SPIKE-01.md` §4 全过 | ✅ 2026-11-02 |
 | M1 | A | 外壳 | 进程、单实例、托盘、设置、开机启动、快捷键、日志、单文件打包 | 托盘可显示/隐藏线带；设置重启保留 | ⬜ |
 | M2 | A | 线带 | 窗口、绳子、卡片、弹簧、放下/收起、悬停按钮、命中测试、复制/打开/叉掉 | `PARITY` §1、§2、§4 基本通过；空闲 CPU ≤ 3% | ⬜ |
 | M3 | A | 截图 | 文件监听、剪贴板、缩略图、保存、双胞胎合并、区域推断 | `PARITY` §5 通过（不含飞行） | ⬜ |
@@ -51,6 +51,21 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 | M9 | C | 验收 | 全量 PARITY、连续 200 次截图、休眠/DPI/多屏、打包 | `docs/PARITY.md` 全部打勾 | ⬜ |
 
 每个里程碑单独提交（`feat:` / `perf:`），提交信息中文或英文均可。
+
+### 3.1 M0 实测（2026-11-02，Intel Arc B390 / 6016×3384 @200% / 60 Hz）
+
+| 项 | 实测 |
+|:--|:--|
+| static 6016×420 | private **37.9 MB**，空闲 CPU 0.31%，重绘 0.029 ms |
+| animate 6016×420 @60 | **60.07 fps**，p50 16.66 / p95 16.99 / max 18.55 ms，jank 0.00%，CPU 0.719 ms/帧，private 40.4 MB |
+| flight 2442×2344 @60 | **60.06 fps**，p50 16.66 / p95 16.95 / max 18.21 ms，jank 0.00%，CPU 0.659 ms/帧，private 63.6 MB |
+| 120 Hz 替代 | 无 120 Hz 屏；`--nolimit` animate draw p95 0.065 / max 0.575 ms，flight draw p95 0.102 / max 0.510 ms（门槛 8 ms） |
+| 5 分钟 | 300 s animate：60.02 fps，p95 16.97 ms，jank 0.00%，private 35.3→40.4 MB 后持平，device_lost=0 |
+| 跨线程 DComp | UI 建 visual、渲染线程建交换链并 `SetContent`/`Commit`，通过 |
+| 点击穿透 | 需 `WS_EX_TRANSPARENT \| WS_EX_LAYERED`（仅输入标志）；`HTTRANSPARENT` 只对同线程有效 |
+| 产物 | `pegline.exe` 236,032 B，静态 CRT，无 vcruntime/msvcp 依赖 |
+
+完整数字与截图：`docs/SPIKE-01-RESULTS.md`。
 
 ## 4. 性能与体积预算
 
@@ -101,9 +116,10 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 
 ## 8. 下一个 session 的起点
 
-1. 读 `docs/BEHAVIOR.md` §1–§6，建立产品直觉；读 `docs/ARCHITECTURE.md` §2–§5。
-2. 按 `docs/SPIKE-01.md` 建工程：`Cargo.toml`、`src/bin/spike.rs`、`build.rs`、清单与图标。
-3. 跑通 spike，把数字写进 `docs/SPIKE-01-RESULTS.md`（60 Hz 与 120 Hz 分开记录）。
-4. 只有 §4 全过，才开 M1；MVP 期间不要提前做 M5 的东西。
+1. 读 `docs/SPIKE-01-RESULTS.md`，特别是点击穿透的 `WS_EX_LAYERED` 结论与 §6 的 M1 提醒。
+2. 读 `docs/BEHAVIOR.md` §1–§6 与 `docs/ARCHITECTURE.md` §2–§5，建立产品直觉。
+3. 开 M1（外壳）：进程、单实例、托盘、设置、开机启动、快捷键、日志、单文件打包。
+   工程骨架、清单、图标和静态 CRT 已就位；`spike.exe` 只作参考，不要把业务逻辑塞进去。
+4. M1 出口条件通过后，才开 M2（线带）；MVP 期间不要提前做 M5 的东西。
 
 旧 WPF 版仍可从 `archive/wpf-v1/build.cmd` 构建运行，用于对照行为。
