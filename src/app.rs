@@ -1316,6 +1316,13 @@ impl App {
             self.hover_action = hover_action;
             self.send_scene(Command::HoverAction(hover_action));
         }
+        if let Some(overlay) = self.overlay.as_ref() {
+            // Note colour dots are clickable too and the WPF dots used a hand
+            // cursor; the cards themselves stay on the normal arrow.
+            let on_swatch =
+                hover_action.is_none() && self.is_revealed && self.swatch_at(x, y).is_some();
+            overlay.set_hand_cursor(hover_action.is_some() || on_swatch);
+        }
         if let Some(press) = self.pressed.as_mut() {
             let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
             let distance = ((x - press.start.0).abs() + (y - press.start.1).abs()) as f32;
@@ -1501,6 +1508,9 @@ impl App {
         if !revealed {
             self.hover = None;
             self.hover_action = None;
+            if let Some(overlay) = self.overlay.as_ref() {
+                overlay.set_hand_cursor(false);
+            }
             self.send_scene(Command::Hover(None));
             self.send_scene(Command::HoverAction(None));
             self.hide_preview();

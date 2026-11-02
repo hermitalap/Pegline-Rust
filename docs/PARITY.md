@@ -89,11 +89,12 @@
 |:--|:--|:--|
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
 | 2.3/2.4 | 间距/容量 | 连续加 13 张后线上保持 12 张，间距 174 DIP 居中，最旧一张掉落；`visual/line-capacity.png` |
-| 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮；截图 `visual/line-hover-preview.png` |
+| 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮，按钮/便签色点为手形光标；截图 `visual/line-hover-preview.png` |
 | 3.4/3.5 | 飞行相框/阴影 | 相框和夹子随进度出现，落地前与线上卡片一致；修复前是裸图盖住已落地相框；截图 `visual/line-flight.png` |
 | 3.7 | 掉落 | 37 帧 @60 Hz，白框/夹子全程可见，`e=k³` 加速、旋转、淡出；截图 `visual/line-drop.png` |
 | 4.1/4.2 | 复制 | 点击卡片后剪贴板含 PNG/CF_DIB/CF_HDROP；300 ms 截图可见“✓ 已复制”；`visual/line-copied.png` |
 | 4.10 | 拖拽预览 | ghost 0.9 倍、0.85 不透明度、跟随指针；原卡半透明；`visual/line-drag-ghost.png` |
+| 4.11 | 右键菜单 | 自己的 PNG 剪贴板截图（own=true）显示“保存到桌面/丢弃”；外部图显示“取下/移到回收站”；`visual/context-menu-own.png`、`visual/context-menu-external.png` |
 | 6.1 | 预览位置 | 预览从按钮行下方 12 DIP 开始，不再遮挡复制/打开；`visual/line-hover-preview.png` |
 | 6.6 | 大图尺寸 | 4000×3000 源图 → 预览白框 **1726×1300** 物理像素（≤1800×1300，4:3 等比）；不放大源图 |
 | 7.5 | 便签颜色 | 蓝/粉/灰点击后纸面/折角/墨色/勾选同步，`noteColor:` 写入并重启恢复；`visual/line-note-colors.png` |

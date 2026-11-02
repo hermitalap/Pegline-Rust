@@ -5,15 +5,17 @@
 //! dedicated render thread. The only things crossing that boundary are
 //! [`Command`]s one way and a [`FrameSnapshot`] the other way.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
+    IDC_ARROW, IDC_HAND, LoadCursorW, MA_NOACTIVATE, SW_HIDE, SetCursor, SetWindowLongPtrW,
+    ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -35,11 +37,19 @@ struct SendHwnd(HWND);
 // handle with DirectComposition, which is free-threaded.
 unsafe impl Send for SendHwnd {}
 
+/// The cursor shape the line should show; only the hover buttons ask for a
+/// hand (the WPF card buttons used `Cursors.Hand`).
+#[derive(Default)]
+struct CursorState {
+    hand: AtomicBool,
+}
+
 /// The line window as seen by the UI thread.
 pub struct Overlay {
     hwnd: HWND,
     tx: Sender<Command>,
     snapshot: Arc<Mutex<FrameSnapshot>>,
+    cursor: Arc<CursorState>,
     join: Option<JoinHandle<()>>,
     width_px: u32,
     height_px: u32,
@@ -86,6 +96,13 @@ impl Overlay {
         // SAFETY: our own window.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+        // The pointer stays valid while the window exists: `Overlay` holds the
+        // Arc and shutdown destroys the window before dropping it.
+        let cursor = Arc::new(CursorState::default());
+        // SAFETY: our own window and an Arc that outlives it.
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::as_ptr(&cursor) as isize);
         }
 
         let snapshot = Arc::new(Mutex::new(FrameSnapshot::default()));
@@ -136,6 +153,7 @@ impl Overlay {
             hwnd,
             tx,
             snapshot,
+            cursor,
             join: Some(join),
             width_px,
             height_px,
@@ -212,6 +230,11 @@ impl Overlay {
             height_px,
             dpi,
         });
+    }
+
+    /// True while the pointer is over one of the Copy/Open buttons.
+    pub fn set_hand_cursor(&self, hand: bool) {
+        self.cursor.hand.store(hand, Ordering::Release);
     }
 
     pub fn set_click_through(&mut self, enabled: bool) {
@@ -475,6 +498,19 @@ unsafe extern "system" fn overlay_wndproc(
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => return LRESULT(1),
+        WM_SETCURSOR if (lparam.0 as u32 & 0xFFFF) == HTCLIENT => {
+            // SAFETY: GWLP_USERDATA holds the live `CursorState` while the
+            // overlay exists; the pointer is only read on this thread.
+            let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const CursorState;
+            let hand = !raw.is_null() && unsafe { (*raw).hand.load(Ordering::Acquire) };
+            let cursor = if hand { IDC_HAND } else { IDC_ARROW };
+            // SAFETY: system cursors are process-wide and never freed.
+            unsafe {
+                let loaded = LoadCursorW(None, cursor).unwrap_or_default();
+                let _ = SetCursor(Some(loaded));
+            }
+            return LRESULT(1);
+        }
         _ => {}
     }
     // A click on the strip must never activate it.
