@@ -79,9 +79,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HTCLIENT, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW, MINMAXINFO,
     PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_OVERLAPPEDWINDOW,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_IME_CHAR, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -674,6 +674,16 @@ unsafe extern "system" fn editor_wndproc(
         }
         WM_CHAR => {
             forward_char(shared, wparam);
+            return LRESULT(0);
+        }
+        WM_IME_CHAR => {
+            // A composing IME (e.g. Microsoft Pinyin) commits the chosen
+            // characters as WM_IME_CHAR, not WM_CHAR. Without this the text
+            // tool silently dropped Chinese/Japanese input.
+            let code = (wparam.0 as u32) & 0xFFFF;
+            if let Some(character) = char::from_u32(code) {
+                shared.send(Command::Char(character));
+            }
             return LRESULT(0);
         }
         WM_KEYDOWN => {
