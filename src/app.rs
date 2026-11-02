@@ -2736,9 +2736,13 @@ impl App {
         let Some(item) = self.items.iter().find(|item| item.id == id) else {
             return;
         };
-        let Some(desktop) =
+        // Follow OneDrive/known-folder redirection: USERPROFILE\Desktop is not
+        // necessarily the desktop the user sees (this machine redirects it).
+        let desktop = win32::desktop_dir().or_else(|| {
             std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Desktop"))
-        else {
+        });
+        let Some(desktop) = desktop else {
+            logging::error("save to desktop: no desktop folder");
             return;
         };
         let Some(name) = item.path.file_name() else {

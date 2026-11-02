@@ -221,12 +221,15 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
     现在只输出修饰键（去掉末尾 `+`）；西语录制器实测显示 `Ctrl+Alt`。
 25. 真实拖放补测：资源管理器确认在前台后，把第 3 张 demo 卡片拖进
     `target\drops`，`demo-2.png`（1.23 KB）落地；验证 OLE `IDropTarget`。
+26. 修复**“保存到桌面”写到 `%USERPROFILE%\Desktop` 而不是重定向后的桌面**：
+    改用 `SHGetKnownFolderPath(FOLDERID_Desktop)`；本机 OneDrive 桌面
+    `D:\UserData\OneDrive\Desktop` 实测收到文件，旧路径没有。
 
 同机数值（release，6016×3384 @200%，单屏）：
 
 | 项 | 实测 |
 |:--|:--|
-| exe | 1,382,912 B（1.32 MB） |
+| exe | 1,383,424 B（1.32 MB） |
 | 6 卡线带 @60 Hz | 60.32 fps，p95 17.11 ms，draw p50 0.73 / p95 1.82 ms |
 | 飞行 1600 px | 61.96 fps，draw max 15.9 ms（首帧上传） |
 | 私有内存（6 卡可见） | 92.0 MB |

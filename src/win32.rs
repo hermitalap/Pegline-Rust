@@ -25,8 +25,8 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Shell::{
-    FO_DELETE, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW, SHFileOperationW,
-    SHGetKnownFolderPath,
+    FO_DELETE, FOLDERID_Desktop, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW,
+    SHFileOperationW, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
@@ -231,9 +231,19 @@ pub fn inbox_dir() -> PathBuf {
 /// The real Windows screenshot folder (Win+PrtScn target), resolved through the
 /// known-folder API so a moved folder is still found.
 pub fn screenshots_folder() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Screenshots)
+}
+
+/// The user's actual Desktop, following OneDrive/known-folder redirection.
+pub fn desktop_dir() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Desktop)
+}
+
+/// Resolves one shell known folder to a path.
+fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     // SAFETY: SHGetKnownFolderPath allocates the string with CoTaskMemAlloc; we
     // copy it out and free it with the matching allocator immediately.
-    let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_DEFAULT, None) }.ok()?;
+    let raw = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.ok()?;
     if raw.is_null() {
         return None;
     }
