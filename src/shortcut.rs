@@ -97,14 +97,20 @@ pub fn parse(text: &str) -> Option<Hotkey> {
         }
     }
     let vk = vk?;
-    let standalone = matches!(vk, 0x70..=0x87 | 0x2C);
-    if modifiers == 0 && !standalone {
-        return None;
-    }
-    Some(Hotkey {
+    let hotkey = Hotkey {
         modifiers,
         virtual_key: vk,
-    })
+    };
+    if !usable(hotkey) {
+        return None;
+    }
+    Some(hotkey)
+}
+
+/// Whether a combination is acceptable: F1–F24 and PrtScn may stand alone,
+/// everything else needs at least one modifier (BEHAVIOR §12.2).
+pub fn usable(hotkey: Hotkey) -> bool {
+    hotkey.modifiers != 0 || matches!(hotkey.virtual_key, 0x70..=0x87 | 0x2C)
 }
 
 fn parse_key(text: &str) -> Option<u32> {
@@ -185,5 +191,29 @@ mod tests {
         let b = parse("Ctrl+Alt+S").unwrap();
         assert_eq!(a, b);
         assert_eq!(a.label(), "Ctrl+Alt+S");
+    }
+
+    #[test]
+    fn usable_matches_the_recorder_rules() {
+        let plain = Hotkey {
+            modifiers: 0,
+            virtual_key: 'S' as u32,
+        };
+        assert!(!usable(plain));
+        let function = Hotkey {
+            modifiers: 0,
+            virtual_key: 0x70,
+        };
+        assert!(usable(function));
+        let print_screen = Hotkey {
+            modifiers: 0,
+            virtual_key: 0x2C,
+        };
+        assert!(usable(print_screen));
+        let modified = Hotkey {
+            modifiers: MOD_SHIFT.0,
+            virtual_key: 'S' as u32,
+        };
+        assert!(usable(modified));
     }
 }

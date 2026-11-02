@@ -132,6 +132,14 @@ impl RectI {
         self.width() <= 0 || self.height() <= 0
     }
 
+    pub fn center_x(&self) -> f32 {
+        (self.left + self.right) as f32 * 0.5
+    }
+
+    pub fn center_y(&self) -> f32 {
+        (self.top + self.bottom) as f32 * 0.5
+    }
+
     pub fn to_f32(self) -> RectF {
         RectF::new(
             self.left as f32,
@@ -225,6 +233,8 @@ pub struct CardSpec {
     /// 480 px thumbnail (or note bitmap). May be filled in later with
     /// `Command::SetImage` when decoding finishes after the card is on the line.
     pub image: Option<ImageData>,
+    /// True for a sticky note: the card shows the colour swatches on hover.
+    pub note: bool,
 }
 
 /// One card's hit boxes in window DIP, published by the render thread.
@@ -235,6 +245,10 @@ pub struct HitCard {
     pub frame: RectF,
     /// The button row below the frame (empty when never hovered).
     pub actions: RectF,
+    /// True for a sticky note.
+    pub note: bool,
+    /// The four colour dots, in colour order; empty unless the note is hovered.
+    pub swatches: [RectF; 4],
 }
 
 /// A consistent view of the line for the UI thread's hit testing.
@@ -257,7 +271,23 @@ impl FrameSnapshot {
                 card.frame.inflated(tolerance).contains(x_dip, y_dip)
                     || (!card.actions.is_empty()
                         && card.actions.inflated(tolerance).contains(x_dip, y_dip))
+                    || card
+                        .swatches
+                        .iter()
+                        .any(|swatch| swatch.inflated(tolerance).contains(x_dip, y_dip))
             })
             .map(|card| card.id)
+    }
+
+    /// The note colour dot under the pointer, if any.
+    pub fn swatch_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, usize)> {
+        for card in &self.cards {
+            for (index, swatch) in card.swatches.iter().enumerate() {
+                if swatch.contains(x_dip, y_dip) {
+                    return Some((card.id, index));
+                }
+            }
+        }
+        None
     }
 }

@@ -264,6 +264,39 @@ pub fn shell_open(path: &std::path::Path) -> WinResult<()> {
     Ok(())
 }
 
+/// Opens a file with its registered editor (`ShellExecuteW` verb `edit`).
+pub fn shell_edit(path: &std::path::Path) -> WinResult<()> {
+    let target = HSTRING::from(path.as_os_str());
+    // SAFETY: ShellExecuteW only reads the NUL-terminated strings; no out-params.
+    let result = unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            windows::core::w!("edit"),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as usize <= 32 {
+        return Err(format!(
+            "ShellExecuteW(edit) returned {}",
+            result.0 as usize
+        ));
+    }
+    Ok(())
+}
+
+/// Starts a program with one file argument, detached.
+pub fn launch(program: &str, path: &std::path::Path) -> WinResult<()> {
+    let mut command = std::process::Command::new(program);
+    command.arg(path);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("start {program}: {error}"))
+}
+
 /// Opens Explorer with the file selected.
 pub fn reveal_in_explorer(path: &std::path::Path) -> WinResult<()> {
     let arg = format!("/select,\"{}\"", path.display());
@@ -609,6 +642,23 @@ pub fn now_seconds() -> f64 {
 /// A GUID from the shell namespace, used only for the screenshots folder.
 pub fn known_folder_guid() -> GUID {
     FOLDERID_Screenshots
+}
+
+/// The local wall clock as `(year, month, day, hour, minute, second)`.
+///
+/// File names use local time, exactly like the WPF version, so a screenshot
+/// taken at 18:04 in Shanghai reads `18:04` in Explorer rather than UTC.
+pub fn local_time_parts() -> (i32, u32, u32, u32, u32, u32) {
+    // SAFETY: GetLocalTime takes no parameters and returns the local clock.
+    let time = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    (
+        time.wYear as i32,
+        time.wMonth as u32,
+        time.wDay as u32,
+        time.wHour as u32,
+        time.wMinute as u32,
+        time.wSecond as u32,
+    )
 }
 
 /// Handle type used by clipboard and drag-and-drop code.

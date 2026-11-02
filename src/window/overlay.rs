@@ -159,6 +159,12 @@ impl Overlay {
         let _ = self.tx.send(command);
     }
 
+    /// Paces the frame loop: `period` is the minimum seconds per frame, or 0 to
+    /// follow the display (`fps=auto|60|120`, BEHAVIOR §12.3).
+    pub fn set_frame_cap(&self, period: f64) {
+        self.send(Command::SetFrameCap(period));
+    }
+
     pub fn show(&mut self, topmost: bool) {
         if !self.visible {
             self.visible = true;
@@ -294,6 +300,8 @@ fn render_thread(
 
     let mut visible = false;
     let mut needs_frame = false;
+    let mut frame_cap = 0.0f64;
+    let mut last_present = 0.0f64;
     let mut last = win32::now_seconds();
     let mut lost = 0u32;
 
@@ -303,7 +311,13 @@ fn render_thread(
         if !visible || !needs_frame {
             match rx.recv() {
                 Ok(command) => {
-                    if !handle(command, &mut scene, &renderer, &mut visible) {
+                    if !handle(
+                        command,
+                        &mut scene,
+                        &mut renderer,
+                        &mut visible,
+                        &mut frame_cap,
+                    ) {
                         break 'outer;
                     }
                 }
@@ -312,7 +326,13 @@ fn render_thread(
         }
         let mut stop = false;
         while let Ok(command) = rx.try_recv() {
-            if !handle(command, &mut scene, &renderer, &mut visible) {
+            if !handle(
+                command,
+                &mut scene,
+                &mut renderer,
+                &mut visible,
+                &mut frame_cap,
+            ) {
                 stop = true;
                 break;
             }
@@ -323,6 +343,15 @@ fn render_thread(
         if !visible {
             needs_frame = false;
             continue;
+        }
+
+        // Optional frame cap: sleep out the rest of the period, then let
+        // `Present(1, 0)` block on the next vertical blank.
+        if frame_cap > 0.0 {
+            let since = win32::now_seconds() - last_present;
+            if since < frame_cap {
+                std::thread::sleep(std::time::Duration::from_secs_f64(frame_cap - since));
+            }
         }
 
         let now = win32::now_seconds();
@@ -340,7 +369,7 @@ fn render_thread(
                 lost += 1;
             } else {
                 match renderer.present(true) {
-                    crate::render::Present::Ok => {}
+                    crate::render::Present::Ok => last_present = win32::now_seconds(),
                     crate::render::Present::Retry => {}
                     crate::render::Present::DeviceLost => {
                         logging::error("overlay device lost");
@@ -386,18 +415,27 @@ fn render_thread(
 fn handle(
     command: Command,
     scene: &mut Scene,
-    renderer: &crate::render::Renderer,
+    renderer: &mut crate::render::Renderer,
     visible: &mut bool,
+    frame_cap: &mut f64,
 ) -> bool {
-    if matches!(command, Command::Stop) {
-        return false;
+    match command {
+        Command::Stop => false,
+        Command::SetVisible(on) => {
+            *visible = on;
+            scene.apply(Command::SetVisible(on), renderer, win32::now_seconds());
+            true
+        }
+        Command::SetFrameCap(period) => {
+            *frame_cap = period.max(0.0);
+            true
+        }
+        other => {
+            let now = win32::now_seconds();
+            scene.apply(other, renderer, now);
+            true
+        }
     }
-    if let Command::SetVisible(on) = command {
-        *visible = on;
-    }
-    let now = win32::now_seconds();
-    scene.apply(command, renderer, now);
-    true
 }
 /// Window procedure for the overlay: never take focus, never erase.
 ///

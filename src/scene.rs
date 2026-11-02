@@ -38,6 +38,8 @@ pub enum Command {
     AddCard(CardSpec),
     /// A thumbnail finished decoding after the card was added.
     SetImage { id: CardId, image: ImageData },
+    /// A note wears another colour; redraw its swatch ring.
+    SetNoteColor { id: CardId, color: usize },
     /// Take a card off the line immediately (the fall, if any, is drawn by the
     /// flight window).
     RemoveCard { id: CardId },
@@ -53,6 +55,8 @@ pub enum Command {
     Copied(CardId),
     /// A gust of wind (also fired by the internal timer).
     Gust,
+    /// Cap the frame rate to `1 / period` Hz; 0 follows the display.
+    SetFrameCap(f64),
     /// Stop the render thread.
     Stop,
 }
@@ -74,6 +78,8 @@ struct Card {
     arrived: bool,
     flying: bool,
     image: Option<ID2D1Bitmap1>,
+    note: bool,
+    note_color: usize,
     nudge_from: f32,
     nudge_to: f32,
     nudge_t: f32,
@@ -97,6 +103,8 @@ impl Card {
             arrived: false,
             flying: false,
             image: None,
+            note: spec.note,
+            note_color: 0,
             nudge_from: 0.0,
             nudge_to: 0.0,
             nudge_t: -1.0,
@@ -145,10 +153,19 @@ impl Card {
         let left = slot_left + (layout::CARD_WIDTH - actions.total_width) * 0.5;
         RectF::from_xywh(
             left,
-            self.frame_top() + self.card_size.1 + layout::ACTIONS_GAP,
+            layout::actions_top_for(self.card_size.1, self.note),
             actions.total_width,
             actions.height,
         )
+    }
+
+    /// The swatch pill and its four dots, in slot-local DIP.
+    fn swatch_rects(&self, slot_left: f32) -> [RectF; 4] {
+        let mut rects = [RectF::default(); 4];
+        for (index, rect) in rects.iter_mut().enumerate() {
+            *rect = layout::swatch_dot(index, self.card_size.1).offset(slot_left, 0.0);
+        }
+        rects
     }
 }
 
@@ -321,6 +338,14 @@ impl Scene {
                     self.dirty = true;
                 }
             }
+            Command::SetNoteColor { id, color } => {
+                if let Some(card) = self.cards.iter_mut().find(|card| card.id == id) {
+                    if card.note && card.note_color != color.min(3) {
+                        card.note_color = color.min(3);
+                        self.dirty = true;
+                    }
+                }
+            }
             Command::RemoveCard { id } => {
                 let before = self.cards.len();
                 self.cards.retain(|card| card.id != id);
@@ -380,7 +405,7 @@ impl Scene {
                 self.dirty = true;
             }
             Command::Gust => self.gust(now),
-            Command::Stop => {}
+            Command::SetFrameCap(_) | Command::Stop => {}
         }
     }
 
@@ -561,10 +586,22 @@ impl Scene {
             } else {
                 RectF::default()
             };
+            let swatches = if card.note
+                && self.hover == Some(card.id)
+                && self.dragging.is_none()
+                && card.actions_alpha > 0.01
+            {
+                card.swatch_rects(slot_left)
+                    .map(|rect| rect.offset(0.0, slot_top))
+            } else {
+                [RectF::default(); 4]
+            };
             snapshot.cards.push(HitCard {
                 id: card.id,
                 frame,
                 actions,
+                note: card.note,
+                swatches,
             });
         }
         self.dirty = false;
@@ -606,7 +643,19 @@ impl Scene {
     }
 
     fn draw_card(&mut self, renderer: &mut Renderer, index: usize, slot_left: f32, hovered: bool) {
-        let (card_size, drop, x, tilt, swing, press, opacity, cross_alpha, actions_alpha) = {
+        let (
+            card_size,
+            drop,
+            x,
+            tilt,
+            swing,
+            press,
+            opacity,
+            cross_alpha,
+            actions_alpha,
+            note,
+            note_color,
+        ) = {
             let card = &self.cards[index];
             (
                 card.card_size,
@@ -618,6 +667,8 @@ impl Scene {
                 card.opacity,
                 card.cross_alpha,
                 card.actions_alpha,
+                card.note,
+                card.note_color,
             )
         };
         if opacity <= 0.01 {
@@ -699,9 +750,25 @@ impl Scene {
         if actions_alpha > 0.01 {
             let a = self.actions;
             let left = (layout::CARD_WIDTH - a.total_width) * 0.5;
-            let top = layout::actions_top(card_h);
+            let top = layout::actions_top_for(card_h, note);
             let copy = RectF::from_xywh(left, top, a.copy_width, a.height);
             let open = RectF::from_xywh(left + a.copy_width + a.gap, top, a.open_width, a.height);
+            if note {
+                // The colour dots sit above the buttons in their own glass pill.
+                let pill = layout::swatch_pill(card_h);
+                if renderer.push_opacity(pill.inflated(8.0), actions_alpha) {
+                    renderer.fill_round(pill, pill.height() * 0.5, crate::render::Brush::Glass);
+                    renderer.stroke_card(pill, pill.height() * 0.5, 0.75);
+                    for dot in 0..4 {
+                        renderer.draw_swatch(
+                            layout::swatch_dot(dot, card_h),
+                            dot,
+                            dot == note_color,
+                        );
+                    }
+                    renderer.pop_opacity();
+                }
+            }
             let bounds = RectF::from_xywh(left, top - 8.0, a.total_width, a.height + 16.0);
             if renderer.push_opacity(bounds, actions_alpha) {
                 renderer.draw_pill(copy, TextId::Copy);

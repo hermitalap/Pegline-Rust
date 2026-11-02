@@ -13,8 +13,8 @@ use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_DATA_FLAGS,
-    NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFY_ICON_DATA_FLAGS, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, HICON, HMENU, MENU_ITEM_FLAGS, MF_CHECKED,
@@ -32,6 +32,10 @@ use crate::window::WM_TRAY_CALLBACK;
 const TRAY_ID: u32 = 1;
 /// Capacity of `NOTIFYICONDATAW::szTip` in UTF-16 units.
 const TIP_CHARS: usize = 128;
+/// Capacity of `NOTIFYICONDATAW::szInfo` in UTF-16 units.
+const INFO_CHARS: usize = 256;
+/// Capacity of `NOTIFYICONDATAW::szInfoTitle` in UTF-16 units.
+const INFO_TITLE_CHARS: usize = 64;
 /// The tooltip the WPF app showed.
 const TOOLTIP: &str = "Pegline";
 
@@ -169,6 +173,20 @@ impl Tray {
         }
     }
 
+    /// Shows a balloon tip (used when the clipboard has no text for a note).
+    pub fn show_balloon(&mut self, title: &str, text: &str) {
+        let mut data = self.data(NIF_INFO);
+        data.szInfoTitle = info_field::<{ INFO_TITLE_CHARS }>(title);
+        data.szInfo = info_field::<{ INFO_CHARS }>(text);
+        data.dwInfoFlags = NIIF_INFO;
+        // SAFETY: `data` is fully initialised with NUL-terminated UTF-16 fields
+        // and stays alive for the synchronous call.
+        let shown = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+        if !shown.as_bool() {
+            logging::error("Shell_NotifyIconW(NIF_INFO) failed");
+        }
+    }
+
     /// Shows the context menu at the cursor and returns the chosen command.
     /// Must be called on the UI thread, from the message handler.
     pub fn show_menu(&mut self, state: &MenuState) -> Option<MenuCommand> {
@@ -272,6 +290,15 @@ fn tip_field(text: &str) -> [u16; TIP_CHARS] {
         *slot = unit;
     }
     tip
+}
+
+/// One of the fixed-size UTF-16 fields of `NOTIFYICONDATAW`.
+fn info_field<const N: usize>(text: &str) -> [u16; N] {
+    let mut field = [0u16; N];
+    for (slot, unit) in field.iter_mut().zip(text.encode_utf16().take(N - 1)) {
+        *slot = unit;
+    }
+    field
 }
 
 /// Appends one string item. Check marks, disabled state and the selection id are

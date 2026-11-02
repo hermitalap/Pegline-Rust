@@ -41,6 +41,14 @@ Do not trade features or visual quality for memory; the remaining options (hidde
 swap chain, thumbnail atlas, destroying the idle flight window) are optional. Phase B
 (M5) is unblocked. Read `PLAN.md` §8 before picking the next task.
 
+**Phase B (M5) landed on 2026-11-02**: hover preview, sticky notes, the annotation
+editor for `Ctrl+Alt+S`, the drag ghost, the three sounds, the shortcut recorder and
+the full tray menu are implemented, with the new `en/es/zh` strings. Phase C is
+measured in `PLAN.md` §3.3: 1.29 MB exe, ~105 ms cold start, 60.5 fps on the line,
+200 consecutive captures settling at +3.7%, and pooled helper windows released after
+10–30 s idle. The remaining acceptance gaps are a 120 Hz display, a second monitor
+and sleep/wake; do not invent numbers for them.
+
 ## Read first
 
 1. `PLAN.md` — milestones, budget, decisions, open questions.

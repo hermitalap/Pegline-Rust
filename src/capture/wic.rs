@@ -86,6 +86,25 @@ pub fn decode_bytes(bytes: &[u8], max_side: u32) -> Result<ImageData, String> {
     decode_frame(&factory, &frame, max_side)
 }
 
+/// Writes PNG bytes to `path` atomically (temporary file, then rename).
+pub fn write_png_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let temp_path = temp_path_for(path);
+    if let Err(error) = std::fs::write(&temp_path, bytes) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!("write {}: {error}", temp_path.display()));
+    }
+    // The temporary file is closed; rename replaces the target atomically so a
+    // watcher never sees a half-written picture.
+    std::fs::rename(&temp_path, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!(
+            "std::fs::rename({} -> {}): {error}",
+            temp_path.display(),
+            path.display()
+        )
+    })
+}
+
 /// Encodes premultiplied BGRA to a PNG file, writing a temporary file first.
 pub fn encode_png(path: &Path, image: &ImageData) -> Result<(), String> {
     let temp_path = temp_path_for(path);

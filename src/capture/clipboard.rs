@@ -143,6 +143,23 @@ pub fn write_image(
     Ok(())
 }
 
+/// Writes plain text (`CF_UNICODETEXT`), used when a note is copied.
+pub fn write_text(hwnd: HWND, text: &str) -> Result<(), String> {
+    let mut units: Vec<u16> = text.encode_utf16().collect();
+    units.push(0);
+    let bytes: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+
+    open_clipboard(Some(hwnd))?;
+    let guard = ClipboardGuard::new();
+    // SAFETY: the clipboard is open and owned by this thread; emptying it drops
+    // the previous owner's data and makes our window the owner.
+    unsafe { EmptyClipboard() }.map_err(|error| format!("EmptyClipboard: {error}"))?;
+    set_clipboard_bytes(u32::from(CF_UNICODETEXT.0), &bytes)?;
+    guard.close()?;
+    mark_self_write();
+    Ok(())
+}
+
 /// Marks "we just wrote the clipboard"; suppresses the notification for 1 s.
 pub fn mark_self_write() {
     LAST_SELF_WRITE_MS.store(now_millis(), Ordering::Relaxed);

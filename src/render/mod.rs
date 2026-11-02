@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
     D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
     D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry,
@@ -96,6 +96,8 @@ pub enum Brush {
     Glass,
     /// Solid white, used for highlights.
     White,
+    /// Opaque paper: the hover preview's frame, #F8F8F8.
+    Paper,
     /// The cross glyph.
     CrossInk,
 }
@@ -250,12 +252,17 @@ struct Palette {
     hint_ink: ID2D1SolidColorBrush,
     glass: ID2D1SolidColorBrush,
     white: ID2D1SolidColorBrush,
+    paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
     pin_slot: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
     /// Vertical gradient from (0,0) to (0,1); scaled per card.
     border: ID2D1LinearGradientBrush,
+    /// The four note colours, indexed like `notes::PALETTE`.
+    swatches: [ID2D1SolidColorBrush; 4],
+    /// Hairline around a colour dot: black at 31% opacity.
+    swatch_edge: ID2D1SolidColorBrush,
 }
 
 impl Palette {
@@ -283,11 +290,19 @@ impl Palette {
             hint_ink: solid(context, [0x46, 0x46, 0x46], 1.0)?,
             glass: solid(context, [0xF7, 0xF7, 0xF7], 0xB8 as f32 / 255.0)?,
             white: solid(context, [0xFF, 0xFF, 0xFF], 1.0)?,
+            paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
             pin_slot: solid(context, [0, 0, 0], 0x52 as f32 / 255.0)?,
             metal,
             metal_edge,
             border,
+            swatches: [
+                solid(context, split(crate::notes::PALETTE[0].edge), 1.0)?,
+                solid(context, split(crate::notes::PALETTE[1].edge), 1.0)?,
+                solid(context, split(crate::notes::PALETTE[2].edge), 1.0)?,
+                solid(context, split(crate::notes::PALETTE[3].edge), 1.0)?,
+            ],
+            swatch_edge: solid(context, [0, 0, 0], 0x50 as f32 / 255.0)?,
         })
     }
 
@@ -297,6 +312,7 @@ impl Palette {
             Brush::HintInk => &self.hint_ink,
             Brush::Glass => &self.glass,
             Brush::White => &self.white,
+            Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
         }
     }
@@ -817,6 +833,59 @@ impl Renderer {
         }
     }
 
+    /// Draws one note colour dot, with a check mark when it is the active one.
+    pub fn draw_swatch(&self, rect: RectF, color: usize, selected: bool) {
+        let (cx, cy) = rect.center();
+        let radius = rect.width().min(rect.height()) * 0.5;
+        let ellipse = D2D1_ELLIPSE {
+            point: Vector2 { X: cx, Y: cy },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let brush = &self.palette.swatches[color.min(3)];
+        // SAFETY: the ellipse and both brushes are live values owned by this
+        // renderer; the context is drawing.
+        unsafe {
+            self.context.FillEllipse(&ellipse, brush);
+            self.context
+                .DrawEllipse(&ellipse, &self.palette.swatch_edge, 0.75, None);
+        }
+        if selected {
+            let ink = self.palette.solid(Brush::CrossInk);
+            // A tick, not a cross: down-right then up-right, scaled to the dot.
+            let unit = radius * 0.55;
+            // SAFETY: as above; the brush stays alive for the call.
+            unsafe {
+                self.context.DrawLine(
+                    Vector2 {
+                        X: cx - unit * 0.8,
+                        Y: cy,
+                    },
+                    Vector2 {
+                        X: cx - unit * 0.15,
+                        Y: cy + unit * 0.6,
+                    },
+                    ink,
+                    1.4,
+                    None,
+                );
+                self.context.DrawLine(
+                    Vector2 {
+                        X: cx - unit * 0.15,
+                        Y: cy + unit * 0.6,
+                    },
+                    Vector2 {
+                        X: cx + unit * 0.9,
+                        Y: cy - unit * 0.55,
+                    },
+                    ink,
+                    1.4,
+                    None,
+                );
+            }
+        }
+    }
+
     /// Draws a glass pill with its label centred, in the current transform.
     pub fn draw_pill(&mut self, rect: RectF, label: TextId) {
         let radius = rect.height() * 0.5;
@@ -1294,6 +1363,15 @@ fn d2d_rect(rect: RectF) -> D2D_RECT_F {
         right: rect.right,
         bottom: rect.bottom,
     }
+}
+
+/// `0xRRGGBB` to the `[r, g, b]` triples the brush helpers take.
+fn split(value: u32) -> [u8; 3] {
+    [
+        ((value >> 16) & 0xFF) as u8,
+        ((value >> 8) & 0xFF) as u8,
+        (value & 0xFF) as u8,
+    ]
 }
 
 fn stop(position: f32, rgb: [u8; 3], alpha: f32) -> D2D1_GRADIENT_STOP {

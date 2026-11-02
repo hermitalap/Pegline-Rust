@@ -4,6 +4,8 @@
 //! Everything here is in DIP and has no Win32 dependency, so it is the part of
 //! the app that can be unit tested without a desktop.
 
+use crate::types::RectF;
+
 /// Height of the strip window, DIP.
 pub const PANEL_HEIGHT: f32 = 210.0;
 /// Height of the rope at both ends, DIP.
@@ -22,6 +24,14 @@ pub const ACTIONS_HEIGHT: f32 = 26.0;
 pub const SWATCHES_HEIGHT: f32 = 22.0;
 /// Gap between the swatches and the buttons, DIP.
 pub const ROW_GAP: f32 = 4.0;
+/// Diameter of one note colour dot, DIP.
+pub const SWATCH_SIZE: f32 = 15.0;
+/// Gap between two note colour dots, DIP.
+pub const SWATCH_GAP: f32 = 6.0;
+/// Horizontal padding inside the swatch pill, DIP.
+pub const SWATCH_PADDING: f32 = 6.0;
+/// Width of the four-dot pill: 6 + 15×4 + 6×3 + 6.
+pub const SWATCH_ROW_WIDTH: f32 = SWATCH_PADDING * 2.0 + SWATCH_SIZE * 4.0 + SWATCH_GAP * 3.0;
 /// Card corner radius, DIP.
 pub const CARD_RADIUS: f32 = 16.0;
 /// Photo inset inside the card, DIP.
@@ -107,6 +117,37 @@ pub fn card_top(x: f32, width: f32, drop: f32) -> f32 {
 /// Top of the button row relative to the card's top.
 pub fn actions_top(card_height: f32) -> f32 {
     CARD_OFFSET_BELOW_TOP + card_height + ACTIONS_GAP
+}
+
+/// Top of the button row for a note, which keeps its swatch row above it.
+pub fn actions_top_for(card_height: f32, note: bool) -> f32 {
+    actions_top(card_height) + if note { SWATCHES_HEIGHT + ROW_GAP } else { 0.0 }
+}
+
+/// Top of the colour swatch pill relative to the card's top.
+pub fn swatches_top(card_height: f32) -> f32 {
+    actions_top(card_height)
+}
+
+/// The pill holding the four colour dots, relative to the card's top.
+pub fn swatch_pill(card_height: f32) -> RectF {
+    RectF::from_xywh(
+        (CARD_WIDTH - SWATCH_ROW_WIDTH) * 0.5,
+        swatches_top(card_height),
+        SWATCH_ROW_WIDTH,
+        SWATCHES_HEIGHT,
+    )
+}
+
+/// One colour dot inside the pill, relative to the card's top.
+pub fn swatch_dot(index: usize, card_height: f32) -> RectF {
+    let pill = swatch_pill(card_height);
+    RectF::from_xywh(
+        pill.left + SWATCH_PADDING + index as f32 * (SWATCH_SIZE + SWATCH_GAP),
+        pill.top + (SWATCHES_HEIGHT - SWATCH_SIZE) * 0.5,
+        SWATCH_SIZE,
+        SWATCH_SIZE,
+    )
 }
 
 /// Top of the "Copied" pill relative to the card's top; the pill is centred in

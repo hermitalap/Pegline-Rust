@@ -12,13 +12,17 @@
 pub mod app;
 pub mod capture;
 pub mod dragdrop;
+pub mod editor;
 pub mod i18n;
 pub mod layout;
 pub mod logging;
+pub mod notes;
+pub mod preview;
 pub mod render;
 pub mod scene;
 pub mod settings;
 pub mod shortcut;
+pub mod sound;
 pub mod spring;
 pub mod tray;
 pub mod types;

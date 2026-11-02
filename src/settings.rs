@@ -22,6 +22,46 @@ pub mod keys {
     pub const SNIP_KEY: &str = "snipKey";
     pub const NOTE_KEY: &str = "noteKey";
     pub const FPS: &str = "fps";
+    /// Prefix of the per-note colour keys (`noteColor:<file name>`).
+    pub const NOTE_COLOR_PREFIX: &str = "noteColor:";
+}
+
+/// How the frame loop paces itself (`fps=auto|60|120`, BEHAVIOR §12.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FpsCap {
+    /// Follow the display refresh rate: `Present(1, 0)` on every frame.
+    Auto,
+    /// Never present faster than 60 Hz, even on a 120 Hz display.
+    Hz60,
+    /// Never present faster than 120 Hz.
+    Hz120,
+}
+
+impl FpsCap {
+    pub fn parse(text: &str) -> Self {
+        match text.trim() {
+            "60" => Self::Hz60,
+            "120" => Self::Hz120,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Hz60 => "60",
+            Self::Hz120 => "120",
+        }
+    }
+
+    /// Minimum frame period in seconds, or 0 for "whatever the display does".
+    pub fn period(self) -> f64 {
+        match self {
+            Self::Auto => 0.0,
+            Self::Hz60 => 1.0 / 60.0,
+            Self::Hz120 => 1.0 / 120.0,
+        }
+    }
 }
 
 /// One parsed `key=value` pair.
@@ -144,6 +184,24 @@ impl Settings {
         self.set_bool(keys::SOUND_OFF, off);
         self.save();
     }
+
+    pub fn fps_cap(&self) -> FpsCap {
+        FpsCap::parse(self.string(keys::FPS).unwrap_or("auto"))
+    }
+
+    /// The note colour index (0–3) stored for a note file name.
+    pub fn note_color(&self, file_name: &str) -> usize {
+        self.string(&format!("{}{}", keys::NOTE_COLOR_PREFIX, file_name))
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|color| color.min(3))
+            .unwrap_or(0)
+    }
+
+    pub fn set_note_color(&mut self, file_name: &str, color: usize) {
+        let key = format!("{}{}", keys::NOTE_COLOR_PREFIX, file_name);
+        self.set_string(&key, &color.min(3).to_string());
+        self.save();
+    }
 }
 
 /// Reads `pegged.txt`: one absolute path per line, CRLF, no quoting.
@@ -219,5 +277,35 @@ mod tests {
         assert!(!settings.bool("c"));
         assert!(settings.bool("d"));
         assert!(!settings.bool("missing"));
+    }
+
+    #[test]
+    fn frame_cap_parses_and_defaults_to_auto() {
+        let mut settings = Settings {
+            values: parse(""),
+            path: PathBuf::new(),
+        };
+        assert_eq!(settings.fps_cap(), FpsCap::Auto);
+        settings.set_string(keys::FPS, "60");
+        assert_eq!(settings.fps_cap(), FpsCap::Hz60);
+        settings.set_string(keys::FPS, "120");
+        assert_eq!(settings.fps_cap(), FpsCap::Hz120);
+        settings.set_string(keys::FPS, "bogus");
+        assert_eq!(settings.fps_cap(), FpsCap::Auto);
+        assert_eq!(FpsCap::Hz60.period(), 1.0 / 60.0);
+        assert_eq!(FpsCap::Auto.period(), 0.0);
+    }
+
+    #[test]
+    fn note_colors_are_keyed_by_file_name_and_clamped() {
+        let mut settings = Settings {
+            values: parse(""),
+            path: PathBuf::new(),
+        };
+        assert_eq!(settings.note_color("便签 2026-11-02 120000.txt"), 0);
+        settings.set_string("noteColor:便签 2026-11-02 120000.txt", "2");
+        assert_eq!(settings.note_color("便签 2026-11-02 120000.txt"), 2);
+        settings.set_string("noteColor:x.txt", "99");
+        assert_eq!(settings.note_color("x.txt"), 3);
     }
 }

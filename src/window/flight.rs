@@ -6,6 +6,8 @@
 //! shrunk to 2x2 so it gives its surface back. Its render thread owns the swap
 //! chain and the timeline; the UI thread only places, shows and hides it.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -67,6 +69,7 @@ pub enum FlightEvent {
 enum FlightCommand {
     Fly {
         token: u64,
+        generation: u64,
         image: ImageData,
         from: RectI,
         to: RectI,
@@ -75,6 +78,7 @@ enum FlightCommand {
     },
     Drop {
         token: u64,
+        generation: u64,
         image: ImageData,
         rect: RectI,
         tilt: f32,
@@ -97,6 +101,11 @@ pub struct Flight {
     tx: Sender<FlightCommand>,
     join: Option<JoinHandle<()>>,
     visible: bool,
+    /// Bumped for every animation; the render thread abandons the one it is
+    /// running when the counter moves, so a new capture never waits behind an
+    /// old flight (BEHAVIOR §3.8).
+    interrupt: Arc<AtomicU64>,
+    generation: u64,
 }
 
 impl Flight {
@@ -138,11 +147,13 @@ impl Flight {
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let send_hwnd = SendHwnd(hwnd);
+        let interrupt = Arc::new(AtomicU64::new(0));
+        let thread_interrupt = Arc::clone(&interrupt);
         let join = thread::Builder::new()
             .name("pegline-flight".to_string())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    flight_thread(send_hwnd, rx, ready_tx, on_event)
+                    flight_thread(send_hwnd, rx, ready_tx, on_event, thread_interrupt)
                 }));
                 if outcome.is_err() {
                     logging::error("panic in the flight render thread");
@@ -174,6 +185,8 @@ impl Flight {
             tx,
             join: Some(join),
             visible: false,
+            interrupt,
+            generation: 0,
         })
     }
 
@@ -197,8 +210,11 @@ impl Flight {
         win32::place_window(self.hwnd, bounds, true);
         win32::show_no_activate(self.hwnd);
         self.visible = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.interrupt.store(self.generation, Ordering::Relaxed);
         let _ = self.tx.send(FlightCommand::Fly {
             token,
+            generation: self.generation,
             image,
             from,
             to,
@@ -228,8 +244,11 @@ impl Flight {
         win32::place_window(self.hwnd, bounds, true);
         win32::show_no_activate(self.hwnd);
         self.visible = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.interrupt.store(self.generation, Ordering::Relaxed);
         let _ = self.tx.send(FlightCommand::Drop {
             token,
+            generation: self.generation,
             image,
             rect,
             tilt,
@@ -283,6 +302,7 @@ fn flight_thread(
     rx: Receiver<FlightCommand>,
     ready: Sender<Result<(), String>>,
     on_event: Box<dyn Fn(FlightEvent) + Send>,
+    interrupt: Arc<AtomicU64>,
 ) {
     let _com = match window::ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED) {
         Ok(guard) => guard,
@@ -308,6 +328,7 @@ fn flight_thread(
             FlightCommand::Stop => break,
             FlightCommand::Fly {
                 token,
+                generation,
                 image,
                 from,
                 to,
@@ -318,6 +339,8 @@ fn flight_thread(
                     &mut renderer,
                     hwnd.0,
                     token,
+                    generation,
+                    &interrupt,
                     &image,
                     from,
                     to,
@@ -330,6 +353,7 @@ fn flight_thread(
             }
             FlightCommand::Drop {
                 token,
+                generation,
                 image,
                 rect,
                 tilt,
@@ -340,6 +364,8 @@ fn flight_thread(
                     &mut renderer,
                     hwnd.0,
                     token,
+                    generation,
+                    &interrupt,
                     &image,
                     rect,
                     tilt,
@@ -360,6 +386,8 @@ fn run_flight(
     renderer: &mut Renderer,
     hwnd: HWND,
     token: u64,
+    generation: u64,
+    interrupt: &AtomicU64,
     image: &ImageData,
     from: RectI,
     to: RectI,
@@ -379,6 +407,11 @@ fn run_flight(
     let mut frames = 0u32;
     let mut draw_max_ms = 0.0f32;
     loop {
+        // A newer capture takes over: leave without reporting a landing; the app
+        // already made the old card visible again.
+        if interrupt.load(Ordering::Relaxed) != generation {
+            return Ok(());
+        }
         let elapsed = (win32::now_seconds() - start) as f32;
         let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
         let k = ease::in_out_cubic(t);
@@ -437,6 +470,8 @@ fn run_drop(
     renderer: &mut Renderer,
     _hwnd: HWND,
     token: u64,
+    generation: u64,
+    interrupt: &AtomicU64,
     image: &ImageData,
     rect: RectI,
     tilt: f32,
@@ -457,6 +492,9 @@ fn run_drop(
 
     let start = win32::now_seconds();
     loop {
+        if interrupt.load(Ordering::Relaxed) != generation {
+            return Ok(());
+        }
         let elapsed = (win32::now_seconds() - start) as f32;
         let t = (elapsed / DROP_SECONDS).clamp(0.0, 1.0);
         let e = t * t * t;

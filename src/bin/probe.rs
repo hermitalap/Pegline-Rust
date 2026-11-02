@@ -198,6 +198,7 @@ fn run_line(config: &Config) -> Result<String, String> {
                 tilt: (index as f32 * 1.7) - 2.5,
                 arriving: false,
                 image,
+                note: false,
             }),
             &renderer,
             0.0,
@@ -270,6 +271,11 @@ fn run_line(config: &Config) -> Result<String, String> {
         if remaining > 0.0 {
             std::thread::sleep(Duration::from_secs_f64(remaining));
         }
+    }
+    // Static with a longer `--seconds` holds the finished frame on screen so
+    // the private memory can settle before it is sampled.
+    if config.mode == Mode::Static && config.seconds > 1.0 {
+        std::thread::sleep(Duration::from_secs_f64(config.seconds - 1.0));
     }
 
     let (private_mb, ws_mb) = process_memory_mb();

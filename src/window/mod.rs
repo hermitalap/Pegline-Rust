@@ -21,7 +21,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::PCWSTR;
 
 pub mod flight;
+pub mod ghost;
 pub mod overlay;
+pub mod preview;
+pub mod shortcuts;
 
 use crate::logging;
 
