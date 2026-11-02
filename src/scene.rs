@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use crate::layout;
 use crate::render::{ActionsLayout, Renderer, TextId};
 use crate::spring::{Spring, ease};
-use crate::types::{CardId, CardSpec, FrameSnapshot, HitCard, ImageData, RectF};
+use crate::types::{ActionKind, CardId, CardSpec, FrameSnapshot, HitCard, ImageData, RectF};
 
 /// Time for the "Copied" label, seconds.
 const COPIED_SECONDS: f64 = 1.2;
@@ -45,6 +45,8 @@ pub enum Command {
     RemoveCard { id: CardId },
     /// Which card the pointer is over.
     Hover(Option<CardId>),
+    /// Which hover button the pointer is over, if any.
+    HoverAction(Option<(CardId, ActionKind)>),
     /// Which card is being held down.
     Press(Option<CardId>),
     /// Which card is being dragged (its frame goes translucent).
@@ -222,6 +224,21 @@ impl Card {
         )
     }
 
+    /// The copy and open pills, in slot-local DIP.
+    fn button_rects(&self, slot_left: f32, actions: &ActionsLayout) -> (RectF, RectF) {
+        let left = slot_left + (layout::CARD_WIDTH - actions.total_width) * 0.5;
+        let top = layout::actions_top_for(self.card_size.1, self.note);
+        (
+            RectF::from_xywh(left, top, actions.copy_width, actions.height),
+            RectF::from_xywh(
+                left + actions.copy_width + actions.gap,
+                top,
+                actions.open_width,
+                actions.height,
+            ),
+        )
+    }
+
     /// The swatch pill and its four dots, in slot-local DIP.
     fn swatch_rects(&self, slot_left: f32) -> [RectF; 4] {
         let mut rects = [RectF::default(); 4];
@@ -262,6 +279,7 @@ pub struct Scene {
     hide_from: f32,
     cards: Vec<Card>,
     hover: Option<CardId>,
+    hover_action: Option<(CardId, ActionKind)>,
     pressed: Option<CardId>,
     dragging: Option<CardId>,
     copied: Option<CardId>,
@@ -295,6 +313,7 @@ impl Scene {
             hide_from: layout::HIDDEN_SLIDE,
             cards: Vec::new(),
             hover: None,
+            hover_action: None,
             pressed: None,
             dragging: None,
             copied: None,
@@ -363,6 +382,7 @@ impl Scene {
         self.visible = visible;
         if !visible {
             self.hover = None;
+            self.hover_action = None;
             self.pressed = None;
             self.dirty = true;
         }
@@ -430,6 +450,9 @@ impl Scene {
                     if self.hover == Some(id) {
                         self.hover = None;
                     }
+                    if self.hover_action.is_some_and(|(hovered, _)| hovered == id) {
+                        self.hover_action = None;
+                    }
                     if self.pressed == Some(id) {
                         self.pressed = None;
                     }
@@ -446,6 +469,13 @@ impl Scene {
             Command::Hover(id) => {
                 if self.hover != id {
                     self.hover = id;
+                    self.hover_action = None;
+                    self.dirty = true;
+                }
+            }
+            Command::HoverAction(action) => {
+                if self.hover_action != action {
+                    self.hover_action = action;
                     self.dirty = true;
                 }
             }
@@ -458,6 +488,9 @@ impl Scene {
             Command::Dragging(id) => {
                 if self.dragging != id {
                     self.dragging = id;
+                    if id.is_some() {
+                        self.hover_action = None;
+                    }
                     self.dirty = true;
                 }
             }
@@ -651,11 +684,18 @@ impl Scene {
                 + card.drop.value
                 + self.slide.value;
             let frame = card.frame_rect(slot_left).offset(0.0, slot_top);
-            let actions = if self.hover == Some(card.id) && self.dragging.is_none() {
+            let hovered = self.hover == Some(card.id) && self.dragging.is_none();
+            let actions = if hovered {
                 card.actions_rect(slot_left, &self.actions)
                     .offset(0.0, slot_top)
             } else {
                 RectF::default()
+            };
+            let (copy_button, open_button) = if hovered {
+                let (copy, open) = card.button_rects(slot_left, &self.actions);
+                (copy.offset(0.0, slot_top), open.offset(0.0, slot_top))
+            } else {
+                (RectF::default(), RectF::default())
             };
             let swatches = if card.note
                 && self.hover == Some(card.id)
@@ -671,6 +711,8 @@ impl Scene {
                 id: card.id,
                 frame,
                 actions,
+                copy_button,
+                open_button,
                 note: card.note,
                 swatches,
             });
@@ -697,8 +739,9 @@ impl Scene {
                 text_w + 32.0,
                 text_h + 16.0,
             );
-            if renderer.push_opacity(bounds, self.hint_alpha) {
-                renderer.draw_hint(center_x, center_y);
+            let pushed = renderer.push_opacity(bounds, self.hint_alpha);
+            renderer.draw_hint(center_x, center_y);
+            if pushed {
                 renderer.pop_opacity();
             }
         }
@@ -715,6 +758,7 @@ impl Scene {
 
     fn draw_card(&mut self, renderer: &mut Renderer, index: usize, slot_left: f32, hovered: bool) {
         let (
+            id,
             card_size,
             drop,
             x,
@@ -729,6 +773,7 @@ impl Scene {
         ) = {
             let card = &self.cards[index];
             (
+                card.id,
                 card.card_size,
                 card.drop.value,
                 card.x.value,
@@ -779,11 +824,10 @@ impl Scene {
             card_h + 60.0 + layout::ACTIONS_HEIGHT + 20.0,
         );
         renderer.set_transform(transform);
-        if !renderer.push_opacity(bounds, opacity) {
-            // Fully opaque cards skip the layer.
-        }
+        // A fully opaque card skips the layer; the card is still drawn.
+        let pushed = renderer.push_opacity(bounds, opacity);
 
-        renderer.draw_shadow(frame, if hovered { 0.26 } else { 0.18 });
+        renderer.draw_shadow(frame, if hovered { 0.26 } else { 0.18 }, hovered);
         renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
         if let Some(image) = self.cards[index].image.as_ref() {
             let photo = RectF::from_xywh(
@@ -812,8 +856,9 @@ impl Scene {
                 text_w + 20.0,
                 self.copied_height,
             );
-            if renderer.push_opacity(pill.inflated(8.0), copied_alpha) {
-                renderer.draw_pill(pill, TextId::Copied);
+            let pushed = renderer.push_opacity(pill.inflated(8.0), copied_alpha);
+            renderer.draw_pill(pill, TextId::Copied, false);
+            if pushed {
                 renderer.pop_opacity();
             }
         }
@@ -821,34 +866,47 @@ impl Scene {
         if actions_alpha > 0.01 {
             let a = self.actions;
             let left = (layout::CARD_WIDTH - a.total_width) * 0.5;
-            let top = layout::actions_top_for(card_h, note);
+            // The row rises into place as it fades in, like the original's
+            // -4 DIP translate.
+            let lift = -4.0 * (1.0 - actions_alpha);
+            let top = layout::actions_top_for(card_h, note) + lift;
             let copy = RectF::from_xywh(left, top, a.copy_width, a.height);
             let open = RectF::from_xywh(left + a.copy_width + a.gap, top, a.open_width, a.height);
             if note {
                 // The colour dots sit above the buttons in their own glass pill.
-                let pill = layout::swatch_pill(card_h);
-                if renderer.push_opacity(pill.inflated(8.0), actions_alpha) {
-                    renderer.fill_round(pill, pill.height() * 0.5, crate::render::Brush::Glass);
-                    renderer.stroke_card(pill, pill.height() * 0.5, 0.75);
-                    for dot in 0..4 {
-                        renderer.draw_swatch(
-                            layout::swatch_dot(dot, card_h),
-                            dot,
-                            dot == note_color,
-                        );
-                    }
+                let pill = layout::swatch_pill(card_h).offset(0.0, lift);
+                let pushed = renderer.push_opacity(pill.inflated(8.0), actions_alpha);
+                renderer.fill_round(pill, pill.height() * 0.5, crate::render::Brush::Glass);
+                renderer.stroke_card(pill, pill.height() * 0.5, 0.75);
+                for dot in 0..4 {
+                    renderer.draw_swatch(
+                        layout::swatch_dot(dot, card_h).offset(0.0, lift),
+                        dot,
+                        dot == note_color,
+                    );
+                }
+                if pushed {
                     renderer.pop_opacity();
                 }
             }
             let bounds = RectF::from_xywh(left, top - 8.0, a.total_width, a.height + 16.0);
-            if renderer.push_opacity(bounds, actions_alpha) {
-                renderer.draw_pill(copy, TextId::Copy);
-                renderer.draw_pill(open, TextId::Open);
+            let pushed = renderer.push_opacity(bounds, actions_alpha);
+            renderer.draw_pill(
+                copy,
+                TextId::Copy,
+                self.hover_action == Some((id, ActionKind::Copy)),
+            );
+            renderer.draw_pill(
+                open,
+                TextId::Open,
+                self.hover_action == Some((id, ActionKind::Open)),
+            );
+            if pushed {
                 renderer.pop_opacity();
             }
         }
 
-        if opacity < 1.0 {
+        if pushed {
             renderer.pop_opacity();
         }
     }

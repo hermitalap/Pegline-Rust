@@ -110,8 +110,10 @@ pub fn register_class(
     let atom = unsafe { RegisterClassW(&class) };
     if atom == 0 {
         let error = windows::core::Error::from_thread();
-        // 1410 = class already registered, which is fine on a second window.
-        if error.code().0 as u32 != 0x8000_0582 {
+        // ERROR_CLASS_ALREADY_EXISTS (1410), already normalised by the API:
+        // re-registering is expected because every helper window is created on
+        // demand and lives in the same process.
+        if error.code().0 as u32 != 0x8007_0582 {
             // Not fatal: the window may still be created if the class exists.
             logging::error(format!("RegisterClassW failed: {error}"));
         }

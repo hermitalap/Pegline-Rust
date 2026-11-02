@@ -74,14 +74,17 @@ pub enum Present {
     DeviceLost,
 }
 
-/// Baked card shadow texture size, DIP.
-const SHADOW_TOTAL_DIP: f32 = 160.0;
-/// Blur pad on each side of the card, DIP.
-const SHADOW_PAD_DIP: f32 = 24.0;
-/// Nine-slice corner, DIP.
-const SHADOW_CORNER_DIP: f32 = 56.0;
-/// Downward offset of the card shadow, DIP.
-const SHADOW_OFFSET_DIP: f32 = 4.0;
+/// The unblurred card area baked into the card shadow, DIP.
+const SHADOW_CARD_DIP: f32 = 112.0;
+/// Card corner radius inside that area, DIP.
+const SHADOW_RADIUS_DIP: f32 = 16.0;
+/// WPF `DropShadowEffect.BlurRadius`: 20 idle, 28 hovered. The Gaussian sigma
+/// used for the bake is 0.4 × the radius, which matches the WPF falloff.
+const SHADOW_BLUR_DIP: f32 = 20.0;
+const SHADOW_HOVER_BLUR_DIP: f32 = 28.0;
+/// Downward offset of the card shadow, DIP (WPF `ShadowDepth`).
+const SHADOW_OFFSET_DIP: f32 = 5.0;
+const SHADOW_HOVER_OFFSET_DIP: f32 = 8.0;
 /// Number of Direct2D layers kept for nested opacity groups.
 const LAYER_POOL: usize = 6;
 
@@ -94,6 +97,8 @@ pub enum Brush {
     HintInk,
     /// Glass card background: #B8F7F7F7.
     Glass,
+    /// Hovered button background: #F2FFFFFF.
+    GlassLit,
     /// Solid white, used for highlights.
     White,
     /// Opaque paper: the hover preview's frame, #F8F8F8.
@@ -226,11 +231,20 @@ fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
     metrics
 }
 
-struct Shadow {
+/// One baked nine-patch shadow.
+struct ShadowBake {
     bitmap: ID2D1Bitmap1,
     total_dip: f32,
     pad_dip: f32,
     corner_dip: f32,
+    offset_dip: f32,
+}
+
+/// Idle and hovered card shadows. They are baked once at startup; changing the
+/// hover state only selects which texture is blitted (BEHAVIOR §3.3).
+struct Shadow {
+    idle: ShadowBake,
+    hover: ShadowBake,
 }
 
 struct Rope {
@@ -251,6 +265,7 @@ struct Palette {
     ink: ID2D1SolidColorBrush,
     hint_ink: ID2D1SolidColorBrush,
     glass: ID2D1SolidColorBrush,
+    glass_lit: ID2D1SolidColorBrush,
     white: ID2D1SolidColorBrush,
     paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
@@ -289,6 +304,7 @@ impl Palette {
             ink: solid(context, [0x1E, 0x1E, 0x1E], 1.0)?,
             hint_ink: solid(context, [0x46, 0x46, 0x46], 1.0)?,
             glass: solid(context, [0xF7, 0xF7, 0xF7], 0xB8 as f32 / 255.0)?,
+            glass_lit: solid(context, [0xFF, 0xFF, 0xFF], 0xF2 as f32 / 255.0)?,
             white: solid(context, [0xFF, 0xFF, 0xFF], 1.0)?,
             paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
@@ -311,6 +327,7 @@ impl Palette {
             Brush::Ink => &self.ink,
             Brush::HintInk => &self.hint_ink,
             Brush::Glass => &self.glass,
+            Brush::GlassLit => &self.glass_lit,
             Brush::White => &self.white,
             Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
@@ -330,6 +347,8 @@ pub struct Renderer {
     palette: Palette,
     border_scale: f32,
     shadow: Shadow,
+    /// The clothespin's soft shadow, baked at the same DPI.
+    pin_shadow: ID2D1Bitmap1,
     rope: Option<Rope>,
     texts: Texts,
     masks: HashMap<(u32, u32, u32), ID2D1Geometry>,
@@ -390,11 +409,25 @@ impl Renderer {
             );
         }
         let shadow = Shadow {
-            bitmap: create_shadow_bitmap(&context, dpi_f, dpi_f)?,
-            total_dip: SHADOW_TOTAL_DIP,
-            pad_dip: SHADOW_PAD_DIP,
-            corner_dip: SHADOW_CORNER_DIP,
+            idle: bake_card_shadow(&context, dpi_f, SHADOW_BLUR_DIP, SHADOW_OFFSET_DIP)?,
+            hover: bake_card_shadow(
+                &context,
+                dpi_f,
+                SHADOW_HOVER_BLUR_DIP,
+                SHADOW_HOVER_OFFSET_DIP,
+            )?,
         };
+        let pin_shadow = create_blurred_rect(
+            &context,
+            dpi_f,
+            dpi_f,
+            crate::layout::PIN_WIDTH,
+            crate::layout::PIN_HEIGHT,
+            3.5,
+            1.6,
+            8.0,
+            0.3,
+        )?;
 
         let mut renderer = Self {
             swap_chain,
@@ -407,6 +440,7 @@ impl Renderer {
             palette,
             border_scale: 1.0,
             shadow,
+            pin_shadow,
             rope: None,
             texts,
             masks: HashMap::new(),
@@ -497,7 +531,25 @@ impl Renderer {
         }
         self.target_props.dpiX = self.dpi;
         self.target_props.dpiY = self.dpi;
-        self.shadow.bitmap = create_shadow_bitmap(&self.context, self.dpi, self.dpi)?;
+        self.shadow.idle =
+            bake_card_shadow(&self.context, self.dpi, SHADOW_BLUR_DIP, SHADOW_OFFSET_DIP)?;
+        self.shadow.hover = bake_card_shadow(
+            &self.context,
+            self.dpi,
+            SHADOW_HOVER_BLUR_DIP,
+            SHADOW_HOVER_OFFSET_DIP,
+        )?;
+        self.pin_shadow = create_blurred_rect(
+            &self.context,
+            self.dpi,
+            self.dpi,
+            crate::layout::PIN_WIDTH,
+            crate::layout::PIN_HEIGHT,
+            3.5,
+            1.6,
+            8.0,
+            0.3,
+        )?;
         self.rope = None;
         Ok(())
     }
@@ -601,6 +653,10 @@ impl Renderer {
     }
 
     /// Starts a group that fades as a whole (a card, its buttons, the hint).
+    ///
+    /// Returns true when a layer was pushed. **The caller draws its content
+    /// either way** and pops only when this returned true: an opacity of 1 (or
+    /// an exhausted layer pool) is the fast path, not a reason to skip drawing.
     pub fn push_opacity(&mut self, bounds: RectF, opacity: f32) -> bool {
         if self.layer_depth >= self.layers.len() || opacity >= 1.0 {
             return false;
@@ -714,18 +770,22 @@ impl Renderer {
     ///
     /// `opacity` is the shadow's alpha (0.18 idle, 0.26 hovered); the texture
     /// itself is baked once, so this is nine `DrawBitmap` calls and no blur.
-    pub fn draw_shadow(&self, rect: RectF, opacity: f32) {
+    pub fn draw_shadow(&self, rect: RectF, opacity: f32, hovered: bool) {
         if opacity <= 0.0 {
             return;
         }
-        let shadow = &self.shadow;
+        let shadow = if hovered {
+            &self.shadow.hover
+        } else {
+            &self.shadow.idle
+        };
         let pad = shadow.pad_dip;
         let corner = shadow.corner_dip;
         let total = shadow.total_dip;
         let x0 = rect.left - pad;
-        let y0 = rect.top - pad + SHADOW_OFFSET_DIP;
+        let y0 = rect.top - pad + shadow.offset_dip;
         let x1 = rect.right + pad;
-        let y1 = rect.bottom + pad + SHADOW_OFFSET_DIP;
+        let y1 = rect.bottom + pad + shadow.offset_dip;
         let inner_w = (x1 - x0) - 2.0 * corner;
         let inner_h = (y1 - y0) - 2.0 * corner;
         if inner_w <= 0.0 || inner_h <= 0.0 || total - 2.0 * corner <= 0.0 {
@@ -770,6 +830,26 @@ impl Renderer {
 
     /// Draws the clothespin at `top` in the current transform's coordinates.
     pub fn draw_pin(&mut self, left: f32, top: f32) {
+        // The baked pin shadow: 8 DIP of blur pad, 1.5 DIP down, alpha 0.3.
+        let pad = 8.0;
+        let shadow_dst = RectF::from_xywh(
+            left - pad,
+            top - pad + 1.5,
+            9.0 + pad * 2.0,
+            26.0 + pad * 2.0,
+        );
+        let dst = d2d_rect(shadow_dst);
+        // SAFETY: the baked bitmap is alive and owned by this renderer.
+        unsafe {
+            self.context.DrawBitmap(
+                &self.pin_shadow,
+                Some(&dst),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
+        }
         let body = RectF::from_xywh(left, top, 9.0, 26.0);
         let rounded = rounded(body, 3.5);
         // SAFETY: brushes and context are alive.
@@ -887,9 +967,14 @@ impl Renderer {
     }
 
     /// Draws a glass pill with its label centred, in the current transform.
-    pub fn draw_pill(&mut self, rect: RectF, label: TextId) {
+    /// `lit` is the hover state: the original paints the pill nearly white.
+    pub fn draw_pill(&mut self, rect: RectF, label: TextId, lit: bool) {
         let radius = rect.height() * 0.5;
-        self.fill_round(rect, radius, Brush::Glass);
+        self.fill_round(
+            rect,
+            radius,
+            if lit { Brush::GlassLit } else { Brush::Glass },
+        );
         self.stroke_card(rect, radius, 0.75);
         let (width, height) = self.text_size(label);
         self.draw_text(
@@ -1218,25 +1303,44 @@ fn create_dwrite() -> Result<IDWriteFactory, String> {
         .map_err(|e| format!("DWriteCreateFactory: {e}"))
 }
 
-fn create_shadow_bitmap(
+/// Bakes the soft shadow of one rounded rectangle.
+///
+/// `width_dip`/`height_dip` describe the unblurred shape; `sigma_dip` is the
+/// Gaussian sigma (0.4 × a WPF `BlurRadius`); `pad_dip` is the transparent
+/// margin baked around it. `alpha` scales the shadow's opacity into the bitmap.
+/// The result is a premultiplied black bitmap, drawn once per frame.
+#[allow(clippy::too_many_arguments)]
+fn create_blurred_rect(
     context: &ID2D1DeviceContext,
     dpi_x: f32,
     dpi_y: f32,
+    width_dip: f32,
+    height_dip: f32,
+    radius_dip: f32,
+    sigma_dip: f32,
+    pad_dip: f32,
+    alpha: f32,
 ) -> Result<ID2D1Bitmap1, String> {
     let scale = dpi_x / 96.0;
-    let total_px = (SHADOW_TOTAL_DIP * scale).round().max(32.0) as u32;
-    let pad_px = (SHADOW_PAD_DIP * scale).round().max(4.0);
-    let radius_px = (16.0 * scale).round().max(2.0);
-    let sigma_px = (8.0 * scale).max(1.0);
-    let half = total_px as f32 * 0.5 - pad_px;
-    let center = total_px as f32 * 0.5;
-    let mut pixels = vec![0u8; (total_px * total_px * 4) as usize];
-    for y in 0..total_px {
-        for x in 0..total_px {
-            let px = x as f32 + 0.5 - center;
-            let py = y as f32 + 0.5 - center;
-            let qx = px.abs() - (half - radius_px);
-            let qy = py.abs() - (half - radius_px);
+    let width_px = (width_dip * scale).round().max(2.0);
+    let height_px = (height_dip * scale).round().max(2.0);
+    let pad_px = (pad_dip * scale).round().max(2.0);
+    let total_w = (width_px + pad_px * 2.0) as u32;
+    let total_h = (height_px + pad_px * 2.0) as u32;
+    let radius_px = (radius_dip * scale).round().max(1.0);
+    let sigma_px = (sigma_dip * scale).max(0.75);
+    let center_x = pad_px + width_px * 0.5;
+    let center_y = pad_px + height_px * 0.5;
+    let half_w = width_px * 0.5;
+    let half_h = height_px * 0.5;
+    let mut pixels = vec![0u8; (total_w * total_h * 4) as usize];
+    for y in 0..total_h {
+        for x in 0..total_w {
+            let px = x as f32 + 0.5 - center_x;
+            let py = y as f32 + 0.5 - center_y;
+            // Signed distance to a rounded rectangle, the usual q/d form.
+            let qx = px.abs() - (half_w - radius_px);
+            let qy = py.abs() - (half_h - radius_px);
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
             let inside = qx.max(qy).min(0.0);
             let distance = outside + inside - radius_px;
@@ -1245,12 +1349,12 @@ fn create_shadow_bitmap(
             } else {
                 (-0.5 * (distance / sigma_px).powi(2)).exp()
             };
-            let alpha = (coverage * 255.0).clamp(0.0, 255.0) as u8;
-            let i = ((y * total_px + x) * 4) as usize;
+            let value = (coverage * alpha * 255.0).clamp(0.0, 255.0) as u8;
+            let i = ((y * total_w + x) * 4) as usize;
             pixels[i] = 0;
             pixels[i + 1] = 0;
             pixels[i + 2] = 0;
-            pixels[i + 3] = alpha;
+            pixels[i + 3] = value;
         }
     }
     let props = D2D1_BITMAP_PROPERTIES1 {
@@ -1264,19 +1368,47 @@ fn create_shadow_bitmap(
         colorContext: ManuallyDrop::new(None),
     };
     // SAFETY: `pixels` is alive for the call; D2D copies it.
-    // SAFETY: `pixels` is alive for the call and D2D copies it.
     unsafe {
         context.CreateBitmap(
             windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
-                width: total_px,
-                height: total_px,
+                width: total_w,
+                height: total_h,
             },
             Some(pixels.as_ptr() as *const c_void),
-            total_px * 4,
+            total_w * 4,
             &props,
         )
     }
     .map_err(|e| format!("CreateBitmap(shadow): {e}"))
+}
+
+/// Bakes one of the two card shadows (idle or hovered) with its nine-slice
+/// margins. The texture is 112 DIP of card plus 3σ of blur on each side.
+fn bake_card_shadow(
+    context: &ID2D1DeviceContext,
+    dpi: f32,
+    blur_dip: f32,
+    offset_dip: f32,
+) -> Result<ShadowBake, String> {
+    let sigma = blur_dip * 0.4;
+    let pad = (sigma * 3.0).ceil().max(8.0);
+    Ok(ShadowBake {
+        bitmap: create_blurred_rect(
+            context,
+            dpi,
+            dpi,
+            SHADOW_CARD_DIP,
+            SHADOW_CARD_DIP,
+            SHADOW_RADIUS_DIP,
+            sigma,
+            pad,
+            1.0,
+        )?,
+        total_dip: SHADOW_CARD_DIP + pad * 2.0,
+        pad_dip: pad,
+        corner_dip: pad + 32.0,
+        offset_dip,
+    })
 }
 
 fn bitmap_width(_context: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> u32 {

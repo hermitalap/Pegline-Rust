@@ -581,14 +581,14 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
     match kind {
         "nothing" => {}
         "rope" => renderer.draw_rope(3008.0),
-        "shadow" => renderer.draw_shadow(rect, 0.18),
+        "shadow" => renderer.draw_shadow(rect, 0.18, false),
         "fill" => renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass),
         "text" => renderer.draw_hint(1504.0, 120.0),
         "card6" => {
             for index in 0..6 {
                 let x = 300.0 + index as f32 * 400.0;
                 let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
-                renderer.draw_shadow(r, 0.18);
+                renderer.draw_shadow(r, 0.18, false);
                 renderer.fill_round(r, 16.0, pegline::render::Brush::Glass);
                 renderer.stroke_card(r, 16.0, 0.75);
             }
@@ -602,7 +602,7 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
             }
         }
         "card" => {
-            renderer.draw_shadow(rect, 0.18);
+            renderer.draw_shadow(rect, 0.18, false);
             renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass);
             renderer.stroke_card(rect, 16.0, 0.75);
         }

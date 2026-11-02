@@ -51,6 +51,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, DWriteCreateFactory,
     IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
@@ -70,7 +71,8 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, Co
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
@@ -103,6 +105,9 @@ pub enum EditorEvent {
 const CLASS_NAME: PCWSTR = w!("PeglineEditor");
 /// Private notification: a result is waiting in `Shared::event`.
 const WM_APP_EDITOR_DONE: u32 = WM_APP + 10;
+/// `WM_MOUSELEAVE` lives in `Win32_UI_Controls`, a feature this crate does not
+/// otherwise need.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// Client size at 100 % scale, DIP.
 const CLIENT_WIDTH_DIP: f32 = 1120.0;
@@ -137,8 +142,10 @@ const BUTTON_RADIUS: f32 = 5.0;
 const CHROME_TOOLBAR: u32 = 0x25_25_26;
 const CHROME_SEPARATOR: u32 = 0x3E_3E_42;
 const CHROME_BUTTON: u32 = 0x2D_2D_30;
+const CHROME_BUTTON_HOVER: u32 = 0x3E_3E_42;
 const CHROME_BUTTON_BORDER: u32 = 0x50_50_54;
 const CHROME_ACCENT: u32 = 0x0E_63_9C;
+const CHROME_ACCENT_HOVER: u32 = 0x11_77_BB;
 const CHROME_ACCENT_BORDER: u32 = 0x82_C4_FF;
 const CHROME_TEXT: u32 = 0xF0_F0_F0;
 const CHROME_TEXT_DIM: u32 = 0x7F_7F_7F;
@@ -222,6 +229,20 @@ impl Editor {
             )
         }
         .map_err(|error| format!("CreateWindowExW(editor): {error}"))?;
+
+        // The canvas and toolbar are dark, so ask DWM for a dark title bar too.
+        // This is a no-op on Windows versions before 10 1809; the window is
+        // still usable with the normal light caption.
+        let dark = 1i32;
+        // SAFETY: our own window; the attribute expects a DWORD-sized pointer.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const i32 as *const c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
 
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -430,6 +451,8 @@ enum Command {
         y: i32,
     },
     PointerCancel,
+    /// The pointer left the window; clear the toolbar hover state.
+    HoverClear,
     Char(char),
     Backspace,
     FinishText,
@@ -561,10 +584,25 @@ unsafe extern "system" fn editor_wndproc(
             return LRESULT(0);
         }
         WM_MOUSEMOVE => {
-            if shared.captured.load(Ordering::Acquire) {
-                let (x, y) = mouse_xy(lparam);
-                shared.send(Command::PointerMove { x, y });
+            let (x, y) = mouse_xy(lparam);
+            // Ask for WM_MOUSELEAVE too, so a hover highlight never sticks
+            // after the pointer leaves the window.
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: `track` is a valid, fully initialised TRACKMOUSEEVENT for
+            // our own window.
+            unsafe {
+                let _ = TrackMouseEvent(&mut track as *mut _);
             }
+            shared.send(Command::PointerMove { x, y });
+            return LRESULT(0);
+        }
+        WM_MOUSELEAVE => {
+            shared.send(Command::HoverClear);
             return LRESULT(0);
         }
         WM_LBUTTONUP => {
@@ -944,6 +982,7 @@ struct Drag {
 }
 
 /// One toolbar hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Action {
     Tool(usize),
     Color(usize),
@@ -967,6 +1006,8 @@ struct EditorState {
     color: u32,
     width: f32,
     drag: Option<Drag>,
+    /// The toolbar entry under the pointer, for the WPF-style hover state.
+    hover: Option<Action>,
     layout: ToolbarLayout,
     canvas: CanvasLayout,
     width_px: u32,
@@ -1008,6 +1049,7 @@ impl EditorState {
             color: COLORS[0].0,
             width: WIDTHS[1],
             drag: None,
+            hover: None,
             layout,
             canvas,
             width_px,
@@ -1122,6 +1164,11 @@ impl EditorState {
             Command::PointerCancel => {
                 self.drag = None;
                 self.dirty = true;
+            }
+            Command::HoverClear => {
+                if self.hover.take().is_some() {
+                    self.dirty = true;
+                }
             }
             Command::Char(character) => {
                 if self.doc.as_mut().map(|doc| doc.type_char(character)) == Some(true) {
@@ -1239,10 +1286,21 @@ impl EditorState {
     }
 
     fn pointer_move(&mut self, x_px: i32, y_px: i32) {
+        let (x, y) = self.to_dip(x_px, y_px);
         if self.drag.is_none() {
+            // Hover only exists on the toolbar. WPF lit every button under the
+            // pointer; the same state drives the hand cursor and the paint.
+            let hover = if y <= TOOLBAR_HEIGHT {
+                self.hit_action(x, y)
+            } else {
+                None
+            };
+            if self.hover != hover {
+                self.hover = hover;
+                self.dirty = true;
+            }
             return;
         }
-        let (x, y) = self.to_dip(x_px, y_px);
         let source = self.source_clamped(x, y);
         if let Some(drag) = self.drag.as_mut() {
             drag.current = source;
@@ -1475,7 +1533,12 @@ impl EditorState {
         }
         for (index, rect) in self.layout.tools.iter().enumerate() {
             let selected = TOOLS[index] == self.tool;
-            self.paint_button(*rect, selected, false);
+            self.paint_button(
+                *rect,
+                selected,
+                false,
+                self.hover == Some(Action::Tool(index)),
+            );
             let brush = if selected {
                 &self.chrome.white
             } else {
@@ -1493,23 +1556,42 @@ impl EditorState {
                 }
             }
             let selected = rgb == self.color;
+            let hovered = self.hover == Some(Action::Color(index));
             let border = if selected {
                 if rgb == 0xFF_FF_FF {
                     &self.chrome.accent_border
                 } else {
                     &self.chrome.white
                 }
+            } else if hovered {
+                &self.chrome.white
             } else {
                 &self.chrome.button_border
             };
             // SAFETY: the brush and the render target are alive.
             unsafe {
-                rt.DrawRoundedRectangle(&rounded, border, if selected { 2.5 } else { 1.0 }, None);
+                rt.DrawRoundedRectangle(
+                    &rounded,
+                    border,
+                    if selected {
+                        2.5
+                    } else if hovered {
+                        1.5
+                    } else {
+                        1.0
+                    },
+                    None,
+                );
             }
         }
         for (index, rect) in self.layout.widths.iter().enumerate() {
             let selected = (WIDTHS[index] - self.width).abs() < 0.01;
-            self.paint_button(*rect, selected, false);
+            self.paint_button(
+                *rect,
+                selected,
+                false,
+                self.hover == Some(Action::Width(index)),
+            );
             let radius = (WIDTHS[index] * 0.5).min(6.0);
             let center = rect.center();
             let dot = RectF::new(
@@ -1535,6 +1617,7 @@ impl EditorState {
             },
             undo_enabled,
             false,
+            self.hover == Some(Action::Undo),
         );
         self.paint_action(
             self.layout.redo,
@@ -1545,9 +1628,22 @@ impl EditorState {
             },
             redo_enabled,
             false,
+            self.hover == Some(Action::Redo),
         );
-        self.paint_action(self.layout.cancel, &self.labels.cancel, true, false);
-        self.paint_action(self.layout.save, &self.labels.save, true, true);
+        self.paint_action(
+            self.layout.cancel,
+            &self.labels.cancel,
+            true,
+            false,
+            self.hover == Some(Action::Cancel),
+        );
+        self.paint_action(
+            self.layout.save,
+            &self.labels.save,
+            true,
+            true,
+            self.hover == Some(Action::Save),
+        );
     }
 
     fn paint_canvas(&self) {
@@ -1601,10 +1697,17 @@ impl EditorState {
         }
     }
 
-    fn paint_button(&self, rect: RectF, selected: bool, primary: bool) {
+    fn paint_button(&self, rect: RectF, selected: bool, primary: bool, hovered: bool) {
         let rounded = rounded(rect, BUTTON_RADIUS);
         let (fill, border) = if primary || selected {
-            (&self.chrome.accent, &self.chrome.accent_border)
+            let fill = if hovered {
+                &self.chrome.accent_hover
+            } else {
+                &self.chrome.accent
+            };
+            (fill, &self.chrome.accent_border)
+        } else if hovered {
+            (&self.chrome.button_hover, &self.chrome.button_border)
         } else {
             (&self.chrome.button, &self.chrome.button_border)
         };
@@ -1617,8 +1720,15 @@ impl EditorState {
         }
     }
 
-    fn paint_action(&self, rect: RectF, label: &Label, enabled: bool, primary: bool) {
-        self.paint_button(rect, primary, primary);
+    fn paint_action(
+        &self,
+        rect: RectF,
+        label: &Label,
+        enabled: bool,
+        primary: bool,
+        hovered: bool,
+    ) {
+        self.paint_button(rect, primary, primary, hovered);
         let brush = if enabled {
             &self.chrome.white
         } else {
@@ -2141,8 +2251,10 @@ struct Chrome {
     toolbar: ID2D1SolidColorBrush,
     separator: ID2D1SolidColorBrush,
     button: ID2D1SolidColorBrush,
+    button_hover: ID2D1SolidColorBrush,
     button_border: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
+    accent_hover: ID2D1SolidColorBrush,
     accent_border: ID2D1SolidColorBrush,
     text: ID2D1SolidColorBrush,
     text_dim: ID2D1SolidColorBrush,
@@ -2155,8 +2267,10 @@ impl Chrome {
             toolbar: solid(rt, CHROME_TOOLBAR, 1.0)?,
             separator: solid(rt, CHROME_SEPARATOR, 1.0)?,
             button: solid(rt, CHROME_BUTTON, 1.0)?,
+            button_hover: solid(rt, CHROME_BUTTON_HOVER, 1.0)?,
             button_border: solid(rt, CHROME_BUTTON_BORDER, 1.0)?,
             accent: solid(rt, CHROME_ACCENT, 1.0)?,
+            accent_hover: solid(rt, CHROME_ACCENT_HOVER, 1.0)?,
             accent_border: solid(rt, CHROME_ACCENT_BORDER, 1.0)?,
             text: solid(rt, CHROME_TEXT, 1.0)?,
             text_dim: solid(rt, CHROME_TEXT_DIM, 1.0)?,

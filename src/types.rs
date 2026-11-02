@@ -237,6 +237,13 @@ pub struct CardSpec {
     pub note: bool,
 }
 
+/// Which of the two hover buttons a point is over.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionKind {
+    Copy,
+    Open,
+}
+
 /// One card's hit boxes in window DIP, published by the render thread.
 #[derive(Clone, Debug, Default)]
 pub struct HitCard {
@@ -245,6 +252,9 @@ pub struct HitCard {
     pub frame: RectF,
     /// The button row below the frame (empty when never hovered).
     pub actions: RectF,
+    /// The copy and open pills inside `actions`; empty when not hovered.
+    pub copy_button: RectF,
+    pub open_button: RectF,
     /// True for a sticky note.
     pub note: bool,
     /// The four colour dots, in colour order; empty unless the note is hovered.
@@ -264,19 +274,61 @@ pub struct FrameSnapshot {
 
 impl FrameSnapshot {
     pub fn card_at(&self, x_dip: f32, y_dip: f32) -> Option<CardId> {
-        let tolerance = 10.0;
+        self.card_at_impl(x_dip, y_dip, 10.0)
+    }
+
+    /// The same lookup without the generous hover margin. Clicks and context
+    /// menus use this: the 10 DIP slop exists so the pointer keeps hovering
+    /// while it chases a tilted card, not so a click in the empty strip beside
+    /// a card copies it.
+    pub fn card_at_exact(&self, x_dip: f32, y_dip: f32) -> Option<CardId> {
+        self.card_at_impl(x_dip, y_dip, 0.0)
+    }
+
+    fn card_at_impl(&self, x_dip: f32, y_dip: f32, tolerance: f32) -> Option<CardId> {
         self.cards
             .iter()
             .find(|card| {
-                card.frame.inflated(tolerance).contains(x_dip, y_dip)
-                    || (!card.actions.is_empty()
-                        && card.actions.inflated(tolerance).contains(x_dip, y_dip))
-                    || card
-                        .swatches
-                        .iter()
-                        .any(|swatch| swatch.inflated(tolerance).contains(x_dip, y_dip))
+                if card.frame.inflated(tolerance).contains(x_dip, y_dip) {
+                    return true;
+                }
+                if tolerance > 0.0 {
+                    // Hovering may span the whole action row, including the gap
+                    // between the two pills.
+                    if !card.actions.is_empty()
+                        && card.actions.inflated(tolerance).contains(x_dip, y_dip)
+                    {
+                        return true;
+                    }
+                } else if card.copy_button.contains(x_dip, y_dip)
+                    || card.open_button.contains(x_dip, y_dip)
+                {
+                    // A click in the 6 DIP gap between the pills is not a
+                    // button press and should not fall through to the card
+                    // either.
+                    return true;
+                }
+                card.swatches
+                    .iter()
+                    .any(|swatch| swatch.inflated(tolerance).contains(x_dip, y_dip))
             })
             .map(|card| card.id)
+    }
+
+    /// The hover button under the pointer, if any. The published rectangles are
+    /// inflated by the same 10 DIP tolerance the frame uses; the per-button
+    /// rectangles are not, so a click in the 4 DIP gap between the pills is not
+    /// swallowed by either of them.
+    pub fn action_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, ActionKind)> {
+        for card in &self.cards {
+            if card.copy_button.contains(x_dip, y_dip) {
+                return Some((card.id, ActionKind::Copy));
+            }
+            if card.open_button.contains(x_dip, y_dip) {
+                return Some((card.id, ActionKind::Open));
+            }
+        }
+        None
     }
 
     /// The note colour dot under the pointer, if any.
@@ -289,5 +341,60 @@ impl FrameSnapshot {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(id: CardId) -> HitCard {
+        HitCard {
+            id,
+            frame: RectF::new(100.0, 50.0, 300.0, 200.0),
+            actions: RectF::new(120.0, 206.0, 280.0, 232.0),
+            copy_button: RectF::new(120.0, 206.0, 180.0, 232.0),
+            open_button: RectF::new(186.0, 206.0, 280.0, 232.0),
+            note: false,
+            swatches: [RectF::default(); 4],
+        }
+    }
+
+    fn snapshot() -> FrameSnapshot {
+        FrameSnapshot {
+            scale: 2.0,
+            slide: 0.0,
+            width_dip: 3008.0,
+            cards: vec![card(7)],
+        }
+    }
+
+    #[test]
+    fn hover_is_generous_but_clicks_are_exact() {
+        let snapshot = snapshot();
+        // 5 DIP to the left of the frame: hovering still counts.
+        assert_eq!(snapshot.card_at(95.0, 120.0), Some(7));
+        assert_eq!(snapshot.card_at_exact(95.0, 120.0), None);
+        assert_eq!(snapshot.card_at_exact(101.0, 51.0), Some(7));
+        assert_eq!(snapshot.card_at_exact(299.0, 199.0), Some(7));
+        assert_eq!(snapshot.card_at_exact(300.0, 120.0), None);
+    }
+
+    #[test]
+    fn hover_buttons_are_exact_and_split_by_the_gap() {
+        let snapshot = snapshot();
+        assert_eq!(
+            snapshot.action_at(150.0, 220.0),
+            Some((7, ActionKind::Copy))
+        );
+        assert_eq!(
+            snapshot.action_at(200.0, 220.0),
+            Some((7, ActionKind::Open))
+        );
+        // The 6 DIP gap between the two pills belongs to neither, and a click
+        // there does not fall through to the card either.
+        assert_eq!(snapshot.action_at(183.0, 220.0), None);
+        assert_eq!(snapshot.card_at_exact(183.0, 220.0), None);
+        assert_eq!(snapshot.card_at(183.0, 220.0), Some(7));
     }
 }

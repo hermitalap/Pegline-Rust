@@ -39,7 +39,7 @@ use crate::settings::{self, Settings};
 use crate::shortcut;
 use crate::sound::{self, Cue};
 use crate::tray::{MenuCommand, MenuState, Tray};
-use crate::types::{CardId, CardSpec, ImageData, RectI};
+use crate::types::{ActionKind, CardId, CardSpec, ImageData, RectI};
 use crate::win32::{self, Monitor};
 use crate::window::flight::{Flight, FlightEvent};
 use crate::window::ghost::Ghost;
@@ -330,6 +330,8 @@ struct App {
     hide_at: Option<f64>,
 
     hover: Option<CardId>,
+    /// Which of the hovered card's two buttons the pointer is over.
+    hover_action: Option<(CardId, ActionKind)>,
     pressed: Option<Press>,
     last_click: Option<(f64, CardId)>,
     menu_open: bool,
@@ -419,6 +421,7 @@ impl App {
             empty_since: None,
             hide_at: None,
             hover: None,
+            hover_action: None,
             pressed: None,
             last_click: None,
             menu_open: false,
@@ -615,11 +618,18 @@ impl App {
         };
         let current = self.configured_hotkey(setting, default);
         let other = self.configured_hotkey(other_setting, other_default);
-        // Our own registration would make the recorder's availability probe
-        // fail; release it and put it back when the dialog is cancelled.
-        // SAFETY: the hotkey id belongs to this window.
+        let (other_id, other_target) = match target {
+            HotkeyTarget::Snip => (HOTKEY_NOTE, HotkeyTarget::Note),
+            HotkeyTarget::Note => (HOTKEY_SNIP, HotkeyTarget::Snip),
+        };
+        // Release every app hotkey while recording. Otherwise pressing one of
+        // our own combinations triggers it instead of reaching the dialog, and
+        // the recorder's availability probe would fail on our registrations.
+        // SAFETY: the hotkey ids belong to this window.
         unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE);
             let _ = UnregisterHotKey(Some(self.hwnd), id);
+            let _ = UnregisterHotKey(Some(self.hwnd), other_id);
         }
         let validate = move |choice: Option<shortcut::Hotkey>| -> Option<String> {
             let hotkey = choice?;
@@ -669,6 +679,31 @@ impl App {
         match target {
             HotkeyTarget::Snip => self.snip_hotkey_ok = registered,
             HotkeyTarget::Note => self.note_hotkey_ok = registered,
+        }
+        // Put the untouched action and the show/hide combination back.
+        let other_ok = match other {
+            Some(hotkey) => Self::register_hotkey(self.hwnd, other_id, hotkey),
+            None => true,
+        };
+        match other_target {
+            HotkeyTarget::Snip => self.snip_hotkey_ok = other_ok,
+            HotkeyTarget::Note => self.note_hotkey_ok = other_ok,
+        }
+        // SAFETY: the toggle id belongs to this window; the combination is the
+        // fixed Ctrl+Alt+T.
+        let toggle = unsafe {
+            RegisterHotKey(
+                Some(self.hwnd),
+                HOTKEY_TOGGLE,
+                windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(
+                    windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL.0
+                        | windows::Win32::UI::Input::KeyboardAndMouse::MOD_ALT.0,
+                ),
+                'T' as u32,
+            )
+        };
+        if let Err(error) = toggle {
+            logging::error(format!("RegisterHotKey(toggle): {error}"));
         }
     }
 
@@ -980,9 +1015,35 @@ impl App {
                     self.on_note_ready(path, text, image, now)
                 }
                 Event::NoteExisting { path } => {
-                    logging::trace(format!("note already hanging: {}", path.display()));
-                    self.present();
-                    self.reveal(false, PEEK_SECONDS);
+                    // The text exists on disk but is not on the line (it was
+                    // taken down earlier). "Show the note already there" means
+                    // hang that file again instead of just opening an empty
+                    // line or writing a duplicate.
+                    logging::trace(format!("note exists off-line: {}", path.display()));
+                    let color = self.settings.note_color(&file_name(&path));
+                    let tx = self.events_tx.clone();
+                    let thread_path = path.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("pegline-note".to_string())
+                        .spawn(move || {
+                            let Some(text) = notes::read(&thread_path) else {
+                                return;
+                            };
+                            match notes::render(&text, color) {
+                                Some(image) => {
+                                    let _ = tx.send(Event::NoteReady {
+                                        path: thread_path,
+                                        text,
+                                        image,
+                                    });
+                                    window::wake(HWND::default());
+                                }
+                                None => logging::error(format!(
+                                    "note render: {}",
+                                    thread_path.display()
+                                )),
+                            }
+                        });
                 }
                 Event::NoteImage { id, image } => self.on_thumbnail(id, image),
                 Event::ThumbnailReady { id, image, text } => {
@@ -1045,7 +1106,17 @@ impl App {
             self.set_note_color(id, color);
             return;
         }
-        let Some((id, frame)) = self.hit_test(x, y) else {
+        // The two hover buttons are real targets; without this a click on
+        // "Open" would fall through to the card's single-click Copy.
+        if let Some((id, action)) = self.action_at(x, y) {
+            logging::trace(format!("action {action:?} on card {id}"));
+            match action {
+                ActionKind::Copy => self.copy_item(id),
+                ActionKind::Open => self.open_item(id),
+            }
+            return;
+        }
+        let Some((id, frame)) = self.hit_test_exact(x, y) else {
             return;
         };
         // The discard cross is the top-left 26 DIP square of the card.
@@ -1058,6 +1129,7 @@ impl App {
             self.discard(id);
             return;
         }
+        logging::trace(format!("press card {id} at {x},{y}"));
         self.pressed = Some(Press {
             id,
             start: (x, y),
@@ -1127,7 +1199,7 @@ impl App {
         self.on_band_click(x, y);
     }
     fn on_right_up(&mut self, x: i32, y: i32) {
-        let Some((id, _)) = self.hit_test(x, y) else {
+        let Some((id, _)) = self.hit_test_exact(x, y) else {
             return;
         };
         let Some(next) = self.show_card_menu(id, x, y) else {
@@ -1232,11 +1304,24 @@ impl App {
             self.hover = hover;
             self.send_scene(Command::Hover(hover));
         }
+        // The hover buttons light up individually. The scene only publishes
+        // their boxes while the card is hovered, so this is None the rest of
+        // the time.
+        let hover_action = if self.is_revealed {
+            self.action_at(x, y)
+        } else {
+            None
+        };
+        if self.hover_action != hover_action {
+            self.hover_action = hover_action;
+            self.send_scene(Command::HoverAction(hover_action));
+        }
         if let Some(press) = self.pressed.as_mut() {
             let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
             let distance = ((x - press.start.0).abs() + (y - press.start.1).abs()) as f32;
-            if distance > DRAG_DIP * scale {
+            if distance > DRAG_DIP * scale && !press.moved {
                 press.moved = true;
+                logging::trace(format!("press moved {distance:.0}px, drag armed"));
             }
             if !press.moved
                 && !press.handled
@@ -1415,7 +1500,9 @@ impl App {
         self.peek_until = 0.0;
         if !revealed {
             self.hover = None;
+            self.hover_action = None;
             self.send_scene(Command::Hover(None));
+            self.send_scene(Command::HoverAction(None));
             self.hide_preview();
             self.preview_state.reset();
         }
@@ -1425,7 +1512,15 @@ impl App {
     fn toggle(&mut self) {
         if self.is_revealed {
             self.dismiss(win32::now_seconds());
+            // An empty line opened on purpose is dismissed on purpose too; it
+            // must not linger forever behind the 0.7 s empty-line rule.
+            if self.items.is_empty() {
+                self.keep_open = false;
+            }
         } else {
+            // "Open the line on purpose" (WPF `keepOpen`): an empty line stays
+            // down with its hint instead of retracting after 0.7 s.
+            self.keep_open = true;
             let screen = self.pointer_screen();
             if let Some(screen) = screen {
                 if self.screen.map(|current| current.handle) != Some(screen.handle) {
@@ -1964,6 +2059,16 @@ impl App {
     }
 
     fn hit_test(&self, x: i32, y: i32) -> Option<(CardId, crate::types::RectF)> {
+        self.hit_test_impl(x, y, false)
+    }
+
+    /// Hit testing for clicks: no 10 DIP hover slop, so the empty strip around
+    /// a card stays click-through.
+    fn hit_test_exact(&self, x: i32, y: i32) -> Option<(CardId, crate::types::RectF)> {
+        self.hit_test_impl(x, y, true)
+    }
+
+    fn hit_test_impl(&self, x: i32, y: i32, exact: bool) -> Option<(CardId, crate::types::RectF)> {
         let overlay = self.overlay.as_ref()?;
         let rect = win32::window_rect(overlay.hwnd())?;
         let snapshot = overlay.snapshot();
@@ -1971,9 +2076,26 @@ impl App {
         let scale = snapshot.scale.max(0.1);
         let dip_x = (x - rect.left) as f32 / scale;
         let dip_y = (y - rect.top) as f32 / scale;
-        let id = snapshot.card_at(dip_x, dip_y)?;
+        let id = if exact {
+            snapshot.card_at_exact(dip_x, dip_y)?
+        } else {
+            snapshot.card_at(dip_x, dip_y)?
+        };
         let card = snapshot.cards.iter().find(|card| card.id == id)?;
         Some((id, card.frame))
+    }
+
+    /// The copy/open button under the pointer, in device pixels.
+    fn action_at(&self, x: i32, y: i32) -> Option<(CardId, ActionKind)> {
+        let overlay = self.overlay.as_ref()?;
+        let rect = win32::window_rect(overlay.hwnd())?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        let scale = snapshot.scale.max(0.1);
+        snapshot.action_at(
+            (x - rect.left) as f32 / scale,
+            (y - rect.top) as f32 / scale,
+        )
     }
 
     /// The note colour dot under the pointer, in window DIP.
@@ -2091,13 +2213,18 @@ impl App {
             return;
         }
         let version = self.preview_state.version();
-        let Some(anchor) = self.current_card_px(id) else {
+        let Some(card) = self.current_card_px(id) else {
             return;
         };
         let Some(screen) = self.screen else {
             return;
         };
         let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
+        // The preview hangs below the card *and its hover controls*, so the
+        // Copy/Open row stays visible and clickable (the WPF app's HoverFrame
+        // did the same). Without this the big image covers the buttons.
+        let below = (layout::below(item.note) * scale).round() as i32;
+        let anchor = RectI::new(card.left, card.top, card.right, card.bottom + below);
         let bounds = preview::bounds(item.size_px, anchor, screen.work, scale);
         if bounds.is_empty() {
             return;
@@ -2664,6 +2791,7 @@ impl App {
     }
 
     fn start_drag(&mut self, id: CardId) {
+        logging::trace(format!("drag start card {id}"));
         self.pressed = None;
         self.hide_preview();
         self.preview_state.reset();
@@ -2951,7 +3079,10 @@ impl App {
     }
 
     fn install_demo_cards(&mut self) {
-        let now = win32::now_seconds();
+        let directory = win32::local_dir().join("demo");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            logging::error(format!("demo dir: {error}"));
+        }
         for index in 0..3u32 {
             let (w, h) = match index {
                 0 => (480, 270),
@@ -2972,9 +3103,22 @@ impl App {
             let size_px = (w, h);
             let card_size = layout::card_size(w as f32, h as f32);
             let tilt = pseudo_random(id) * 5.0 - 2.5;
+            // Demo cards use real files so the hover preview, copy and open
+            // exercise the same decode path as a real capture. `own` stays
+            // false: the files belong to the demo folder, not the user.
+            let file = directory.join(format!("demo-{index}.png"));
+            let path = match wic::encode_png_bytes(&ImageData::new(w, h, pixels.clone()))
+                .and_then(|bytes| wic::write_png_bytes(&file, &bytes))
+            {
+                Ok(()) => file,
+                Err(error) => {
+                    logging::error(format!("demo card {index}: {error}"));
+                    PathBuf::from(format!("demo://card{index}"))
+                }
+            };
             self.items.push(Item {
                 id,
-                path: PathBuf::from(format!("demo://card{index}")),
+                path,
                 own: false,
                 note: false,
                 color: 0,
@@ -2999,7 +3143,6 @@ impl App {
         self.present();
         self.keep_open = true;
         self.reveal(true, 0.0);
-        let _ = now;
     }
 
     fn shutdown(&mut self) {

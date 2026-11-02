@@ -238,7 +238,11 @@ impl Flight {
         let bounds = clamp_to_desktop(
             RectI::new(rect.left, rect.top, rect.right, rect.bottom).inflate(travel + 64),
         );
+        logging::trace(format!(
+            "drop card rect={rect:?} travel={travel} bounds={bounds:?}"
+        ));
         if bounds.is_empty() {
+            logging::error("drop_card: empty bounds");
             return false;
         }
         win32::place_window(self.hwnd, bounds, true);
@@ -489,10 +493,15 @@ fn run_drop(
     let height = rect.height() as f32 / scale;
     let cx = (rect.left + rect.right) as f32 * 0.5 / scale - origin.left as f32 / scale;
     let top = rect.top as f32 / scale - origin.top as f32 / scale;
+    logging::trace(format!(
+        "drop render start size={width:.1}x{height:.1} origin={origin:?}"
+    ));
 
     let start = win32::now_seconds();
+    let mut frames = 0u32;
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
+            logging::trace(format!("drop interrupted after {frames} frames"));
             return Ok(());
         }
         let elapsed = (win32::now_seconds() - start) as f32;
@@ -514,14 +523,18 @@ fn run_drop(
         );
         renderer.begin()?;
         renderer.set_transform(transform);
-        if renderer.push_opacity(RectF::from_xywh(0.0, 0.0, width, height), opacity.max(0.02)) {
-            draw_flight_card(
-                renderer,
-                &texture,
-                RectF::from_xywh(0.0, 0.0, width, height),
-                1.0,
-                1.0,
-            );
+        // `push_opacity` returns false for a fully opaque group because it skips
+        // the layer; the card must still be drawn in that case.
+        let pushed =
+            renderer.push_opacity(RectF::from_xywh(0.0, 0.0, width, height), opacity.max(0.02));
+        draw_flight_card(
+            renderer,
+            &texture,
+            RectF::from_xywh(0.0, 0.0, width, height),
+            1.0,
+            1.0,
+        );
+        if pushed {
             renderer.pop_opacity();
         }
         renderer.reset_transform();
@@ -530,9 +543,11 @@ fn run_drop(
             return Err("device lost during drop".to_string());
         }
         if t >= 1.0 {
+            logging::trace(format!("drop finished after {frames} frames"));
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
+        frames += 1;
     }
 }
 
@@ -559,20 +574,26 @@ fn draw_flight_card(
     };
 
     if chrome > 0.01 {
-        let frame = card.inflated(-inset);
+        // The frame is the whole card; only the photo shrinks inward as the
+        // chrome fades in. (Shrinking the frame too made it hide behind the
+        // photo, so a landing card looked like a bare screenshot.)
+        let frame = card;
         if width_dip <= SHADOW_MAX_CARD {
-            renderer.draw_shadow(frame, 0.18 * chrome);
+            renderer.draw_shadow(frame, 0.18 * chrome, false);
         }
-        if renderer.push_opacity(frame.inflated(8.0), chrome) {
-            renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
-            renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
+        // Draw the frame even when the group is fully opaque: push_opacity
+        // skips the layer (and returns false) at opacity 1.
+        let pushed = renderer.push_opacity(frame.inflated(8.0), chrome);
+        renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
+        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
+        if pushed {
             renderer.pop_opacity();
         }
     }
     renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
     if chrome > 0.01 {
         let pin_left = card.left + width_dip * 0.5 - layout::PIN_WIDTH * 0.5;
-        if renderer.push_opacity(
+        let pushed = renderer.push_opacity(
             RectF::from_xywh(
                 pin_left - 4.0,
                 card.top - 12.0,
@@ -580,8 +601,9 @@ fn draw_flight_card(
                 40.0,
             ),
             chrome,
-        ) {
-            renderer.draw_pin(pin_left, card.top - layout::PIN_ABOVE);
+        );
+        renderer.draw_pin(pin_left, card.top - layout::PIN_ABOVE);
+        if pushed {
             renderer.pop_opacity();
         }
     }

@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT,
 };
+use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
     RegisterHotKey, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN,
@@ -71,8 +72,24 @@ pub fn ask(
         .map(|screen| screen.dpi)
         .unwrap_or_else(|| win32::window_dpi(parent));
     let scale = dpi as f32 / 96.0;
-    let width = (WIDTH_DIP * scale).round() as i32;
-    let height = (HEIGHT_DIP * scale).round() as i32;
+    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    // `WIDTH_DIP`/`HEIGHT_DIP` describe the *client* area; the caption and
+    // borders are added around it. Without this the button row overlapped the
+    // error line by a few DIP (the caption ate the difference).
+    let mut frame = RECT {
+        left: 0,
+        top: 0,
+        right: (WIDTH_DIP * scale).round() as i32,
+        bottom: (HEIGHT_DIP * scale).round() as i32,
+    };
+    // SAFETY: pure measurement for the style this window is about to use.
+    if let Err(error) =
+        unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, WS_EX_TOPMOST, dpi) }
+    {
+        logging::error(format!("shortcuts: AdjustWindowRectExForDpi: {error}"));
+    }
+    let width = frame.right - frame.left;
+    let height = frame.bottom - frame.top;
     let (left, top) = win32::cursor_pos()
         .map(|(x, y)| (x - width / 2, y - height / 2))
         .unwrap_or((100, 100));
@@ -116,7 +133,7 @@ pub fn ask(
             WS_EX_TOPMOST,
             CLASS_NAME,
             WINDOW_TITLE,
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            style,
             left,
             top,
             width,
@@ -263,6 +280,11 @@ impl State {
     }
 
     fn handle_key(&mut self, vk: u32, released: bool) {
+        // A registered global hotkey can leave a zero virtual key behind;
+        // "Ctrl+Alt+VK00" must never be offered as a shortcut.
+        if vk == 0 {
+            return;
+        }
         let modifiers = Self::any_modifiers();
         let modifier_only = matches!(
             vk,
@@ -408,7 +430,6 @@ fn draw(state: &mut State, dc: HDC, width: i32, height: i32, bold: HGDIOBJ, smal
     let field = unsafe { CreateSolidBrush(COLORREF(0x00FFFFFF)) };
     let button_brush = unsafe { CreateSolidBrush(COLORREF(0x00EDEDED)) };
     let border = unsafe { CreateSolidBrush(COLORREF(0x00C8C8C8)) };
-    let danger = unsafe { CreateSolidBrush(COLORREF(0x00C42B1C)) };
 
     let all = RECT {
         left: 0,
@@ -470,17 +491,17 @@ fn draw(state: &mut State, dc: HDC, width: i32, height: i32, bold: HGDIOBJ, smal
         // Error line.
         if !state.error.is_empty() {
             SelectObject(dc, small);
-            SetTextColor(dc, COLORREF(0x00C42B1C));
+            // COLORREF is 0x00BBGGRR: this is the WPF error red C42B1C.
+            SetTextColor(dc, COLORREF(0x001C2BC4));
             let mut error = win32::wide(&state.error);
             let mut error_rect = RECT {
                 left: margin,
-                top: field_rect.bottom + (6.0 * scale) as i32,
+                top: field_rect.bottom + (4.0 * scale) as i32,
                 right: width - margin,
-                bottom: field_rect.bottom + (30.0 * scale) as i32,
+                bottom: field_rect.bottom + (34.0 * scale) as i32,
             };
-            DrawTextW(dc, &mut error, &mut error_rect, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, &mut error, &mut error_rect, DT_LEFT | DT_WORDBREAK);
         }
-        let _ = danger;
 
         state.layout(width, height, dc, bold);
 
@@ -520,7 +541,6 @@ fn draw(state: &mut State, dc: HDC, width: i32, height: i32, bold: HGDIOBJ, smal
         let _ = DeleteObject(HGDIOBJ(field.0));
         let _ = DeleteObject(HGDIOBJ(button_brush.0));
         let _ = DeleteObject(HGDIOBJ(border.0));
-        let _ = DeleteObject(HGDIOBJ(danger.0));
     }
 }
 
