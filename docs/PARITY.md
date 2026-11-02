@@ -97,6 +97,7 @@
 | 4.1/4.2 | 复制 | 点击卡片后剪贴板含 PNG/CF_DIB/CF_HDROP；300 ms 截图可见“✓ 已复制”；`visual/line-copied.png` |
 | 4.10 | 拖拽预览 | ghost 0.9 倍、0.85 不透明度、跟随指针；原卡半透明；`visual/line-drag-ghost.png` |
 | 4.11 | 右键菜单 | 自己的 PNG 剪贴板截图（own=true）显示“保存到桌面/丢弃”；外部图显示“取下/移到回收站”；`visual/context-menu-own.png`、`visual/context-menu-external.png` |
+| 5.8 | Ctrl+Alt+S 全链路 | 默认热键被占用，临时改为 `Ctrl+Alt+K`；真实截图工具选 1200×800 → 编辑器 1200×800 → `Ctrl+S` 输出 1200×800 PNG；trace 有 `clipboard duplicate ignored` |
 | 6.1 | 预览位置 | 预览从按钮行下方 12 DIP 开始，不再遮挡复制/打开；`visual/line-hover-preview.png` |
 | 6.6 | 大图尺寸 | 4000×3000 源图 → 预览白框 **1726×1300** 物理像素（≤1800×1300，4:3 等比）；不放大源图 |
 | 7.5 | 便签颜色 | 蓝/粉/灰点击后纸面/折角/墨色/勾选同步，`noteColor:` 写入并重启恢复；`visual/line-note-colors.png` |

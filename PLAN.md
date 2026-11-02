@@ -204,6 +204,9 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 18. 补上 WPF 的**首次运行接管询问**：1.2 s 后 MessageBox，`catchOffered`
     只写一次；点“是”写 `catchClipboard=1`，点“否”保持原值。`--demo` /
     `--editor-demo` 不弹，避免打断开发流程。
+19. 真实 `Ctrl+Alt+S` 全链路补测（默认热键被占用，临时改为 `Ctrl+Alt+K`）：
+    Windows 截图工具选 1200×800 → 编辑器 1200×800 → `Ctrl+S` 输出
+    1200×800 PNG；双胞胎剪贴板副本按 `clipboard duplicate ignored` 处理。
 
 同机数值（release，6016×3384 @200%，单屏）：
 

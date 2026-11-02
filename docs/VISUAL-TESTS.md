@@ -145,6 +145,11 @@
 西班牙语托盘菜单的长项（“Atajo de captura: Ctrl+Alt+S (en uso por otra
 aplicación)”等）也完整显示；菜单由系统绘制、按内容自适应宽度。
 
+最小窗口 **720×520 DIP**（200% 下客户区 1440×1040）：西语的 Deshacer/Rehacer
+自动切换为紧凑图标，Cancelar/Guardar 仍是完整文字，工具栏没有重叠。
+
+![西语编辑器最小窗口](visual/editor-minimum-es.png)
+
 ### 3.5 首次运行接管询问
 
 补上 WPF 的一次性 MessageBox：启动 1.2 s 后询问是否让 Pegline 接管截图，
@@ -153,6 +158,20 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 自动化启动时前台锁让对话框没有自动取得键盘焦点（窗口仍然置顶可见），
 鼠标点“是”后设置正确写入；正常从资源管理器双击启动时由 Windows 决定焦点。
 为避免打断开发流程，`--demo` / `--editor-demo` 不弹这个框。
+
+### 3.6 真实 Ctrl+Alt+S 全链路
+
+默认 `Ctrl+Alt+S` 被本机其他程序占用，所以把 `snipKey` 临时设为 `Ctrl+Alt+K`，
+走同一条代码路径：
+
+- 按下快捷键 → Windows 截图工具全屏覆盖出现；
+- 拖出 **1200×800** 选区 → Pegline 接管剪贴板，打开编辑器，标题/画布显示
+  `editor picture: 1200x800`；
+- 同时 trace 记录 `clipboard duplicate ignored`（Windows 自己保存的那份与剪贴板
+  副本被识别为同一次截图）；
+- `Ctrl+S` 保存 → 输出 PNG 仍是 **1200×800**，文件随即挂回线带。
+
+这补上了之前因热键被占用而一直“无法实测”的 §5.8 真实链路。
 
 ## 4. 逐帧结果
 
