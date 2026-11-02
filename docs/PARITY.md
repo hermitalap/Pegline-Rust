@@ -113,6 +113,7 @@
 | 8.4 | 取消 | `Esc` 关闭编辑器；源文件时间戳不变，不留新卡 |
 | — | 文字 IME | 文字工具同时处理 `WM_CHAR` 与 `WM_IME_CHAR`；注入 `0x4E2D` 得到“中中”（`visual/editor-ime-char.png`）；完整拼音候选窗未自动化 |
 | 9.4 | 快捷键录制 | 真实录制 `Ctrl+Alt+K` → 设置写入；确定键启用；`Ctrl+Alt+T` 冲突时红字完整显示；`visual/shortcut-recorder.png` |
+| 9.3/9.4 | 录制器 | 西语 420×236 DIP 布局完整；按住修饰键显示 `Ctrl+Alt`，不再出现 `VK00`；`visual/shortcut-recorder-es.png`、`visual/shortcut-recorder-es-partial.png` |
 | 9.5 | 被占用 | 录制期间本程序三个热键全部注销，关闭后恢复；外部占用仍由 `available()` 提示 |
 | 9.7 | 三语 | `PEGLINE_LANG=en/es/zh` 三次启动；中文/西语/英语的标题、工具栏、空提示和西语托盘菜单完整，西语最长标签不裁切；`visual/editor-languages.png`、`visual/line-es.png` |
 | 2.4/4.12 | 点叉丢弃 | 真实点击卡片左上叉，文件进回收站/卡片掉落；掉落帧同 3.7 |

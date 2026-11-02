@@ -35,6 +35,8 @@
 | ![IME 中文字](visual/editor-ime-char.png) | `WM_IME_CHAR` 与 `WM_CHAR` 各注入 `0x4E2D`，文字工具出现“中中” |
 | ![空格剪贴板提示](visual/clipboard-empty.png) | 剪贴板没有文字时按 `Ctrl+Alt+N`：系统气泡显示“剪贴板里没有文字…”和当前快捷键 |
 | ![快捷键录制](visual/shortcut-recorder.png) | 冲突提示：红字完整显示在按钮上方；录制时本程序的全局热键已全部释放 |
+| ![西语快捷键录制](visual/shortcut-recorder-es.png) | 西语标题、两行说明和三个按钮完整，无截断 |
+| ![西语部分修饰键](visual/shortcut-recorder-es-partial.png) | 按住 Ctrl+Alt 时只显示 `Ctrl+Alt`，不再出现 `VK00` |
 | ![首次运行接管询问](visual/first-run-offer.png) | 首次运行 1.2 s 后出现“让 Pegline 接管你的截图吗？”；点“是”后 `catchClipboard=1` |
 | ![真实托盘图标点击](visual/line-tray-click.png) | 从任务栏溢出面板左键点击 Pegline 图标，空线带放下并显示提示 |
 | ![真实托盘菜单](visual/tray-menu-real.png) | 真实右键托盘图标：菜单、热键被占用提示、“接管截图”勾选完整 |
@@ -112,6 +114,9 @@
     已经在屏幕上的线带会继续压在视频/游戏/幻灯片上。现在 `present` 拒绝在全屏
     应用前打开，已显示时立即 `dismiss`；实测全屏窗口盖住后线带消失，关掉全屏
     再碰顶边线带恢复。
+20. **快捷键录制按住修饰键时显示 `Ctrl+Alt+VK00`。** 部分修饰键状态用一个
+    `virtual_key: 0` 的占位 Hotkey 格式化，尾部的 `+VK00` 被带了出来。现在
+    `virtual_key == 0` 只输出修饰键（并去掉末尾的 `+`），实测显示 `Ctrl+Alt`。
 
 ### 3.1 标注编辑器实测（2026-11-03）
 
@@ -161,6 +166,12 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 自动切换为紧凑图标，Cancelar/Guardar 仍是完整文字，工具栏没有重叠。
 
 ![西语编辑器最小窗口](visual/editor-minimum-es.png)
+
+西语快捷键录制窗口（420×236 DIP）：标题、两行说明、`Sin atajo` /
+`Cancelar` / `Aceptar` 全部完整；按住 Ctrl+Alt 时显示 `Ctrl+Alt`，不再出现
+`VK00`。
+
+![西语快捷键录制](visual/shortcut-recorder-es.png)
 
 ### 3.5 首次运行接管询问
 

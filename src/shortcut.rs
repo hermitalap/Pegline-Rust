@@ -31,6 +31,15 @@ impl Hotkey {
         if self.modifiers & MOD_WIN.0 != 0 {
             text.push_str("Win+");
         }
+        // The recorder shows the modifiers alone while the user holds them;
+        // virtual_key 0 is not a real key and must not render "VK00" (or a
+        // dangling "+" from the modifier list).
+        if self.virtual_key == 0 {
+            if text.ends_with('+') {
+                text.pop();
+            }
+            return text;
+        }
         text.push_str(&key_name(self.virtual_key));
         text
     }
@@ -183,6 +192,20 @@ mod tests {
         let hotkey = parse("Ctrl+Shift+F12").unwrap();
         assert_eq!(hotkey.label(), "Ctrl+Shift+F12");
         assert_eq!(parse(&hotkey.label()), Some(hotkey));
+    }
+
+    #[test]
+    fn partial_modifiers_hide_the_placeholder_key() {
+        let modifiers = Hotkey {
+            modifiers: MOD_CONTROL.0 | MOD_ALT.0,
+            virtual_key: 0,
+        };
+        assert_eq!(modifiers.label(), "Ctrl+Alt");
+        let shift = Hotkey {
+            modifiers: MOD_SHIFT.0,
+            virtual_key: 0,
+        };
+        assert_eq!(shift.label(), "Shift");
     }
 
     #[test]
