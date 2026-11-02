@@ -43,6 +43,7 @@
 | ![全屏抑制](visual/fullscreen-suppressed.png) | 上：修复前线带压在蓝色全屏窗口上；下：修复后全屏窗口保持干净 |
 | ![点击穿透](visual/clickthrough.png) | 绿色窗口在下方：空白处点击落到窗体（日志 50,400），卡片上的点击被线带接住 |
 | ![拖到资源管理器](visual/drag-drop-explorer.png) | 把 demo 卡片拖进资源管理器，`demo-2.png`（1.23 KB）真实落地 |
+| ![音频波形](visual/audio-cues.png) | 临时解除默认端点静音后，WASAPI loopback 录到 Pop（约 320 Hz）和 Tink（1760/3520 Hz） |
 | ![三语编辑器工具栏](visual/editor-languages.png) | 中/西/英三套标题与工具栏标签完整，无裁切（上：中，中：西，下：英） |
 | ![西班牙语空提示](visual/line-es.png) | 西班牙语提示整句放入 pill；托盘菜单的西语长标签同样完整 |
 
@@ -148,17 +149,19 @@
 - **右键菜单状态**：用真实 PNG 剪贴板触发一次自己的截图（own=true），菜单
   出现“保存到桌面/丢弃”；外部 demo 图只有“取下/移到回收站”。
 
-### 3.3 声音（未做听感结论）
+### 3.3 声音（波形已验证，未做主观听感结论）
 
 - `sound::tests` 通过；真实进程触发便签 Tink 时 `PlaySoundW` 返回 **TRUE**。
-- 进一步查清：本机默认渲染端点是 **`U32T1`**（`43cea139-…` 的显示音频），
-  不是 Realtek 扬声器，也不是 VB-Cable。
-- 自写 WASAPI loopback（48 kHz / 2 ch / 32-bit float）直接录这个默认端点：
-  连 Windows 自带提示音都只有 0 峰值；`dshow` 只有 VB-Cable Output，同样静音。
-- 尝试用 `IPolicyConfig` 临时把默认端点切到 CABLE Input 再录，但本机没有注册
-  该 COM 类（`REGDB_E_CLASSNOTREG`），没有改动系统默认值。
-- 因此没有“已经听到”的证据，听感仍待有可用音频回环的机器确认；不把 API 成功
-  当成听感通过。
+- 本机默认渲染端点是 **`U32T1`**（`43cea139-…` 的显示音频），查询到它处于
+  **mute=True、volume=0.00**，所以之前 WASAPI loopback 和 `dshow` 都录到静音。
+- 临时把它设为 mute=False、volume=0.5，用自写 WASAPI loopback（48 kHz / 2 ch /
+  32-bit float）录到：
+  - Pop：0.00–0.10 s，主频约 **320 Hz**（生成式 420→? 的向下扫频）；
+  - Tink：0.48–0.60 s，峰值 **1760 Hz** 和 **3520 Hz**，与合成参数一致。
+- 录完立即恢复 mute=True、volume=0.00，并确认端点状态；`settings.ini` 也恢复
+  `soundOff=1`。
+- Rustle 仍只有合成单测；三段音效的**主观听感**没有做（没有扬声器监听），
+  但输出波形已经证明声音离开进程并到达系统混音器。
 
 ### 3.4 三语界面
 
