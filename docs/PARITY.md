@@ -89,6 +89,7 @@
 |:--|:--|:--|
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
 | 1.7 | 首次运行 | 首次运行自动放下空线带显示提示，5 s 后无卡自动收起；`visual/line-welcome.png` |
+| — | 接管询问 | 1.2 s 后出现一次 MessageBox；点“是”写 `catchClipboard=1`，`catchOffered` 只写一次；`visual/first-run-offer.png` |
 | 2.3/2.4 | 间距/容量 | 连续加 13 张后线上保持 12 张，间距 174 DIP 居中，最旧一张掉落；`visual/line-capacity.png` |
 | 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮，按钮/便签色点为手形光标；截图 `visual/line-hover-preview.png` |
 | 3.4/3.5 | 飞行相框/阴影 | 相框和夹子随进度出现，落地前与线上卡片一致；修复前是裸图盖住已落地相框；截图 `visual/line-flight.png` |

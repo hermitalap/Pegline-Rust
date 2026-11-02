@@ -167,6 +167,15 @@ impl Settings {
         self.save();
     }
 
+    pub fn catch_offered(&self) -> bool {
+        self.bool(keys::CATCH_OFFERED)
+    }
+
+    pub fn mark_catch_offered(&mut self) {
+        self.set_bool(keys::CATCH_OFFERED, true);
+        self.save();
+    }
+
     pub fn catch_clipboard(&self) -> bool {
         self.bool(keys::CATCH_CLIPBOARD)
     }

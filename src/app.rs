@@ -19,11 +19,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, VK_LBUTTON,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, HHOOK, KillTimer,
-    MF_SEPARATOR, MF_STRING, MSLLHOOKSTRUCT, PostMessageW, RegisterWindowMessageW,
-    SetForegroundWindow, SetTimer, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, UnhookWindowsHookEx, WH_MOUSE_LL, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY,
-    WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, HHOOK, IDYES,
+    KillTimer, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING,
+    MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
+    SetTimer, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{PCWSTR, w};
 
@@ -326,6 +327,8 @@ struct App {
     band_suppressed: bool,
     keep_open: bool,
     welcome_until: Option<f64>,
+    /// When to show the one-time "let Pegline handle your screenshots?" box.
+    catch_offer_at: Option<f64>,
     empty_since: Option<f64>,
     hide_at: Option<f64>,
 
@@ -418,6 +421,7 @@ impl App {
             band_suppressed: false,
             keep_open: false,
             welcome_until: None,
+            catch_offer_at: None,
             empty_since: None,
             hide_at: None,
             hover: None,
@@ -522,6 +526,15 @@ impl App {
             self.settings.mark_welcomed();
             self.present();
             self.reveal(true, 0.0);
+        }
+        // The WPF app asked once, 1.2 s after the first start, whether it may
+        // take over screenshots (BEHAVIOR §3.2). Reading the clipboard is the
+        // user's call, never ours.
+        if !self.settings.catch_offered()
+            && !self.demo
+            && !std::env::args().any(|arg| arg == "--editor-demo")
+        {
+            self.catch_offer_at = Some(self.start_time + 1.2);
         }
 
         if self.demo {
@@ -941,6 +954,12 @@ impl App {
                         let _ = PostMessageW(Some(editor.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                 }
+            }
+        }
+        if let Some(at) = self.catch_offer_at {
+            if now >= at {
+                self.catch_offer_at = None;
+                self.offer_catching();
             }
         }
         if let Some(at) = self.clipboard_at {
@@ -2634,6 +2653,30 @@ impl App {
         };
         if let Some(ghost) = self.ghost.as_mut() {
             ghost.move_to(cursor, screen.dpi);
+        }
+    }
+
+    /// The one-time first-run question from the WPF app: may Pegline take over
+    /// screenshots? Yes switches clipboard catching on; No leaves it alone.
+    fn offer_catching(&mut self) {
+        self.settings.mark_catch_offered();
+        let title = win32::wide(i18n::s().catch_title);
+        let body = win32::wide(i18n::s().catch_body);
+        // SAFETY: our own hidden window is the owner; both strings are alive
+        // for the call. The box is modal to this thread only.
+        let answer = unsafe {
+            MessageBoxW(
+                // No owner: the line's hidden window is no-activate, and a box
+                // owned by it would not become foreground (keyboard input then
+                // never reaches Yes/No). A top-level box activates normally.
+                None,
+                PCWSTR(body.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND,
+            )
+        };
+        if answer == IDYES {
+            self.settings.set_catch_clipboard(true);
         }
     }
 

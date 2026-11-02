@@ -34,6 +34,7 @@
 | ![中文文字框](visual/editor-text-chinese.png) | 中文正文“中文测试”输入、字体回退和光标定位都正确 |
 | ![空格剪贴板提示](visual/clipboard-empty.png) | 剪贴板没有文字时按 `Ctrl+Alt+N`：系统气泡显示“剪贴板里没有文字…”和当前快捷键 |
 | ![快捷键录制](visual/shortcut-recorder.png) | 冲突提示：红字完整显示在按钮上方；录制时本程序的全局热键已全部释放 |
+| ![首次运行接管询问](visual/first-run-offer.png) | 首次运行 1.2 s 后出现“让 Pegline 接管你的截图吗？”；点“是”后 `catchClipboard=1` |
 | ![三语编辑器工具栏](visual/editor-languages.png) | 中/西/英三套标题与工具栏标签完整，无裁切（上：中，中：西，下：英） |
 | ![西班牙语空提示](visual/line-es.png) | 西班牙语提示整句放入 pill；托盘菜单的西语长标签同样完整 |
 
@@ -144,6 +145,15 @@
 西班牙语托盘菜单的长项（“Atajo de captura: Ctrl+Alt+S (en uso por otra
 aplicación)”等）也完整显示；菜单由系统绘制、按内容自适应宽度。
 
+### 3.5 首次运行接管询问
+
+补上 WPF 的一次性 MessageBox：启动 1.2 s 后询问是否让 Pegline 接管截图，
+`catchOffered` 只写一次；点“是”写 `catchClipboard=1`，点“否”保持原设置。
+
+自动化启动时前台锁让对话框没有自动取得键盘焦点（窗口仍然置顶可见），
+鼠标点“是”后设置正确写入；正常从资源管理器双击启动时由 Windows 决定焦点。
+为避免打断开发流程，`--demo` / `--editor-demo` 不弹这个框。
+
 ## 4. 逐帧结果
 
 - **放下**：0.3 s 悬停后开始，约 0.65 s 内从 -222 DIP 弹到 0，轻微过冲
@@ -158,7 +168,7 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 
 | 项 | 实测 | 备注 |
 |:--|:--|:--|
-| `pegline.exe` | **1,380,352 B（1.32 MB）** | 预算 ≤ 10 MB |
+| `pegline.exe` | **1,381,888 B（1.32 MB）** | 预算 ≤ 10 MB |
 | 6 卡线带 @60 Hz | **60.32 fps**，p95 17.11 ms，draw p50 0.73 / p95 1.82 ms | ≥ 58 fps |
 | 飞行（1600 px，复用） | **61.96 fps**，draw max 15.9 ms | 最大值为首帧上传；p50 仍在预算内 |
 | 私有内存（6 卡、probe 可见） | **92.0 MB** | 用户已接受；多一张悬停阴影纹理 |
