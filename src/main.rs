@@ -12,6 +12,9 @@ use pegline::{app, logging, win32};
 fn main() {
     win32::ensure_dpi_awareness();
     logging::init();
+    // Uncaught panics must land in error.log; window procedures also catch and
+    // log them so one bad gesture cannot take the tray icon down.
+    std::panic::set_hook(Box::new(|info| logging::error(format!("panic: {info}"))));
 
     if already_running() {
         logging::trace("second instance started; exiting");

@@ -274,6 +274,9 @@ struct App {
     /// Whether RegisterHotKey succeeded; the tray menu says when it did not.
     snip_hotkey_ok: bool,
     note_hotkey_ok: bool,
+    /// `--panic-test`: panic once inside the message handler to prove recovery.
+    panic_test: bool,
+    panicked: bool,
     /// How many restored cards are still decoding; `pegged.txt` is not
     /// rewritten until they are all back.
     restore_pending: usize,
@@ -323,6 +326,8 @@ impl App {
             last_clip_at: 0.0,
             snip_hotkey_ok: false,
             note_hotkey_ok: false,
+            panic_test: std::env::args().any(|arg| arg == "--panic-test"),
+            panicked: false,
             restore_pending: 0,
             clipboard_at: None,
             start_time: start,
@@ -632,6 +637,10 @@ impl App {
         if self.quit {
             return;
         }
+        if self.panic_test && !self.panicked {
+            self.panicked = true;
+            panic!("panic test requested");
+        }
         let now = win32::now_seconds();
         self.drain_events(now);
         if let Some(at) = self.clipboard_at {
@@ -717,12 +726,13 @@ impl App {
                 MouseKind::LeftDown => self.on_left_down(event.x, event.y, event.time),
                 MouseKind::LeftUp => self.on_left_up(event.x, event.y, event.time),
                 MouseKind::RightUp => self.on_right_up(event.x, event.y),
-                MouseKind::RightDown => {}
+                MouseKind::RightDown => self.on_right_down(event.x, event.y),
             }
         }
     }
 
     fn on_left_down(&mut self, x: i32, y: i32, now: f64) {
+        self.on_band_click(x, y);
         let Some((id, frame)) = self.hit_test(x, y) else {
             return;
         };
@@ -776,6 +786,33 @@ impl App {
         }
     }
 
+    /// A click on any screen top band suppresses the reveal until the pointer
+    /// leaves the band, and puts a revealed line away unless the click landed
+    /// on a photo (the same rule as the WPF low-level hook).
+    fn on_band_click(&mut self, x: i32, y: i32) {
+        let Some(screen) = win32::monitor_at(x, y) else {
+            return;
+        };
+        let band_top = screen.bounds.top + (screen.work.top - screen.bounds.top).max(2);
+        let in_band = x >= screen.bounds.left
+            && x < screen.bounds.right
+            && y >= screen.bounds.top
+            && y < band_top;
+        if !in_band {
+            return;
+        }
+        self.band_suppressed = true;
+        self.hot_zone_since = None;
+        logging::trace(format!("band click at {x},{y}"));
+        if self.is_revealed && self.hit_test(x, y).is_none() {
+            self.pinned = false;
+            self.set_revealed(false);
+        }
+    }
+
+    fn on_right_down(&mut self, x: i32, y: i32) {
+        self.on_band_click(x, y);
+    }
     fn on_right_up(&mut self, x: i32, y: i32) {
         let Some((id, _)) = self.hit_test(x, y) else {
             return;

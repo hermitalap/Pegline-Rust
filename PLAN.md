@@ -172,7 +172,8 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 2. 然后补 M3 的未实测项：Win+Shift+S 剪贴板接管、双胞胎合并、Win+PrtScn 文件链路的真实
    截图；剪贴板读取、PNG/CF_DIB 写入的代码已在 `src/capture/clipboard.rs`，只差实测。
 3. 再开 M5（阶段 B）：悬停预览、便签、标注编辑器、拖拽预览、音效、完整菜单、快捷键设置。
-4. 开发期手动检查：`pegline.exe --demo` 不依赖截图链路，直接挂三张生成的卡片；仓库里
-   `probe.exe` 可单独测量线带/飞行，不需要开着托盘。
+4. 开发期手动检查：`pegline.exe --demo` 不依赖截图链路，直接挂三张生成的卡片；
+   `--panic-test` 在消息处理里故意 panic 一次，验证 `error.log` 与进程存活；
+   仓库里 `probe.exe` 可单独测量线带/飞行，不需要开着托盘。
 
 旧 WPF 版仍可从 `archive/wpf-v1/build.cmd` 构建运行，用于对照行为。
