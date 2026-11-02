@@ -14,7 +14,7 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -70,6 +70,9 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::Input::Ime::{
+    HIMC, ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmSetOpenStatus,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
@@ -257,11 +260,31 @@ impl Editor {
             delivered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             text_tool: AtomicBool::new(false),
+            ime: AtomicIsize::new(0),
         });
         // SAFETY: the pointer stays valid while the window exists: `Editor`
         // holds the `Arc` and `shutdown` destroys the window before that `Arc`
         // is dropped.
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::as_ptr(&shared) as isize) };
+
+        // A plain Win32 window does not get an IME context on Windows 11 TSF
+        // unless it asks for one. Without this Chinese/Japanese input never
+        // starts composing in the text tool.
+        // SAFETY: our window and a fresh context owned by this thread.
+        let ime = unsafe { ImmCreateContext() };
+        if !ime.0.is_null() {
+            // SAFETY: the HWND is ours; the returned previous context is not
+            // owned by us and is ignored.
+            unsafe {
+                let _ = ImmAssociateContext(hwnd, ime);
+                // A fresh context starts closed; open it so the active input
+                // method actually composes instead of passing Latin keys.
+                let _ = ImmSetOpenStatus(ime, true);
+            }
+            shared.ime.store(ime.0 as isize, Ordering::Release);
+        } else {
+            logging::error("editor: ImmCreateContext failed");
+        }
 
         let (client_width, client_height) = client_size(hwnd).unwrap_or((1, 1));
         let render_dpi = win32::window_dpi(hwnd);
@@ -408,6 +431,8 @@ struct Shared {
     /// The Text tool was the last tool button pressed; drives the I-beam
     /// cursor over the canvas. The render thread owns the real tool state.
     text_tool: AtomicBool,
+    /// IME context associated with the editor window (0 when unavailable).
+    ime: AtomicIsize,
 }
 
 impl Shared {
@@ -548,6 +573,16 @@ unsafe extern "system" fn editor_wndproc(
             return LRESULT(0);
         }
         WM_DESTROY => {
+            let ime = shared.ime.swap(0, Ordering::AcqRel);
+            if ime != 0 {
+                let context = HIMC(ime as *mut c_void);
+                // SAFETY: the HWND is still valid during WM_DESTROY and the
+                // context was created by us in `open`.
+                unsafe {
+                    let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
+                    let _ = ImmDestroyContext(context);
+                }
+            }
             shared.closed.store(true, Ordering::Release);
             return LRESULT(0);
         }

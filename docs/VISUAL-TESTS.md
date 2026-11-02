@@ -33,6 +33,7 @@
 | ![文字输入框](visual/editor-text-box.png) | 文字工具：白底输入框、彩色边框和插入光标；输入框盖住旧箭头，回车后框消失，只留下文字 |
 | ![中文文字框](visual/editor-text-chinese.png) | 中文正文“中文测试”输入、字体回退和光标定位都正确 |
 | ![IME 中文字](visual/editor-ime-char.png) | `WM_IME_CHAR` 与 `WM_CHAR` 各注入 `0x4E2D`，文字工具出现“中中” |
+| ![IME 中文上屏](visual/editor-ime-composed.png) | 真实拼音 `zhongwen` + 空格，文字工具上屏“中文” |
 | ![空格剪贴板提示](visual/clipboard-empty.png) | 剪贴板没有文字时按 `Ctrl+Alt+N`：系统气泡显示“剪贴板里没有文字…”和当前快捷键 |
 | ![快捷键录制](visual/shortcut-recorder.png) | 冲突提示：红字完整显示在按钮上方；录制时本程序的全局热键已全部释放 |
 | ![西语快捷键录制](visual/shortcut-recorder-es.png) | 西语标题、两行说明和三个按钮完整，无截断 |
@@ -111,7 +112,7 @@
     5 s 后无卡自动收起。实测 1.5 s 可见、5 s 后隐藏。
 18. **文字工具只处理 `WM_CHAR`。** 输入法提交中文走 `WM_IME_CHAR`，原来会被
     丢掉；现在两条消息都转成文字（含代理对）。直接注入 `0x4E2D` 实测得到
-    “中中”；完整拼音候选窗的自动化仍受输入法/前台锁限制，没有冒充已通过。
+    “中中”；随后补 IME 上下文后真实拼音已能上屏（问题 22）。
 19. **已显示的线带不会因为全屏应用而消失。** 全屏检测原来只在“打开”路径里，
     已经在屏幕上的线带会继续压在视频/游戏/幻灯片上。现在 `present` 拒绝在全屏
     应用前打开，已显示时立即 `dismiss`；实测全屏窗口盖住后线带消失，关掉全屏
@@ -123,6 +124,12 @@
     本机桌面通过 OneDrive 重定向到 `D:\UserData\OneDrive\Desktop`，文件落在一个
     用户看不到的旧目录。改用 `SHGetKnownFolderPath(FOLDERID_Desktop)`；实测文件
     出现在资源管理器显示的桌面目录，旧路径没有文件。
+22. **文字工具没有 IME 上下文，拼音只会出拉丁字母。** 普通 Win32 窗口在
+    Windows 11 TSF 下 `ImmGetContext` 返回 0，Microsoft Pinyin 不会组合。
+    现在窗口创建时 `ImmCreateContext` + `ImmAssociateContext` +
+    `ImmSetOpenStatus(TRUE)`，WM_DESTROY 时解绑并 `ImmDestroyContext`；
+    实测输入 `zhongwen` 后按空格上屏 **“中文”**。`WM_IME_CHAR` 的直接注入
+    仍保留为兜底。
 
 ### 3.1 标注编辑器实测（2026-11-03）
 
@@ -260,7 +267,7 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 
 | 项 | 实测 | 备注 |
 |:--|:--|:--|
-| `pegline.exe` | **1,383,424 B（1.32 MB）** | 预算 ≤ 10 MB |
+| `pegline.exe` | **1,383,936 B（1.32 MB）** | 预算 ≤ 10 MB |
 | 6 卡线带 @60 Hz | **60.32 fps**，p95 17.11 ms，draw p50 0.73 / p95 1.82 ms | ≥ 58 fps |
 | 飞行（1600 px，复用） | **61.96 fps**，draw max 15.9 ms | 最大值为首帧上传；p50 仍在预算内 |
 | 私有内存（6 卡、probe 可见） | **92.0 MB** | 用户已接受；多一张悬停阴影纹理 |

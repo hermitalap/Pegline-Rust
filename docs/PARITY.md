@@ -114,7 +114,7 @@
 | 8.2 | 撤销/重做 | 画箭头后 `Ctrl+Z` 消失、`Ctrl+Y` 恢复，按钮禁用态同步；马赛克/文字同样走 `Doc` |
 | 8.3 | 保存尺寸 | `--editor-demo --editor-hold` 画完四类标记后 `Ctrl+S` → PNG **900×600**，与源图同尺寸；文件挂回线带 |
 | 8.4 | 取消 | `Esc` 关闭编辑器；源文件时间戳不变，不留新卡 |
-| — | 文字 IME | 文字工具同时处理 `WM_CHAR` 与 `WM_IME_CHAR`；注入 `0x4E2D` 得到“中中”（`visual/editor-ime-char.png`）；完整拼音候选窗未自动化 |
+| — | 文字 IME | 窗口关联并打开 IME 上下文，同时处理 `WM_CHAR`/`WM_IME_CHAR`；真实拼音 `zhongwen` + 空格上屏“中文”（`visual/editor-ime-composed.png`）；候选窗本身未单独截图 |
 | 9.4 | 快捷键录制 | 真实录制 `Ctrl+Alt+K` → 设置写入；确定键启用；`Ctrl+Alt+T` 冲突时红字完整显示；`visual/shortcut-recorder.png` |
 | 9.3/9.4 | 录制器 | 西语 420×236 DIP 布局完整；按住修饰键显示 `Ctrl+Alt`，不再出现 `VK00`；`visual/shortcut-recorder-es.png`、`visual/shortcut-recorder-es-partial.png` |
 | 9.5 | 被占用 | 录制期间本程序三个热键全部注销，关闭后恢复；外部占用仍由 `available()` 提示 |
@@ -124,7 +124,7 @@
 修复但不在清单编号里的：卡片外 10 DIP 只用于悬停、不用于点击（防止点空白
 复制）；`--demo` 的真实临时文件；`RegisterClassW` 的错误码判断。
 
-仍然缺口：音效听感、输入法候选窗的完整交互（字符提交已支持）、120 Hz、
+仍然缺口：音效听感、输入法候选窗的视觉细节（组合上屏已验证）、120 Hz、
 副屏、休眠/唤醒。
 
 ---
