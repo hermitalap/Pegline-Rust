@@ -56,6 +56,7 @@ fn main() {
     let result = match config.mode {
         Mode::Line | Mode::Idle | Mode::Static | Mode::Clear | Mode::Primitive => run_line(&config),
         Mode::Flight => run_flight(&config),
+        Mode::Atlas => run_atlas(&config),
     };
     match result {
         Ok(line) => println!("{line}"),
@@ -74,6 +75,7 @@ enum Mode {
     Flight,
     Clear,
     Primitive,
+    Atlas,
 }
 
 impl Mode {
@@ -84,6 +86,7 @@ impl Mode {
             Mode::Static => "static",
             Mode::Clear => "clear",
             Mode::Primitive => "primitive",
+            Mode::Atlas => "atlas",
             Mode::Flight => "flight",
         }
     }
@@ -95,6 +98,9 @@ struct Config {
     cards: usize,
     repeat: usize,
     prim: String,
+    once: bool,
+    no_img: bool,
+    small_img: bool,
 }
 
 impl Default for Config {
@@ -105,6 +111,9 @@ impl Default for Config {
             cards: 6,
             repeat: 1,
             prim: "card".to_string(),
+            once: false,
+            no_img: false,
+            small_img: false,
         }
     }
 }
@@ -125,6 +134,7 @@ impl Config {
                         "flight" => Mode::Flight,
                         "clear" => Mode::Clear,
                         "prim" => Mode::Primitive,
+                        "atlas" => Mode::Atlas,
                         other => return Err(format!("unknown mode {other}")),
                     }
                 }
@@ -136,6 +146,9 @@ impl Config {
                     config.repeat = value.parse().map_err(|_| "bad --repeat".to_string())?
                 }
                 "--prim" => config.prim = value.to_string(),
+                "--once" => config.once = value == "1",
+                "--noimg" => config.no_img = value == "1",
+                "--smallimg" => config.small_img = value == "1",
                 other => return Err(format!("unknown switch {other}")),
             }
         }
@@ -161,19 +174,27 @@ fn run_line(config: &Config) -> Result<String, String> {
     scene.apply(Command::SetVisible(true), &renderer, 0.0);
     scene.apply(Command::Reveal(true), &renderer, 0.0);
     for index in 0..config.cards.max(1) {
-        let (w, h) = match index % 3 {
-            0 => (480u32, 270u32),
-            1 => (270, 480),
-            _ => (400, 300),
+        let (w, h) = if config.small_img {
+            (272u32, 208u32)
+        } else {
+            match index % 3 {
+                0 => (480u32, 270u32),
+                1 => (270, 480),
+                _ => (400, 300),
+            }
         };
-        let image = gradient_image(w, h, index as u8);
+        let image = if config.no_img {
+            None
+        } else {
+            Some(gradient_image(w, h, index as u8))
+        };
         scene.apply(
             Command::AddCard(CardSpec {
                 id: index as CardId + 1,
                 card_size: layout::card_size(w as f32, h as f32),
                 tilt: (index as f32 * 1.7) - 2.5,
                 arriving: false,
-                image: Some(image),
+                image,
             }),
             &renderer,
             0.0,
@@ -215,7 +236,9 @@ fn run_line(config: &Config) -> Result<String, String> {
         let draw_start = win32::now_seconds();
         renderer.begin()?;
         if config.mode == Mode::Primitive {
-            draw_primitive(&mut renderer, &scene, &config.prim);
+            if !config.once || frames == 0 {
+                draw_primitive(&mut renderer, &scene, &config.prim);
+            }
         } else if config.mode != Mode::Clear {
             scene.draw(&mut renderer);
         }
@@ -354,6 +377,48 @@ fn primary_monitor() -> Result<win32::Monitor, String> {
         .ok_or_else(|| "no monitors".to_string())
 }
 
+/// One 1024x512 atlas uploaded once, six sub-region blits per frame.
+fn run_atlas(config: &Config) -> Result<String, String> {
+    let monitor = primary_monitor()?;
+    let width_px = monitor.work.width().max(1) as u32;
+    let height_px = ((layout::PANEL_HEIGHT * monitor.scale()).ceil() as i32).max(1) as u32;
+    let hwnd = create_window(monitor.work.left, monitor.work.top, width_px, height_px)?;
+    let mut renderer = Renderer::new(hwnd, width_px, height_px, monitor.dpi)?;
+    let atlas = gradient_image(1024, 512, 3);
+    let texture = renderer.upload(&atlas)?;
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    let start = win32::now_seconds();
+    let mut stamps: Vec<f64> = Vec::new();
+    let mut frames = 0u64;
+    while win32::now_seconds() - start < config.seconds {
+        let now = win32::now_seconds();
+        renderer.begin()?;
+        renderer.draw_atlas_probe(&texture, 6);
+        renderer.end()?;
+        let present = renderer.present(true);
+        if present == Present::DeviceLost {
+            return Err("device lost".to_string());
+        }
+        frames += 1;
+        stamps.push(now);
+    }
+    let deltas: Vec<f64> = stamps
+        .windows(2)
+        .map(|window| window[1] - window[0])
+        .filter(|delta| *delta > 0.0)
+        .collect();
+    let (private_mb, ws_mb) = process_memory_mb();
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+    let summary = Summary::new(&deltas);
+    Ok(format!(
+        "PROBE mode=atlas frames={frames} fps={:.2} p95={:.2} private={:.1}MB ws={:.1}MB",
+        summary.fps, summary.p95, private_mb, ws_mb
+    ))
+}
 fn create_window(x: i32, y: i32, width: u32, height: u32) -> Result<HWND, String> {
     // SAFETY: the class name and procedure are static; the class is registered
     // on this thread before the window is created.
@@ -502,6 +567,23 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
         "shadow" => renderer.draw_shadow(rect, 0.18),
         "fill" => renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass),
         "text" => renderer.draw_hint(1504.0, 120.0),
+        "card6" => {
+            for index in 0..6 {
+                let x = 300.0 + index as f32 * 400.0;
+                let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
+                renderer.draw_shadow(r, 0.18);
+                renderer.fill_round(r, 16.0, pegline::render::Brush::Glass);
+                renderer.stroke_card(r, 16.0, 0.75);
+            }
+        }
+        "fill6" => {
+            for index in 0..6 {
+                let x = 300.0 + index as f32 * 400.0;
+                let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
+                renderer.fill_round(r, 16.0, pegline::render::Brush::Glass);
+                renderer.stroke_card(r, 16.0, 0.75);
+            }
+        }
         "card" => {
             renderer.draw_shadow(rect, 0.18);
             renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass);

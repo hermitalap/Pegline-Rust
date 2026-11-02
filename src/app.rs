@@ -1036,10 +1036,11 @@ impl App {
             self.next_id += 1;
             let tx = self.events_tx.clone();
             let thread_path = path.clone();
+            let thumb_max = self.thumb_max();
             let _ = std::thread::Builder::new()
                 .name("pegline-restore".to_string())
                 .spawn(move || {
-                    let thumb = wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX).ok();
+                    let thumb = wic::decode_scaled(&thread_path, thumb_max).ok();
                     if thumb.is_none() {
                         logging::error(format!("restore {}", thread_path.display()));
                     }
@@ -1104,10 +1105,11 @@ impl App {
         let tx = self.events_tx.clone();
         let thread_path = path.clone();
         let want_flight = area.is_some();
+        let thumb_max = self.thumb_max();
         let _ = std::thread::Builder::new()
             .name("pegline-decode".to_string())
             .spawn(move || {
-                let thumb = match wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX) {
+                let thumb = match wic::decode_scaled(&thread_path, thumb_max) {
                     Ok(thumb) => thumb,
                     Err(error) => {
                         logging::error(format!("decode {}: {error}", thread_path.display()));
@@ -1169,6 +1171,21 @@ impl App {
     /// The DPI of the monitor the line is on.
     fn screen_dpi(&self) -> Option<u32> {
         self.screen.as_ref().map(|screen| screen.dpi)
+    }
+
+    /// Decode size for a card thumbnail: exactly the pixels the card occupies
+    /// (136 DIP wide at the current scale), capped by `THUMB_MAX`. Oversampling
+    /// to 480 px costs ~11 MB of driver memory for six cards and buys nothing:
+    /// the card never draws wider than 272 px on a 200% screen.
+    fn thumb_max(&self) -> u32 {
+        let scale = self
+            .screen
+            .as_ref()
+            .map(|screen| screen.scale())
+            .unwrap_or(1.0);
+        ((layout::CARD_WIDTH - 14.0) * scale)
+            .ceil()
+            .clamp(96.0, crate::capture::THUMB_MAX as f32) as u32
     }
 
     /// Where card `index` of `count` will hang, in screen pixels.
@@ -1575,6 +1592,7 @@ impl App {
         let pointer = win32::cursor_pos().unwrap_or((0, 0));
         let screens: Vec<RectI> = win32::monitors().into_iter().map(|m| m.bounds).collect();
         let virtual_screen = win32::virtual_screen();
+        let thumb_max = self.thumb_max();
         let _ = std::thread::Builder::new()
             .name("pegline-clipboard".to_string())
             .spawn(move || {
@@ -1599,7 +1617,7 @@ impl App {
                     logging::error(format!("clipboard save: {error}"));
                     return;
                 }
-                let thumb = match wic::decode_scaled(&path, crate::capture::THUMB_MAX) {
+                let thumb = match wic::decode_scaled(&path, thumb_max) {
                     Ok(thumb) => thumb,
                     Err(error) => {
                         logging::error(format!("clipboard thumb: {error}"));

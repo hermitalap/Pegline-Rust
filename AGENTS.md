@@ -28,14 +28,17 @@ number.
 
 ## Status
 
-**Phase A (M0–M4) is functionally complete as of 2026-11-02**: shell, tray, settings,
-hotkeys, the DirectComposition line with springs/cards/hover/copy/context menu, the
-folder and clipboard capture pipeline, and the flight/drop windows all run. `probe`
-measures fps and private memory.
+**Phase A (M0–M4) is complete as of 2026-11-02**: shell, tray, settings, hotkeys, the
+DirectComposition line with springs/cards/hover/copy/context menu, the folder and
+clipboard capture pipeline, and the flight/drop windows all run. `probe` measures fps
+and private memory.
 
-**One MVP gate is missed: private memory with six cards idle is ~100 MB, not ≤ 60 MB.**
-The cause is located and written down in `PLAN.md` §3.2; do the M6 memory work before
-adding phase B features (M5). Read `PLAN.md` §8 for the exact next steps.
+**Memory is above the MVP target and the user accepted it (2026-11-02)**: six cards
+plateau at ~134 MB private (one D3D device each for the overlay and the pooled flight
+window), with no leak across reveal/hide cycles. `PLAN.md` §3.2 has the breakdown and
+the remaining zero-cost options (lazy flight window ≈ −34 MB, hidden swap chain ≈
+−20 MB, thumbnail atlas). Do not trade features or visual quality for memory; phase B
+(M5) is unblocked. Read `PLAN.md` §8 before picking the next task.
 
 ## Read first
 
@@ -86,8 +89,9 @@ There is no MSBuild, no .NET, no WPF in the new code. The old build scripts unde
 - 6K PNG decode is ~40 ms; never do it on the UI thread.
 - The window surface is the expensive thing: keep the line strip at 6016×420 and
   the flight window at the path bounding box, and shrink/hide them when idle.
-- The card thumbnails are 480 px; the flight image is 1600 px; the twin compare
-  is 2048 px. Do not decode bigger than needed.
+- The card thumbnails are decoded at the card's physical size (136 DIP × screen
+  scale, 480 px cap) so the blit is 1:1; the flight image is 1600 px; the twin
+  compare is 2048 px.
 
 ## Workflow
 

@@ -20,8 +20,8 @@ use std::mem::ManuallyDrop;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_OPEN,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
@@ -29,10 +29,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
-    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_QUADRATIC_BEZIER_SEGMENT,
-    D2D1_ROUNDED_RECT, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory1, ID2D1Geometry, ID2D1Layer, ID2D1LinearGradientBrush,
-    ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
+    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry,
+    ID2D1Layer, ID2D1LinearGradientBrush, ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -234,7 +233,11 @@ struct Shadow {
 
 struct Rope {
     width_dip: f32,
-    geometry: ID2D1Geometry,
+    /// Filled ribbons: shadow, core, highlight. Fills use one pipeline, while
+    /// three long stroked curves cost another ~18 MB on the Intel driver.
+    shadow_geometry: ID2D1Geometry,
+    core_geometry: ID2D1Geometry,
+    highlight_geometry: ID2D1Geometry,
     shadow: ID2D1LinearGradientBrush,
     core: ID2D1LinearGradientBrush,
     highlight: ID2D1LinearGradientBrush,
@@ -616,6 +619,8 @@ impl Renderer {
 
     /// Draws a photo clipped to a rounded rectangle.
     pub fn draw_photo(&mut self, bitmap: &ID2D1Bitmap1, rect: RectF, radius: f32) {
+        // Rounded corners via a masked layer. Measured: one layer per photo
+        // costs about 1 MB and keeps the corners concentric with the frame.
         let Some(geometry) = self.mask_geometry(rect, radius) else {
             return;
         };
@@ -626,7 +631,6 @@ impl Renderer {
             contentBounds: d2d_rect(rect),
             geometricMask: ManuallyDrop::new(Some(geometry.clone())),
             maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            // The cached mask lives at the origin; move it onto the photo.
             maskTransform: Matrix3x2::translation(rect.left, rect.top),
             opacity: 1.0,
             opacityBrush: ManuallyDrop::new(None),
@@ -639,11 +643,9 @@ impl Renderer {
             right: bitmap_width(&self.context, bitmap) as f32,
             bottom: bitmap_height(&self.context, bitmap) as f32,
         };
-        // SAFETY: the layer and geometry are alive; the bitmap is borrowed and
-        // outlives the calls.
+        // SAFETY: the layer and geometry are alive; the bitmap is borrowed
+        // and outlives the calls.
         unsafe {
-            // PushLayer returns () in windows 0.62; a failure surfaces from
-            // EndDraw, which the caller checks.
             self.context
                 .PushLayer(&params, &self.layers[self.layer_depth]);
             self.layer_depth += 1;
@@ -660,6 +662,38 @@ impl Renderer {
         }
     }
 
+    /// Probe helper: six sub-region blits from one atlas bitmap.
+    pub fn draw_atlas_probe(&mut self, bitmap: &ID2D1Bitmap1, count: usize) {
+        let cell_w = 160.0f32;
+        let cell_h = 99.0f32;
+        for index in 0..count {
+            let x = 200.0 + index as f32 * 240.0;
+            let dst = D2D_RECT_F {
+                left: x,
+                top: 60.0,
+                right: x + cell_w,
+                bottom: 60.0 + cell_h,
+            };
+            let column = (index % 2) as f32;
+            let row = (index / 2) as f32;
+            let src = D2D_RECT_F {
+                left: column * 512.0,
+                top: row * 256.0,
+                right: column * 512.0 + 512.0,
+                bottom: row * 256.0 + 256.0,
+            };
+            unsafe {
+                self.context.DrawBitmap(
+                    bitmap,
+                    Some(&dst),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    Some(&src),
+                    None,
+                );
+            }
+        }
+    }
     /// Draws a card shadow around `rect`, in DIP.
     ///
     /// `opacity` is the shadow's alpha (0.18 idle, 0.26 hovered); the texture
@@ -837,54 +871,24 @@ impl Renderer {
         let Some(rope) = self.rope.as_ref() else {
             return;
         };
-        let base = self.current;
-        // SAFETY: geometry and brushes are alive for the duration of the calls.
+        // SAFETY: geometries and brushes are alive for the duration of the
+        // calls; the current transform places the whole line.
         unsafe {
             self.context
-                .SetTransform(&(base * Matrix3x2::translation(0.0, 1.2)));
+                .FillGeometry(&rope.shadow_geometry, &rope.shadow, None);
             self.context
-                .DrawGeometry(&rope.geometry, &rope.shadow, 1.4, None);
-            self.context.SetTransform(&base);
+                .FillGeometry(&rope.core_geometry, &rope.core, None);
             self.context
-                .DrawGeometry(&rope.geometry, &rope.core, 1.2, None);
-            self.context
-                .SetTransform(&(base * Matrix3x2::translation(0.0, -0.35)));
-            self.context
-                .DrawGeometry(&rope.geometry, &rope.highlight, 0.4, None);
-            self.context.SetTransform(&base);
+                .FillGeometry(&rope.highlight_geometry, &rope.highlight, None);
         }
     }
 
     fn rebuild_rope(&mut self, width_dip: f32) -> Result<(), String> {
         let width = width_dip.max(1.0);
         let sag = crate::layout::sag(width);
-        // SAFETY: creating a path geometry on this thread's factory.
-        let geometry = unsafe { self.d2d_factory.CreatePathGeometry() }
-            .map_err(|e| format!("CreatePathGeometry: {e}"))?;
-        // SAFETY: the sink is opened from `geometry`; the figure is completed
-        // before the sink is closed and dropped.
-        unsafe {
-            let sink = geometry
-                .Open()
-                .map_err(|e| format!("PathGeometry::Open: {e}"))?;
-            sink.BeginFigure(Vector2 { X: -20.0, Y: 10.0 }, D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
-                point1: Vector2 {
-                    X: width * 0.5,
-                    Y: 10.0 + 2.0 * sag,
-                },
-                point2: Vector2 {
-                    X: width + 20.0,
-                    Y: 10.0,
-                },
-            });
-            sink.EndFigure(D2D1_FIGURE_END_OPEN);
-            sink.Close()
-                .map_err(|e| format!("PathGeometry::Close: {e}"))?;
-        }
-        let geometry: ID2D1Geometry = geometry
-            .cast()
-            .map_err(|e| format!("PathGeometry -> ID2D1Geometry: {e}"))?;
+        let shadow_geometry = ribbon(&self.d2d_factory, width, sag, 1.4, 1.2)?;
+        let core_geometry = ribbon(&self.d2d_factory, width, sag, 1.2, 0.0)?;
+        let highlight_geometry = ribbon(&self.d2d_factory, width, sag, 0.4, -0.35)?;
         let stops = |color: [u8; 3], alpha: f32| {
             [
                 stop(0.0, color, 0.0),
@@ -917,7 +921,9 @@ impl Renderer {
         )?;
         self.rope = Some(Rope {
             width_dip: width,
-            geometry,
+            shadow_geometry,
+            core_geometry,
+            highlight_geometry,
             shadow,
             core,
             highlight,
@@ -1214,6 +1220,65 @@ fn bitmap_height(_context: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> u32 {
     unsafe { bitmap.GetPixelSize() }.height
 }
 
+/// Builds a closed ribbon polygon along the rope parabola.
+///
+/// Filling is used instead of stroking because three long stroked curves cost
+/// an extra ~18 MB of driver pipeline memory on the Intel adapter, while fills
+/// share the cheap path already used by the cards.
+fn ribbon(
+    factory: &ID2D1Factory1,
+    width: f32,
+    sag: f32,
+    thickness: f32,
+    y_offset: f32,
+) -> Result<ID2D1Geometry, String> {
+    const SEGMENTS: usize = 64;
+    let (p0, p1, p2) = (
+        (-20.0f32, 10.0f32),
+        (width * 0.5, 10.0 + 2.0 * sag),
+        (width + 20.0, 10.0f32),
+    );
+    let mut points = Vec::with_capacity((SEGMENTS + 1) * 2);
+    let mut right: Vec<Vector2> = Vec::with_capacity(SEGMENTS + 1);
+    for index in 0..=SEGMENTS {
+        let t = index as f32 / SEGMENTS as f32;
+        let mt = 1.0 - t;
+        let x = mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0;
+        let y = mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1 + y_offset;
+        let dx = 2.0 * mt * (p1.0 - p0.0) + 2.0 * t * (p2.0 - p1.0);
+        let dy = 2.0 * mt * (p1.1 - p0.1) + 2.0 * t * (p2.1 - p1.1);
+        let length = (dx * dx + dy * dy).sqrt().max(0.0001);
+        let nx = -dy / length * thickness * 0.5;
+        let ny = dx / length * thickness * 0.5;
+        points.push(Vector2 {
+            X: x + nx,
+            Y: y + ny,
+        });
+        right.push(Vector2 {
+            X: x - nx,
+            Y: y - ny,
+        });
+    }
+    points.extend(right.iter().rev().copied());
+
+    // SAFETY: the sink is opened from this geometry and closed before the
+    // geometry is used.
+    let geometry =
+        unsafe { factory.CreatePathGeometry() }.map_err(|e| format!("CreatePathGeometry: {e}"))?;
+    unsafe {
+        let sink = geometry
+            .Open()
+            .map_err(|e| format!("PathGeometry::Open: {e}"))?;
+        sink.BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLines(&points[1..]);
+        sink.EndFigure(windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED);
+        sink.Close()
+            .map_err(|e| format!("PathGeometry::Close: {e}"))?;
+    }
+    geometry
+        .cast()
+        .map_err(|e| format!("PathGeometry -> ID2D1Geometry: {e}"))
+}
 fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
         rect: d2d_rect(rect),
