@@ -30,8 +30,10 @@ The original C# / WPF implementation is frozen under
 [`archive/wpf-v1/`](archive/wpf-v1/) — it still builds and is the behavioural
 reference.
 
-Measured numbers and the remaining work are in [PLAN.md](PLAN.md) §3.3 and §8;
-the port's decision log is [docs/DECISIONS.md](docs/DECISIONS.md).
+Measured numbers and the remaining work are in [PLAN.md](PLAN.md) §3.3–§3.4 and
+§8; the port's decision log is [docs/DECISIONS.md](docs/DECISIONS.md), and the
+2026-11-03 visual acceptance pass (screenshots, fixed defects, frame-by-frame
+results) is [docs/VISUAL-TESTS.md](docs/VISUAL-TESTS.md).
 
 ## Build
 
