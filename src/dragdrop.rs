@@ -7,6 +7,7 @@
 //! (UI) thread and pumps messages, so the app must call it from a message
 //! handler after OLE was initialised on that thread.
 
+use std::cell::Cell;
 use std::mem::{ManuallyDrop, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -17,8 +18,8 @@ use windows::Win32::Foundation::{
     HGLOBAL, HWND, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
 };
 use windows::Win32::System::Com::{
-    FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA,
-    STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
+    DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
+    IEnumFORMATETC_Impl, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
@@ -133,6 +134,86 @@ impl FileDataObject {
     }
 }
 
+impl FileDataObject {
+    /// One `FORMATETC` describing a format this object serves.
+    fn format(&self, cf_format: u16) -> FORMATETC {
+        FORMATETC {
+            cfFormat: cf_format,
+            ptd: std::ptr::null_mut(),
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+        }
+    }
+}
+
+/// `IEnumFORMATETC` over the two offered formats. OLE calls it on the UI
+/// thread, so a `Cell` is enough to track the position.
+#[implement(IEnumFORMATETC)]
+struct FormatEnumerator {
+    formats: [FORMATETC; 2],
+    position: Cell<usize>,
+}
+
+impl IEnumFORMATETC_Impl for FormatEnumerator_Impl {
+    fn Next(
+        &self,
+        celt: u32,
+        rgelt: *mut FORMATETC,
+        pceltfetched: *mut u32,
+    ) -> windows::core::HRESULT {
+        if rgelt.is_null() {
+            return E_INVALIDARG;
+        }
+        let mut copied = 0u32;
+        for index in 0..celt as usize {
+            let source = self.position.get() + index;
+            if source >= self.formats.len() {
+                break;
+            }
+            // SAFETY: OLE guarantees room for `celt` FORMATETC entries.
+            unsafe {
+                *rgelt.add(index) = self.formats[source];
+            }
+            copied += 1;
+        }
+        self.position.set(self.position.get() + copied as usize);
+        if !pceltfetched.is_null() {
+            // SAFETY: OLE passes a writable out-parameter when it wants the count.
+            unsafe {
+                *pceltfetched = copied;
+            }
+        }
+        if copied == celt {
+            S_OK
+        } else {
+            windows::Win32::Foundation::S_FALSE
+        }
+    }
+
+    fn Skip(&self, celt: u32) -> windows::core::Result<()> {
+        let next = (self.position.get() + celt as usize).min(self.formats.len());
+        self.position.set(next);
+        if next >= self.formats.len() {
+            Err(Error::from_hresult(windows::Win32::Foundation::S_FALSE))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn Reset(&self) -> windows::core::Result<()> {
+        self.position.set(0);
+        Ok(())
+    }
+
+    fn Clone(&self) -> windows::core::Result<IEnumFORMATETC> {
+        let copy = FormatEnumerator {
+            formats: self.formats,
+            position: Cell::new(self.position.get()),
+        };
+        Ok(copy.into())
+    }
+}
 impl IDataObject_Impl for FileDataObject_Impl {
     fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
         // SAFETY: OLE passes a FORMATETC that stays valid for the call; the
@@ -208,9 +289,16 @@ impl IDataObject_Impl for FileDataObject_Impl {
         Err(Error::from_hresult(E_NOTIMPL))
     }
 
-    fn EnumFormatEtc(&self, _dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
-        // Targets query the two formats directly with QueryGetData/GetData.
-        Err(Error::from_hresult(E_NOTIMPL))
+    fn EnumFormatEtc(&self, dwdirection: u32) -> windows::core::Result<IEnumFORMATETC> {
+        // DATADIR_SET (2) is not offered: this object is a source only.
+        if dwdirection != 1 {
+            return Err(Error::from_hresult(E_NOTIMPL));
+        }
+        let enumerator = FormatEnumerator {
+            formats: [self.format(self.png_format), self.format(CF_HDROP.0)],
+            position: Cell::new(0),
+        };
+        Ok(enumerator.into())
     }
 
     fn DAdvise(

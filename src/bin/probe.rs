@@ -99,6 +99,7 @@ struct Config {
     repeat: usize,
     prim: String,
     once: bool,
+    big: bool,
     no_img: bool,
     small_img: bool,
 }
@@ -112,6 +113,7 @@ impl Default for Config {
             repeat: 1,
             prim: "card".to_string(),
             once: false,
+            big: false,
             no_img: false,
             small_img: false,
         }
@@ -148,6 +150,7 @@ impl Config {
                 "--prim" => config.prim = value.to_string(),
                 "--once" => config.once = value == "1",
                 "--noimg" => config.no_img = value == "1",
+                "--big" => config.big = value == "1",
                 "--smallimg" => config.small_img = value == "1",
                 other => return Err(format!("unknown switch {other}")),
             }
@@ -311,13 +314,21 @@ fn run_flight(config: &Config) -> Result<String, String> {
         let _ = tx.send(event);
     }))?;
 
-    let image = gradient_image(1600, 1000, 7);
-    let from = RectI::new(
-        monitor.work.right - 1700,
-        monitor.work.bottom - 1100,
-        monitor.work.right - 100,
-        monitor.work.bottom - 100,
-    );
+    let image = if config.big {
+        gradient_image(1600, 900, 7)
+    } else {
+        gradient_image(1600, 1000, 7)
+    };
+    let from = if config.big {
+        monitor.work
+    } else {
+        RectI::new(
+            monitor.work.right - 1700,
+            monitor.work.bottom - 1100,
+            monitor.work.right - 100,
+            monitor.work.bottom - 100,
+        )
+    };
     let to = RectI::new(
         monitor.work.left + monitor.work.width() / 2 - 150,
         monitor.work.top + 90,

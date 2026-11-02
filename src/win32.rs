@@ -613,3 +613,23 @@ pub fn known_folder_guid() -> GUID {
 
 /// Handle type used by clipboard and drag-and-drop code.
 pub type WinHandle = HANDLE;
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Manual integration check: touches `HKCU\...\Run`, so it is ignored in
+    /// the default test run.
+    #[test]
+    #[ignore = "writes the user's Run key; run with --ignored"]
+    fn autostart_round_trip() {
+        let before = autostart_enabled();
+        assert!(set_autostart(true).is_ok());
+        assert!(autostart_enabled());
+        assert!(set_autostart(false).is_ok());
+        assert!(!autostart_enabled());
+        if before {
+            assert!(set_autostart(true).is_ok());
+        }
+    }
+}

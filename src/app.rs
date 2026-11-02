@@ -72,6 +72,10 @@ const DRAG_DIP: f32 = 4.0;
 const DOUBLE_CLICK: f64 = 0.4;
 /// Missing file ticks before a card is dropped (one per second).
 const MISSING_LIMIT: u32 = 2;
+/// Inbox and Windows-saved copies of one screenshot merge within this window.
+const TWIN_SECONDS: f64 = 4.0;
+/// The same copied image is ignored for this long.
+const CLIPBOARD_DUPLICATE_SECONDS: f64 = 10.0;
 
 /// One pegged item, as the UI thread knows it.
 struct Item {
@@ -88,6 +92,13 @@ struct Item {
     last_write: SystemTime,
 }
 
+/// A capture seen in the last few seconds, kept for twin merging.
+struct Recent {
+    at: f64,
+    path: PathBuf,
+    own: bool,
+}
+
 /// Worker results.
 enum Event {
     CaptureFile(PathBuf),
@@ -99,6 +110,12 @@ enum Event {
         thumb: ImageData,
         area: Option<RectI>,
         flight_image: Option<ImageData>,
+        /// Another capture of the same picture with a different owner, found
+        /// within the twin window.
+        twin: Option<PathBuf>,
+        /// Content hash, set for clipboard captures so a repeated copy within
+        /// 10 s is ignored before it reaches the line.
+        clip_hash: Option<u64>,
     },
     RestoreReady {
         id: CardId,
@@ -247,6 +264,16 @@ struct App {
     hook: Option<HHOOK>,
     watcher: Option<watcher::Watcher>,
     flight: Option<Flight>,
+    /// Captures from the twin window (4 s), used to fold the inbox copy and the
+    /// Windows-saved copy of the same screenshot into one card.
+    recent: Vec<Recent>,
+    /// Content hash of the last clipboard capture and when it arrived, so the
+    /// same copied image is not hung twice (10 s window).
+    last_clip_hash: u64,
+    last_clip_at: f64,
+    /// Whether RegisterHotKey succeeded; the tray menu says when it did not.
+    snip_hotkey_ok: bool,
+    note_hotkey_ok: bool,
     /// How many restored cards are still decoding; `pegged.txt` is not
     /// rewritten until they are all back.
     restore_pending: usize,
@@ -291,6 +318,11 @@ impl App {
             hook: None,
             watcher: None,
             flight: None,
+            recent: Vec::new(),
+            last_clip_hash: 0,
+            last_clip_at: 0.0,
+            snip_hotkey_ok: false,
+            note_hotkey_ok: false,
             restore_pending: 0,
             clipboard_at: None,
             start_time: start,
@@ -328,15 +360,6 @@ impl App {
         }
 
         self.open_overlay();
-
-        let flight_tx = self.events_tx.clone();
-        match Flight::create(Box::new(move |event| {
-            let _ = flight_tx.send(Event::Flight(event));
-            window::wake(HWND::default());
-        })) {
-            Ok(flight) => self.flight = Some(flight),
-            Err(error) => logging::error(format!("flight window: {error}")),
-        }
 
         // Watch the real Windows screenshot folder. The watcher treats existing
         // files as known, so only new captures are reported.
@@ -409,8 +432,9 @@ impl App {
                     hotkey.virtual_key,
                 )
             };
-            if let Err(error) = result {
-                logging::error(format!("RegisterHotKey(snip): {error}"));
+            match result {
+                Ok(()) => self.snip_hotkey_ok = true,
+                Err(error) => logging::error(format!("RegisterHotKey(snip): {error}")),
             }
         }
         let note = self
@@ -429,8 +453,9 @@ impl App {
                     hotkey.virtual_key,
                 )
             };
-            if let Err(error) = result {
-                logging::error(format!("RegisterHotKey(note): {error}"));
+            match result {
+                Ok(()) => self.note_hotkey_ok = true,
+                Err(error) => logging::error(format!("RegisterHotKey(note): {error}")),
             }
         }
     }
@@ -554,16 +579,14 @@ impl App {
             live_cards: self.items.len(),
             empty: self.items.is_empty(),
             hotkey_registered: true,
-            snip_key: self
-                .settings
-                .string("snipKey")
-                .unwrap_or("Ctrl+Alt+S")
-                .to_string(),
-            note_key: self
-                .settings
-                .string("noteKey")
-                .unwrap_or("Ctrl+Alt+N")
-                .to_string(),
+            snip_key: shortcut_label(
+                self.settings.string("snipKey").unwrap_or("Ctrl+Alt+S"),
+                self.snip_hotkey_ok,
+            ),
+            note_key: shortcut_label(
+                self.settings.string("noteKey").unwrap_or("Ctrl+Alt+N"),
+                self.note_hotkey_ok,
+            ),
         }
     }
 
@@ -641,7 +664,19 @@ impl App {
                     thumb,
                     area,
                     flight_image,
-                } => self.on_capture_ready(path, own, size_px, thumb, area, flight_image, now),
+                    twin,
+                    clip_hash,
+                } => self.on_capture_ready(
+                    path,
+                    own,
+                    size_px,
+                    thumb,
+                    area,
+                    flight_image,
+                    twin,
+                    clip_hash,
+                    now,
+                ),
                 Event::RestoreReady {
                     id,
                     path,
@@ -1102,6 +1137,23 @@ impl App {
     }
 
     fn spawn_capture(&mut self, path: PathBuf, own: bool, area: Option<RectI>) {
+        let now = win32::now_seconds();
+        self.prune_recent(now);
+        // Candidates must be recorded before the worker starts so two captures
+        // that land together can still see each other.
+        let candidates: Vec<(PathBuf, bool)> = self
+            .recent
+            .iter()
+            .filter(|recent| recent.path != path)
+            .map(|recent| (recent.path.clone(), recent.own))
+            .collect();
+        self.recent.retain(|recent| recent.path != path);
+        self.recent.push(Recent {
+            at: now,
+            path: path.clone(),
+            own,
+        });
+
         let tx = self.events_tx.clone();
         let thread_path = path.clone();
         let want_flight = area.is_some();
@@ -1124,6 +1176,19 @@ impl App {
                 } else {
                     None
                 };
+                // Twin: the same picture saved by Windows and caught here, one
+                // of them long-lived and one of them a fresh inbox copy. The
+                // comparison decodes both at 2048 px, so it stays off the UI.
+                let mut twin = None;
+                for (candidate, candidate_own) in candidates {
+                    if candidate_own != own
+                        && candidate.exists()
+                        && wic::same_picture(&thread_path, &candidate).unwrap_or(false)
+                    {
+                        twin = Some(candidate);
+                        break;
+                    }
+                }
                 let _ = tx.send(Event::CaptureReady {
                     path: thread_path,
                     own,
@@ -1131,11 +1196,83 @@ impl App {
                     thumb,
                     area,
                     flight_image,
+                    twin,
+                    clip_hash: None,
                 });
                 window::wake(HWND::default());
             });
     }
 
+    /// Forgets captures older than the twin window.
+    fn prune_recent(&mut self, now: f64) {
+        self.recent.retain(|recent| now - recent.at < TWIN_SECONDS);
+    }
+
+    /// Folds the two halves of one screenshot into one card. The Windows-saved
+    /// file always wins; the inbox copy is deleted, as in the WPF app.
+    fn resolve_twin(&mut self, path: PathBuf, own: bool, twin: PathBuf) {
+        logging::trace(format!(
+            "twin: {} + {} (new own={own})",
+            path.display(),
+            twin.display()
+        ));
+        self.recent
+            .retain(|recent| recent.path != path && recent.path != twin);
+        if own {
+            // New arrival is our inbox copy; the external file stays.
+            if let Err(error) = std::fs::remove_file(&path) {
+                logging::error(format!("twin remove {}: {error}", path.display()));
+            }
+            return;
+        }
+        // New arrival is the Windows-saved copy: repoint the existing card and
+        // delete the inbox file it was showing.
+        if let Some(item) = self.items.iter_mut().find(|item| item.path == twin) {
+            item.path = path.clone();
+            item.own = false;
+            item.last_write = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(UNIX_EPOCH);
+            if let Err(error) = std::fs::remove_file(&twin) {
+                logging::error(format!("twin remove {}: {error}", twin.display()));
+            }
+            self.save_pegged();
+            self.recent.push(Recent {
+                at: win32::now_seconds(),
+                path,
+                own: false,
+            });
+            return;
+        }
+        // The old card is gone: hang the Windows-saved file normally.
+        self.recent.push(Recent {
+            at: win32::now_seconds(),
+            path,
+            own: false,
+        });
+    }
+
+    /// FNV-1a over a sampled view of the pixels. The sampling matches the WPF
+    /// catcher (every 4th row, 3-byte steps) so repeated clipboard copies of the
+    /// same screenshot hash the same way.
+    fn image_hash(image: &ImageData) -> u64 {
+        let mut hash: u64 = 14_695_981_039_346_656_037;
+        hash ^= (image.width as u64) * 31 + image.height as u64;
+        let stride = image.width as usize * 4;
+        for (row, y) in (0..image.height as usize).step_by(4).enumerate() {
+            let _ = row;
+            let start = y * stride;
+            let end = (start + stride).min(image.bgra.len());
+            let mut index = start;
+            while index < end {
+                hash ^= image.bgra[index] as u64;
+                hash = hash.wrapping_mul(1_099_511_628_211);
+                index += 3;
+            }
+        }
+        hash
+    }
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn on_capture_ready(
         &mut self,
@@ -1145,8 +1282,25 @@ impl App {
         thumb: ImageData,
         area: Option<RectI>,
         flight_image: Option<ImageData>,
+        twin: Option<PathBuf>,
+        clip_hash: Option<u64>,
         now: f64,
     ) {
+        if let Some(hash) = clip_hash {
+            if hash == self.last_clip_hash && now - self.last_clip_at < CLIPBOARD_DUPLICATE_SECONDS
+            {
+                logging::trace("clipboard duplicate ignored");
+                let _ = std::fs::remove_file(&path);
+                self.recent.retain(|recent| recent.path != path);
+                return;
+            }
+            self.last_clip_hash = hash;
+            self.last_clip_at = now;
+        }
+        if let Some(twin) = twin {
+            self.resolve_twin(path, own, twin);
+            return;
+        }
         if self.items.iter().any(|item| item.path == path) {
             return;
         }
@@ -1157,20 +1311,40 @@ impl App {
             let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
             let index = self.items.len();
             if let Some(end) = self.card_frame_px(index, index + 1, card_size) {
-                if let Some(flight) = self.flight.as_mut() {
+                if let Some(flight) = self.ensure_flight() {
                     flying = flight.fly(id, image, area, end, dpi);
                 }
             }
         }
-        self.add_item(id, path, own, size_px, thumb, area, true, flying);
+        self.add_item(id, path.clone(), own, size_px, thumb, area, true, flying);
+        self.recent.retain(|recent| recent.path != path);
+        self.recent.push(Recent { at: now, path, own });
         self.present();
         self.reveal(false, PEEK_SECONDS);
-        let _ = now;
     }
-
     /// The DPI of the monitor the line is on.
     fn screen_dpi(&self) -> Option<u32> {
         self.screen.as_ref().map(|screen| screen.dpi)
+    }
+
+    /// Creates the flight window on first use. Keeping a second D3D device
+    /// alive costs ~34 MB of private memory for an animation that may never
+    /// run, so the window is built lazily and then pooled.
+    fn ensure_flight(&mut self) -> Option<&mut Flight> {
+        if self.flight.is_none() {
+            let flight_tx = self.events_tx.clone();
+            match Flight::create(Box::new(move |event| {
+                let _ = flight_tx.send(Event::Flight(event));
+                window::wake(HWND::default());
+            })) {
+                Ok(flight) => {
+                    self.flight = Some(flight);
+                    logging::trace("flight window created");
+                }
+                Err(error) => logging::error(format!("flight window: {error}")),
+            }
+        }
+        self.flight.as_mut()
     }
 
     /// Decode size for a card thumbnail: exactly the pixels the card occupies
@@ -1449,7 +1623,7 @@ impl App {
         let Some(dpi) = self.screen_dpi() else {
             return;
         };
-        if let Some(flight) = self.flight.as_mut() {
+        if let Some(flight) = self.ensure_flight() {
             let _ = flight.drop_card(id, thumb, rect, tilt, dpi);
         }
     }
@@ -1511,7 +1685,13 @@ impl App {
         self.send_scene(Command::Dragging(Some(id)));
         let png = std::fs::read(&path).unwrap_or_default();
         let image = ImageData::new(1, 1, vec![0, 0, 0, 0]);
-        let effect = crate::dragdrop::drag_file(self.hwnd, &path, &image, &png).unwrap_or(0);
+        let effect = match crate::dragdrop::drag_file(self.hwnd, &path, &image, &png) {
+            Ok(effect) => effect,
+            Err(error) => {
+                logging::error(format!("drag: {error}"));
+                0
+            }
+        };
         self.send_scene(Command::Dragging(None));
         // Clear the backlog of hook events produced during the modal drag loop.
         if let Ok(mut queue) = mouse_queue().lock() {
@@ -1624,6 +1804,7 @@ impl App {
                         return;
                     }
                 };
+                let hash = App::image_hash(&image);
                 let _ = tx.send(Event::CaptureReady {
                     path,
                     own: true,
@@ -1631,6 +1812,8 @@ impl App {
                     thumb,
                     area,
                     flight_image: None,
+                    twin: None,
+                    clip_hash: Some(hash),
                 });
                 window::wake(HWND::default());
                 let _ = now;
@@ -1827,6 +2010,14 @@ fn taskbar_created() -> u32 {
         // SAFETY: a registered message name; no pointers retained.
         unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }
     })
+}
+
+fn shortcut_label(key: &str, registered: bool) -> String {
+    if registered {
+        key.to_string()
+    } else {
+        format!("{key}{}", i18n::s().in_use_by_another_app)
+    }
 }
 
 fn pseudo_random(seed: u64) -> f32 {

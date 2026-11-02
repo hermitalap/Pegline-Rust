@@ -28,16 +28,17 @@ number.
 
 ## Status
 
-**Phase A (M0–M4) is complete as of 2026-11-02**: shell, tray, settings, hotkeys, the
-DirectComposition line with springs/cards/hover/copy/context menu, the folder and
-clipboard capture pipeline, and the flight/drop windows all run. `probe` measures fps
-and private memory.
+**Phase A (M0–M4) is complete and acceptance-checked as of 2026-11-02**: shell, tray,
+settings, hotkeys, the DirectComposition line with springs/cards/hover/copy/context
+menu, the folder and clipboard capture pipeline (twins merged, real Win+Shift+S
+verified), and the flight/drop windows all run. `docs/PARITY.md` records what passed.
 
-**Memory is above the MVP target and the user accepted it (2026-11-02)**: six cards
-plateau at ~134 MB private (one D3D device each for the overlay and the pooled flight
-window), with no leak across reveal/hide cycles. `PLAN.md` §3.2 has the breakdown and
-the remaining zero-cost options (lazy flight window ≈ −34 MB, hidden swap chain ≈
-−20 MB, thumbnail atlas). Do not trade features or visual quality for memory; phase B
+**Memory was accepted by the user (2026-11-02)**, and three zero-cost reductions
+landed: six cards now sit at **50.7 MB** private before the line is first shown, and
+~128 MB after the flight window has been created once (the flight window is now built
+lazily). Probe sees 80.9 MB with the line visible. `PLAN.md` §3.2 has the breakdown.
+Do not trade features or visual quality for memory; the remaining options (hidden
+swap chain, thumbnail atlas, destroying the idle flight window) are optional. Phase B
 (M5) is unblocked. Read `PLAN.md` §8 before picking the next task.
 
 ## Read first
