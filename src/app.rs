@@ -1273,6 +1273,13 @@ impl App {
         let blocked = win32::foreground_is_fullscreen_on(screen.bounds);
         let button_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
 
+        // The line may already be down when a full screen app comes forward
+        // (video, game, slideshow). Take it away instead of waiting for the
+        // pointer to leave; `present` keeps it from coming back while blocked.
+        if blocked && self.is_present && self.hide_at.is_none() {
+            self.dismiss(now);
+        }
+
         if !self.is_revealed {
             let can_reveal =
                 self.wanted() && !blocked && in_band && !self.band_suppressed && !button_down;
@@ -1479,6 +1486,14 @@ impl App {
 
     fn present(&mut self) {
         if self.is_present {
+            return;
+        }
+        // A full screen app on the line's monitor owns the screen; never put
+        // the strip over it (WPF `Refresh` made the same call).
+        let blocked = self
+            .screen
+            .is_some_and(|screen| win32::foreground_is_fullscreen_on(screen.bounds));
+        if blocked {
             return;
         }
         if let Some(overlay) = self.overlay.as_mut() {
