@@ -42,6 +42,7 @@
 | ![真实托盘菜单](visual/tray-menu-real.png) | 真实右键托盘图标：菜单、热键被占用提示、“接管截图”勾选完整 |
 | ![全屏抑制](visual/fullscreen-suppressed.png) | 上：修复前线带压在蓝色全屏窗口上；下：修复后全屏窗口保持干净 |
 | ![点击穿透](visual/clickthrough.png) | 绿色窗口在下方：空白处点击落到窗体（日志 50,400），卡片上的点击被线带接住 |
+| ![拖到资源管理器](visual/drag-drop-explorer.png) | 把 demo 卡片拖进资源管理器，`demo-2.png`（1.23 KB）真实落地 |
 | ![三语编辑器工具栏](visual/editor-languages.png) | 中/西/英三套标题与工具栏标签完整，无裁切（上：中，中：西，下：英） |
 | ![西班牙语空提示](visual/line-es.png) | 西班牙语提示整句放入 pill；托盘菜单的西语长标签同样完整 |
 
@@ -200,6 +201,15 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 - `Ctrl+S` 保存 → 输出 PNG 仍是 **1200×800**，文件随即挂回线带。
 
 这补上了之前因热键被占用而一直“无法实测”的 §5.8 真实链路。
+
+### 3.6.2 拖到资源管理器
+
+- 先把资源管理器窗口移到终端窗口之外并确认 `GetForegroundWindow` 就是它，
+  否则合成拖拽会落在终端上（第一次失败就是这个原因，不是产品问题）。
+- 从 demo 第 3 张卡片拖到 `target\drops`：trace 记录
+  `press card 3` → `drag start card 3` → `drag ghost created`，目录里出现
+  **demo-2.png（1.23 KB）**。
+- 这验证了真实 OLE `IDropTarget` 路径，而不只是 ghost 动画。
 
 ### 3.6.1 点击穿透
 
