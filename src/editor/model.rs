@@ -170,6 +170,17 @@ impl Doc {
     pub fn is_typing(&self) -> bool {
         self.typing.is_some()
     }
+
+    /// The text mark currently being typed, for the on-screen text box.
+    pub fn typing_mark(&self) -> Option<&Mark> {
+        self.typing.and_then(|index| self.marks.get(index))
+    }
+
+    /// Index of the text mark being typed, so rendering can draw it above the
+    /// text box while the older marks stay below it.
+    pub fn typing_index(&self) -> Option<usize> {
+        self.typing
+    }
 }
 
 #[cfg(test)]
@@ -218,12 +229,14 @@ mod tests {
         let mut doc = doc();
         let index = doc.begin_text((5.0, 6.0), 0x00FF00, 32.0);
         assert!(doc.is_typing());
+        assert!(matches!(doc.typing_mark(), Some(Mark::Text { .. })));
         assert!(doc.type_char('H'));
         assert!(doc.type_char('i'));
         assert!(doc.backspace());
         assert!(doc.type_char('i'));
         doc.finish_text();
         assert!(!doc.is_typing());
+        assert!(doc.typing_mark().is_none());
         match &doc.marks()[index] {
             Mark::Text { text, .. } => assert_eq!(text, "Hi"),
             other => panic!("expected text, got {other:?}"),

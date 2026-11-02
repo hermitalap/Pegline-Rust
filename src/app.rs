@@ -3043,6 +3043,8 @@ impl App {
 
     /// `--editor-demo`: a generated picture in the real annotation editor, so
     /// the window, the GPU stack and the toolbar can be checked without a snip.
+    /// `--editor-hold` keeps it open for interactive (manual or scripted)
+    /// checks instead of the four-second smoke test.
     fn install_editor_demo(&mut self) {
         let (w, h) = (900u32, 600u32);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -3075,7 +3077,12 @@ impl App {
         }
         let thumb = image;
         self.open_editor_for(path, false, None, (w, h), thumb);
-        self.editor_demo_at = Some(win32::now_seconds() + 4.0);
+        let hold = std::env::args().any(|arg| arg == "--editor-hold");
+        self.editor_demo_at = if hold {
+            None
+        } else {
+            Some(win32::now_seconds() + 4.0)
+        };
     }
 
     fn install_demo_cards(&mut self) {

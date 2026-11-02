@@ -61,7 +61,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGIOutput,
     IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
-use windows::Win32::Graphics::Gdi::ValidateRect;
+use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory2, GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA,
     IWICImagingFactory, IWICPalette, WICBitmapCacheOnLoad, WICBitmapDitherTypeNone,
@@ -75,11 +75,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetWindowLongPtrW, MINMAXINFO, PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, HTCLIENT, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW, MINMAXINFO,
+    PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP,
     WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{Interface, PCWSTR, w};
@@ -255,6 +256,7 @@ impl Editor {
             reported: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            text_tool: AtomicBool::new(false),
         });
         // SAFETY: the pointer stays valid while the window exists: `Editor`
         // holds the `Arc` and `shutdown` destroys the window before that `Arc`
@@ -403,6 +405,9 @@ struct Shared {
     reported: AtomicBool,
     delivered: AtomicBool,
     stopping: AtomicBool,
+    /// The Text tool was the last tool button pressed; drives the I-beam
+    /// cursor over the canvas. The render thread owns the real tool state.
+    text_tool: AtomicBool,
 }
 
 impl Shared {
@@ -577,11 +582,57 @@ unsafe extern "system" fn editor_wndproc(
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_xy(lparam);
+            // Remember whether the click selected the Text tool, so the canvas
+            // can show an I-beam instead of a cross. Tool buttons live at fixed
+            // positions, independent of the label widths.
+            // SAFETY: pure query on our own window.
+            let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
+            let (dx, dy) = (x as f32 / scale, y as f32 / scale);
+            let top = (TOOLBAR_HEIGHT - BUTTON_HEIGHT) * 0.5;
+            if dy >= top && dy < top + BUTTON_HEIGHT {
+                let step = TOOL_SIZE + TOOL_GAP;
+                for index in 0..4 {
+                    let left = EDGE + index as f32 * step;
+                    if dx >= left && dx < left + TOOL_SIZE {
+                        shared.text_tool.store(index == 2, Ordering::Release);
+                        break;
+                    }
+                }
+            }
             shared.captured.store(true, Ordering::Release);
             // SAFETY: capturing the mouse for our own window.
             unsafe { SetCapture(hwnd) };
             shared.send(Command::PointerDown { x, y });
             return LRESULT(0);
+        }
+        WM_SETCURSOR => {
+            // Hand over the toolbar, cross/I-beam over the canvas. Without this
+            // the whole editor kept the default arrow (the WPF editor set
+            // Cursors.Hand on buttons and Cross/IBeam on the drawing surface).
+            if (lparam.0 as u32 & 0xFFFF) == HTCLIENT {
+                let mut point = POINT::default();
+                // SAFETY: pure queries on our own window and the thread cursor.
+                unsafe {
+                    let _ = GetCursorPos(&mut point);
+                    let _ = ScreenToClient(hwnd, &mut point);
+                }
+                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+                let dy = point.y as f32 / (dpi / 96.0);
+                let cursor = if dy <= TOOLBAR_HEIGHT {
+                    IDC_HAND
+                } else if shared.text_tool.load(Ordering::Acquire) {
+                    IDC_IBEAM
+                } else {
+                    IDC_CROSS
+                };
+                // SAFETY: system cursors are process-wide and never freed.
+                unsafe {
+                    let loaded = LoadCursorW(None, cursor).unwrap_or_default();
+                    let _ = SetCursor(Some(loaded));
+                }
+                return LRESULT(1);
+            }
+            return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_xy(lparam);
@@ -1682,8 +1733,60 @@ impl EditorState {
             triangle: &self.surface.triangle,
             base,
         };
+        // WPF's text tool showed a white TextBox with a caret while typing;
+        // without it the glyphs float on a busy picture with no insertion
+        // point. It sits above older marks and below the text being typed, and
+        // is on-screen only: `save()` renders the marks alone.
         if let Some(doc) = self.doc.as_ref() {
-            painter.marks(doc.marks(), &self.texts);
+            match (doc.typing_index(), doc.typing_mark()) {
+                (
+                    Some(index),
+                    Some(Mark::Text {
+                        origin,
+                        text,
+                        color,
+                        ..
+                    }),
+                ) => {
+                    painter.marks_except(doc.marks(), &self.texts, index);
+                    let (text_w, text_h) = self
+                        .texts
+                        .iter()
+                        .find(|entry| entry.text == *text)
+                        .map(|entry| {
+                            let metrics = text_metrics(&entry.layout);
+                            (metrics.width, metrics.height)
+                        })
+                        .unwrap_or((8.0, 38.0));
+                    let pad = 4.0;
+                    let box_rect = RectF::from_xywh(
+                        origin.0 - pad,
+                        origin.1 - pad,
+                        text_w.max(8.0) + pad * 2.0,
+                        text_h.max(24.0) + pad * 2.0,
+                    );
+                    let rounded_box = rounded(box_rect, 3.0);
+                    let pen = self.assets.brush(*color);
+                    // SAFETY: the render target is in a draw; brushes are live.
+                    unsafe {
+                        rt.FillRoundedRectangle(&rounded_box, &self.chrome.text_box);
+                        if let Some(pen) = pen {
+                            rt.DrawRoundedRectangle(&rounded_box, pen, 1.0, None);
+                            let caret = d2d_rect(RectF::from_xywh(
+                                origin.0 + text_w.max(0.0) + 1.0,
+                                origin.1,
+                                2.0,
+                                text_h.max(18.0),
+                            ));
+                            rt.FillRectangle(&caret, pen);
+                        }
+                    }
+                    if let Some(mark) = doc.marks().get(index) {
+                        painter.mark(mark, &self.texts);
+                    }
+                }
+                _ => painter.marks(doc.marks(), &self.texts),
+            }
         }
         if let Some(drag) = self.drag.as_ref() {
             painter.drag(self.tool, self.color, self.width, self.canvas.scale, drag);
@@ -2100,40 +2203,56 @@ struct Painter<'a> {
 impl<'a> Painter<'a> {
     fn marks(&self, marks: &[Mark], texts: &[TextEntry]) {
         for mark in marks {
-            match mark {
-                Mark::Arrow {
-                    from,
-                    to,
-                    color,
-                    width,
-                } => self.arrow(*from, *to, *color, *width),
-                Mark::Rectangle { rect, color, width } => {
-                    self.rectangle(*rect, *color, *width);
-                }
-                Mark::Text {
-                    origin,
-                    text,
-                    color,
-                    ..
-                } => {
-                    let brush = self.assets.brush(*color);
-                    let entry = texts.iter().find(|entry| entry.text == *text);
-                    if let (Some(brush), Some(entry)) = (brush, entry) {
-                        // SAFETY: the layout, the brush and the target are alive.
-                        unsafe {
-                            self.rt.DrawTextLayout(
-                                Vector2 {
-                                    X: origin.0,
-                                    Y: origin.1,
-                                },
-                                &entry.layout,
-                                brush,
-                                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            );
-                        }
-                    }
-                }
-                Mark::Mosaic { rect, block } => self.mosaic(*rect, *block),
+            self.mark(mark, texts);
+        }
+    }
+
+    /// Draws every mark except `skip` (the text being typed, which goes above
+    /// its input box).
+    fn marks_except(&self, marks: &[Mark], texts: &[TextEntry], skip: usize) {
+        for (index, mark) in marks.iter().enumerate() {
+            if index != skip {
+                self.mark(mark, texts);
+            }
+        }
+    }
+
+    fn mark(&self, mark: &Mark, texts: &[TextEntry]) {
+        match mark {
+            Mark::Arrow {
+                from,
+                to,
+                color,
+                width,
+            } => self.arrow(*from, *to, *color, *width),
+            Mark::Rectangle { rect, color, width } => {
+                self.rectangle(*rect, *color, *width);
+            }
+            Mark::Text {
+                origin,
+                text,
+                color,
+                ..
+            } => self.text(*origin, text, *color, texts),
+            Mark::Mosaic { rect, block } => self.mosaic(*rect, *block),
+        }
+    }
+
+    fn text(&self, origin: (f32, f32), text: &str, color: u32, texts: &[TextEntry]) {
+        let brush = self.assets.brush(color);
+        let entry = texts.iter().find(|entry| entry.text == text);
+        if let (Some(brush), Some(entry)) = (brush, entry) {
+            // SAFETY: the layout, the brush and the target are alive.
+            unsafe {
+                self.rt.DrawTextLayout(
+                    Vector2 {
+                        X: origin.0,
+                        Y: origin.1,
+                    },
+                    &entry.layout,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
             }
         }
     }
@@ -2259,6 +2378,8 @@ struct Chrome {
     text: ID2D1SolidColorBrush,
     text_dim: ID2D1SolidColorBrush,
     white: ID2D1SolidColorBrush,
+    /// The translucent sheet behind the text being typed (WPF's TextBox).
+    text_box: ID2D1SolidColorBrush,
 }
 
 impl Chrome {
@@ -2275,6 +2396,7 @@ impl Chrome {
             text: solid(rt, CHROME_TEXT, 1.0)?,
             text_dim: solid(rt, CHROME_TEXT_DIM, 1.0)?,
             white: solid(rt, 0xFF_FF_FF, 1.0)?,
+            text_box: solid(rt, 0xFF_FF_FF, 0.78)?,
         })
     }
 }
