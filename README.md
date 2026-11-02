@@ -1,110 +1,57 @@
-# Pegline（Windows 版）
+# Pegline
 
-把截图挂在屏幕顶上的一根晾衣绳上：鼠标顶到屏幕上沿，绳子滑下来；移开，绳子收回去。
+Screenshots hang on a clothesline along the top of the screen. Push the pointer
+against the top edge and the line slides down; move away and it tucks back up.
 
-这是 [Tendedero](https://github.com/alejandrobujan/tendedero)（作者 Alejandro Buján，仅支持 macOS）
-在 Windows 上的移植。Tendedero 的 LICENSE 规定代码是 MIT，但**名字和图标不在授权范围内，修改版必须换名、换图标**，
-所以这里叫 Pegline，图标是重新画的（深绿底、一根绳、一个小金属夹夹着一张照片）。
+Pegline is a Windows port of [Tendedero](https://github.com/alejandrobujan/tendedero).
+The name and the icon are not covered by the upstream licence, so this port has its own.
 
-## 运行
+## Goals
 
-```bash
-build.cmd
+Small, light, fast — targets, not hard limits:
+
+- **Small**: one executable, no installer, a few MB to ~15 MB.
+- **Light**: tens of MB of private memory at rest.
+- **Fast**: a stable 60 fps, with 120 fps on 120 Hz displays.
+
+The first release is an MVP of the core loop; optimisation rounds follow, each
+with measured before/after numbers.
+
+## Status
+
+**Being rewritten in Rust.** The original C# / WPF implementation is complete and
+frozen under [`archive/wpf-v1/`](archive/wpf-v1/) — it still builds, runs, and is the
+reference for behaviour. No Rust code exists yet: the repository is at the end of
+the design phase.
+
+The first thing to build is the compositing spike described in
+[`docs/SPIKE-01.md`](docs/SPIKE-01.md). It decides whether the architecture works
+before the port starts.
+
+## Documents
+
+| | |
+|:--|:--|
+| [PLAN.md](PLAN.md) | milestones, performance budget, decisions, next steps |
+| [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | the complete behavioural spec to reproduce |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | target architecture (Win32 + DirectComposition + D3D11/D2D) |
+| [docs/RUST-STACK.md](docs/RUST-STACK.md) | toolchain, crates, build, packaging, testing |
+| [docs/SPIKE-01.md](docs/SPIKE-01.md) | the M0 spike: what to build, what to measure |
+| [docs/PARITY.md](docs/PARITY.md) | acceptance checklist for the port |
+| [docs/MEMORY-ANALYSIS.md](docs/MEMORY-ANALYSIS.md) | why: measured memory and frame rates of the WPF version |
+| [AGENTS.md](AGENTS.md) | working notes for agents |
+
+## Build (planned)
+
+```powershell
+cargo build --release
+target\release\pegline.exe
 ```
 
-产物是 `build/Pegline.exe`，单文件、约 90 KB，双击即可运行，常驻在右下角托盘。
+Single executable, no runtime to install. Data lives in `%APPDATA%\Pegline` and
+`%LOCALAPPDATA%\Pegline` and is shared with the WPF version, so the two can be
+swapped back and forth without losing the line.
 
-**零依赖**：用的是 Windows 10/11 自带的 .NET Framework 4.8 和它附带的 C# 编译器（`csc.exe`），
-不需要装 Visual Studio、.NET SDK 或任何东西。拷到别的 Windows 10/11 电脑上也能直接运行。
+## Licence
 
-**多屏不同缩放**：按显示器分别处理 DPI（Per-Monitor V2，见 `src/app.manifest`）。笔记本 150% 加外接屏 100% 这种组合，
-两块屏幕上都按各自的缩放清晰绘制，绳子、图片、点击和拖拽的位置都对得上。
-
-## 操作
-
-| 操作 | 效果 |
-|:--|:--|
-| 鼠标悬停在图片上 | 图片下方出现「复制」「打开」两个按钮，效果同单击、双击 |
-| 悬停约 0.35 秒 | 在按钮下方显示大图预览；移开、点击、右键、拖拽或收起绳子时关闭，不抢焦点 |
-| 单击 | 复制图片（同时带图片和文件，粘贴进聊天软件、Word、文件夹都行） |
-| 长按 | 用画图打开编辑，保存后绳子上的缩略图自动刷新 |
-| 双击 | 用默认看图软件打开 |
-| 拖进某个应用 | 发一份副本，图还留在绳子上 |
-| 拖进文件夹 / 桌面 | 文件移过去保存，图离开绳子 |
-| 拖进回收站，或点左上角的叉 | 扔掉 |
-| 右键 | 复制 / 打开 / 编辑 / 在资源管理器中显示 / 保存到桌面 / 丢弃 |
-| 鼠标顶在屏幕最上沿约 0.3 秒 | 在那块屏幕上放下绳子 |
-| 点击屏幕最上沿（标签页、标题栏） | 收起绳子 |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd>，或左键点托盘图标 | 显示 / 收起 |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>（可在托盘菜单「截图快捷键」里改） | 截图后直接标注；保存才挂上绳子 |
-| 先复制一段文字，再按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd>（可在托盘菜单「便签快捷键」里改） | 把这段文字挂成便签；悬停可换颜色（黄 / 蓝 / 粉 / 灰）、复制文字、用记事本打开编辑 |
-
-## 截图从哪来
-
-Pegline 不自己实现截图，用的是 Windows 自带的截图界面：
-
-- **Ctrl+Alt+S**（默认，可改）：打开系统截图框选界面（和 Win+Shift+S 同一个）。完成框选后会打开 Pegline 的标注窗口：
-  可加箭头、矩形、文字或马赛克，提供红、黄、绿、蓝、黑、白六色和三档线宽；支持撤销、重做。保存时以原始像素尺寸的 PNG
-  挂上绳子；取消则不挂图。不需要打开「接管截图」。只认按下快捷键后一分钟内的那一张，不会顺带开始读你的剪贴板。
-  默认值故意避开了 QQ（Ctrl+Alt+A）、微信（Alt+A）、钉钉和飞书（Ctrl+Shift+A）的截图键；
-  想换成别的，在托盘菜单「截图快捷键」里直接按下新组合，被别的程序占用时会提示。
-
-也可以照常用原来的快捷键：
-
-- **Win+PrtScn**：Windows 会把文件存到「图片\Screenshots」，Pegline 监听这个文件夹（位置改过也能找到）。
-- **Win+Shift+S、PrtScn**（只进剪贴板，不存文件）：首次启动会问你要不要「接管截图」。
-  同意后，剪贴板里新出现的截图会存进 `%LOCALAPPDATA%\Pegline\Screenshots` 并立刻挂上；
-  不想要的点叉会进回收站，想留的拖进文件夹或右键「保存到桌面」。随时可以在托盘菜单里关掉。
-  托盘菜单「清空截图文件」会把这个文件夹里的截图全部移进回收站（先确认，绳子上对应的图一起取下）；
-  「全部取下」只取下绳子上的图，不删文件。
-
-为了不把你在浏览器、文档里复制的图片误当成截图，只有剪贴板里**只有图片**（没有 HTML、文字、文件）时才会接管。
-同一张截图同时出现在剪贴板和 Screenshots 文件夹时（Win+PrtScn、Win11 截图工具都会这样），只挂一张，也只留一份文件：
-保留 Windows 存在 Screenshots 里的那份，Pegline 自己存的副本会删掉。判断依据是几秒内先后到达、而且画面内容相同，
-所以连按两次截到的两张不同截图不会被误当成重复。
-
-## 和 Mac 版的差异
-
-| Mac 版 | Windows 版 | 原因 |
-|:--|:--|:--|
-| 停在菜单栏 | 顶在屏幕最上沿（任务栏放在顶部时就是任务栏那一条） | Windows 没有顶部菜单栏 |
-| 长按打开系统「标记」编辑器 | 长按用画图打开 | Windows 没有对应的系统编辑器 |
-| 接管模式改系统截图设置（关浮动缩略图、改保存位置），退出时还原 | 接管模式读剪贴板，不改任何系统设置 | Win+Shift+S 默认只进剪贴板；不改系统设置也就不需要还原 |
-| 截图文件记录了截取区域，截图从原处飞上绳子 | 按图片尺寸推断：整屏 / 当前窗口 / 以松开鼠标处为右下角的区域；推断不出就直接落下 | Windows 不在文件上记录截取区域 |
-| 毛玻璃相框 | 半透明白色相框（不做背景模糊） | WPF 不支持对窗口后面的内容做实时模糊 |
-| 拖拽时系统画缩略图 | Pegline 自己画一个跟随鼠标的半透明缩略图 | Windows 普通文件拖拽不带预览 |
-| 系统音效 | 内置合成的三个短音效 | 不依赖系统音效文件 |
-| 英语、西班牙语 | 英语、西班牙语、中文（跟随系统语言） | |
-
-全屏应用（视频、游戏、演示）在前台时绳子不出现。
-
-## 数据放在哪
-
-- 设置：`%APPDATA%\Pegline\settings.ini`，挂着的图片列表：`%APPDATA%\Pegline\pegged.txt`
-- 接管下来的截图：`%LOCALAPPDATA%\Pegline\Screenshots`
-- 便签：`%LOCALAPPDATA%\Pegline\Notes`（每张便签一个 .txt 文件），颜色记在 `settings.ini`
-- 出错日志：`%APPDATA%\Pegline\error.log`；在同目录建一个空文件 `trace.on` 会额外记录 `trace.log`（剪贴板、拖拽事件）
-- 开机启动：写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-
-没有账号、没有联网、没有统计。
-
-## 代码结构（`src/`）
-
-| 文件 | 作用 | 对应 Mac 版 |
-|:--|:--|:--|
-| `App.cs` | 托盘、快捷键、绳子何时放下 / 收起、截图飞上绳子 | `AppDelegate.swift`、`main.swift` |
-| `LineWindow.cs` | 屏幕顶部那条透明、不抢焦点、只在图片上接收鼠标的窗口；绳子本身 | `LinePanel.swift`、`LineView.swift` |
-| `CardView.cs` | 一张图：相框、夹子、摆动、微风 | `PeggedView.swift` |
-| `Gestures.cs` | 单击、长按、拖拽、右键菜单、拖拽预览 | `GrabArea.swift` |
-| `HoverPreview.cs` | 悬停大图预览、异步加载和多屏预览位置 | |
-| `Line.cs` | 挂着什么、每张图能做什么、持久化 | `Line.swift`、`Markup.swift` |
-| `Watchers.cs` | 监听 Screenshots 文件夹、接管剪贴板截图、全局快捷键 | `ScreenshotWatcher.swift`、`Inbox.swift`、`HotKey.swift` |
-| `Flight.cs` | 截图飞上绳子、丢弃时掉落、全屏检测 | `CaptureFlight.swift`、`FullScreen.swift` |
-| `Support.cs` | 多语言、设置、音效、弹簧动画 | `Localization.swift` |
-| `Shortcut.cs` | 快捷键的保存格式、快捷键设置窗口 | |
-| `Notes.cs` | 便签：存成 .txt 文件、颜色、画成卡片 | |
-| `AppIcon.cs` | 用代码画的图标（托盘和 exe 共用） | `scripts/make-icon.swift` |
-| `Native.cs` | Win32 调用 | |
-
-动画没有用 WPF 的 Storyboard，而是每帧手工积分弹簧（`Spring`），参数直接对应原版 SwiftUI 的
-`spring(response:dampingFraction:)` 和 `interpolatingSpring(stiffness:damping:)`，所以手感和原版一致。
+MIT. See [LICENSE](LICENSE).

@@ -47,6 +47,8 @@ namespace Pegline
         /// Recent captures: Win+PrtScn and the Windows 11 Snipping Tool both
         /// save a file and fill the clipboard. One capture, one photo, one file.
         readonly List<KeyValuePair<DateTime, string>> recent = new List<KeyValuePair<DateTime, string>>();
+        /// recent is read from the capture worker and written here.
+        readonly object recentLock = new object();
         EditingCapture editing;
         readonly List<RecentEditedCapture> recentlyEdited = new List<RecentEditedCapture>();
 
@@ -164,9 +166,15 @@ namespace Pegline
             if (watcher != null) watcher.Stop();
             watcher = new ScreenshotWatcher(Native.ScreenshotsFolder(), path =>
             {
-                // Win+PrtScn captures the whole screen, so it can fly up from there.
+                // Win+PrtScn saves the whole screen and Win+Shift+S saves the
+                // snip with the pointer left at its bottom right corner, so both
+                // can fly up from where they were taken. Without the pointer a
+                // region capture has no origin at all and simply drops onto the
+                // line — which is what made the take-off disappear for anyone
+                // who takes screenshots with the system tool.
                 var size = Thumbnails.PixelSizeOf(path);
-                WatchCapture(path, CaptureArea.Guess((int)size.Width, (int)size.Height, Native.GetForegroundWindow(), false));
+                bool fresh = (DateTime.UtcNow - Pegged.SafeWriteTime(path)).TotalSeconds < 3;
+                WatchCapture(path, CaptureArea.Guess((int)size.Width, (int)size.Height, Native.GetForegroundWindow(), fresh));
             }, line.Prune);
             watcher.Start();
         }
@@ -242,7 +250,7 @@ namespace Pegline
 
         void EditCapture(string path, Rect? from)
         {
-            var current = new EditingCapture { Path = path, From = from, Original = Thumbnails.Load(path, 0) };
+            var current = new EditingCapture { Path = path, From = from, Original = Thumbnails.Load(path, Thumbnails.ComparePixels) };
             editing = current;
             bool saved = ImageEditor.Edit(path, delegate { return current.Twin ?? current.Path; });
             editing = null;
@@ -346,12 +354,21 @@ namespace Pegline
         string TwinOf(string path)
         {
             var now = DateTime.UtcNow;
-            recent.RemoveAll(r => (now - r.Key).TotalSeconds > 4);
-            bool caught = Line.InInbox(path);
-            var twin = recent.Select(r => r.Value)
-                             .FirstOrDefault(p => Line.InInbox(p) != caught && File.Exists(p) && Thumbnails.SamePicture(p, path));
-            if (twin == null) recent.Add(new KeyValuePair<DateTime, string>(now, path));
-            return twin;
+            var candidates = new List<string>();
+            lock (recentLock)
+            {
+                recent.RemoveAll(r => (now - r.Key).TotalSeconds > 4);
+                bool caught = Line.InInbox(path);
+                foreach (var r in recent)
+                    if (r.Value != path && Line.InInbox(r.Value) != caught && File.Exists(r.Value))
+                        candidates.Add(r.Value);
+                // Recorded before the comparison: its twin can arrive on another
+                // worker at the same moment, and each has to see the other.
+                recent.Add(new KeyValuePair<DateTime, string>(now, path));
+            }
+            foreach (var p in candidates)
+                if (Thumbnails.SamePicture(p, path)) return p;
+            return null;
         }
 
         /// Keeps the file Windows saved and deletes the copy Pegline caught,
@@ -363,8 +380,11 @@ namespace Pegline
             line.Repoint(copy, saved);
             try { File.Delete(copy); }
             catch (Exception) { }
-            recent.RemoveAll(r => r.Value == copy);
-            recent.Add(new KeyValuePair<DateTime, string>(DateTime.UtcNow, saved));
+            lock (recentLock)
+            {
+                recent.RemoveAll(r => r.Value == copy);
+                recent.Add(new KeyValuePair<DateTime, string>(DateTime.UtcNow, saved));
+            }
         }
 
         // The capture flying to the line
@@ -373,39 +393,67 @@ namespace Pegline
         /// place on the line. Without a known capture area it simply drops in.
         void HangCapture(string path, Rect? from)
         {
-            string twin;
-            try { twin = TwinOf(path); }
-            catch (Exception) { twin = null; }
-            Trace.Write("capture " + path + " twin=" + twin);
-            if (twin != null)
-            {
-                FoldTwins(path, twin);
-                return;
-            }
+            Trace.Write("capture " + path);
+            // All the slow parts of a capture happen on a worker thread: finding
+            // a twin decodes both pictures at full size, and decoding this one
+            // takes a fifth of a second on a full screen shot. On the UI thread
+            // that froze the line just as the capture should lift off.
+            Background.Run(
+                delegate
+                {
+                    string twin = null;
+                    try { twin = TwinOf(path); }
+                    catch (Exception) { }
+                    if (twin != null) return new object[] { twin, null, null };
+                    var big = Thumbnails.Load(path, Flight.MaxStartPixels);
+                    return new object[] { null, big, Thumbnails.Scaled(big, 480) };
+                },
+                delegate(object result)
+                {
+                    var parts = result as object[];
+                    if (parts == null) return;
+                    var twin = (string)parts[0];
+                    if (twin != null)
+                    {
+                        Trace.Write("capture " + path + " twin=" + twin);
+                        FoldTwins(path, twin);
+                        return;
+                    }
+                    HangDecoded(path, from, parts[1] as BitmapSource, parts[2] as BitmapSource);
+                });
+        }
+
+        /// The picture is decoded: hang it, then let it fly.
+        void HangDecoded(string path, Rect? from, BitmapSource big, BitmapSource thumb)
+        {
+            if (thumb == null) return;
             if (from.HasValue)
             {
                 var r = from.Value;
                 pendingScreen = Forms.Screen.FromPoint(new System.Drawing.Point(
                     (int)(r.X + r.Width / 2), (int)(r.Y + r.Height / 2)));
             }
-            Guid id = line.Hang(path, false, from.HasValue);
-            if (id == Guid.Empty || !from.HasValue) return;
+            Guid id = line.Hang(path, thumb, false, from.HasValue);
+            if (id == Guid.Empty || !from.HasValue || big == null) return;
+            // A new capture is worth showing even when the line was already full
+            // and its count did not grow: without this the card lands unseen and
+            // the flight is skipped.
+            wanted = true;
+            Refresh();
+            if (isPresent) Reveal(false, 2.5);
             // Let the line come down and lay out before measuring the landing spot.
-            After(0.03, delegate { Fly(id, from.Value); });
+            After(0.03, delegate { Fly(id, from.Value, big); });
         }
 
-        void Fly(Guid id, Rect from)
+        void Fly(Guid id, Rect from, BitmapSource image)
         {
             var item = line.Find(id);
             var to = panel.CardFrame(id);
-            if (!isPresent || !isRevealed || item == null || !to.HasValue)
+            if (!isPresent || !isRevealed || item == null || !to.HasValue || image == null)
             {
                 line.Land(id);
                 return;
             }
-            int pixels = (int)Math.Max(from.Width, from.Height);
-            var image = Thumbnails.Load(item.Path, Math.Min(3000, Math.Max(400, pixels)));
-            if (image == null) { line.Land(id); return; }
             Flight.Fly(image, from, to.Value, item.Tilt, panel.Screen, delegate { line.Land(id); });
         }
 
@@ -774,7 +822,8 @@ namespace Pegline
             }
         }
 
-        static void Log(Exception e)
+        /// Logged from the capture worker as well as the UI thread.
+        public static void Log(Exception e)
         {
             try
             {

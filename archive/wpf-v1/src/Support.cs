@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Media;
+using System.Windows;
 using Microsoft.Win32;
 
 namespace Pegline
@@ -37,6 +38,32 @@ namespace Pegline
                                    DateTime.Now.ToString("HH:mm:ss.fff") + " " + message + Environment.NewLine);
             }
             catch (Exception) { }
+        }
+    }
+
+    /// Work that must never hold up the UI thread: decoding a full screen
+    /// capture, encoding one back to PNG, comparing two captures pixel by
+    /// pixel. Each takes a hundred milliseconds or more on a 6K screen, and all
+    /// of them used to land exactly when a capture was meant to lift off.
+    static class Background
+    {
+        public static void Run(Func<object> work, Action<object> done)
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                object result = null;
+                try { result = work(); }
+                catch (Exception e)
+                {
+                    // A capture that cannot be decoded must not vanish silently.
+                    Program.Log(e);
+                }
+                if (done == null) return;
+                var app = Application.Current;
+                if (app == null) return;
+                try { app.Dispatcher.BeginInvoke(new Action(delegate { done(result); })); }
+                catch (Exception) { }
+            });
         }
     }
 

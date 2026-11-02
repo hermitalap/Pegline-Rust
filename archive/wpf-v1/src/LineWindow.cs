@@ -149,6 +149,10 @@ namespace Pegline
         readonly Random rnd = new Random();
         double hideT = -1, hideFrom;
         double hintOpacity;
+        /// The hint's text never changes, so it is laid out once instead of on
+        /// every frame: re-measuring it was most of the line's idle CPU.
+        bool hintMeasured;
+        double hintX = double.NaN, hintY = double.NaN;
         TimeSpan lastFrame;
         double ropeWidth = -1;
         public IntPtr Handle;
@@ -215,6 +219,7 @@ namespace Pegline
             var area = Screen.WorkingArea;
             int height = (int)Math.Ceiling(Layout.PanelHeight * Screens.ScaleOf(Screen));
             Place(new System.Drawing.Rectangle(area.X, area.Y, area.Width, height));
+            hintMeasured = false;
         }
 
         public void KeepOnTop()
@@ -366,9 +371,20 @@ namespace Pegline
 
             hintOpacity += ((line.Items.Count == 0 ? 1 : 0) - hintOpacity) * Math.Min(1, dt / 0.3 * 2);
             hint.Opacity = hintOpacity;
-            hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Canvas.SetLeft(hint, width / 2 - hint.DesiredSize.Width / 2);
-            Canvas.SetTop(hint, Layout.RopeY(width / 2, width) + 34 - hint.DesiredSize.Height / 2);
+            if (!hintMeasured)
+            {
+                hint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                hintMeasured = true;
+            }
+            double hx = width / 2 - hint.DesiredSize.Width / 2;
+            double hy = Layout.RopeY(width / 2, width) + 34 - hint.DesiredSize.Height / 2;
+            if (hx != hintX || hy != hintY)
+            {
+                hintX = hx;
+                hintY = hy;
+                Canvas.SetLeft(hint, hx);
+                Canvas.SetTop(hint, hy);
+            }
 
             for (int i = 0; i < line.Items.Count; i++)
             {

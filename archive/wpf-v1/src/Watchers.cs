@@ -268,31 +268,55 @@ namespace Pegline
 
         /// A 32 bit bitmap read from the clipboard often carries an alpha
         /// channel that is all zero, which would hang an invisible photo.
+        /// Checked a band of rows at a time and abandoned at the first opaque
+        /// pixel: an ordinary screenshot is opaque on its first pixel, while
+        /// copying every pixel of a 6K capture cost another 80 MB per capture.
         static BitmapSource Opaque(BitmapSource image)
         {
             if (image.Format != System.Windows.Media.PixelFormats.Bgra32 && image.Format != System.Windows.Media.PixelFormats.Pbgra32)
                 return image;
             int stride = image.PixelWidth * 4;
-            var px = new byte[stride * image.PixelHeight];
-            image.CopyPixels(px, stride, 0);
-            for (int i = 3; i < px.Length; i += 4)
-                if (px[i] != 0) return image;
+            int rows = Math.Min(64, image.PixelHeight);
+            var px = new byte[stride * rows];
+            for (int y = 0; y < image.PixelHeight; y += rows)
+            {
+                int n = Math.Min(rows, image.PixelHeight - y);
+                image.CopyPixels(new Int32Rect(0, y, image.PixelWidth, n), px, stride, 0);
+                for (int i = 3; i < n * stride; i += 4)
+                    if (px[i] != 0) return image;
+            }
             var opaque = new FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgr32, null, 0);
             opaque.Freeze();
             return opaque;
         }
 
+        /// A fingerprint that tells the same clipboard announcement from a new
+        /// capture. Every fourth row is enough for that, and it keeps the copy
+        /// of a 6K bitmap off the UI thread, where this runs: the clipboard
+        /// notification is answered on it.
         static ulong Hash(BitmapSource image)
         {
-            var bgr = new FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgr32, null, 0);
+            var bgr = image.Format == System.Windows.Media.PixelFormats.Bgr32
+                ? image
+                : new FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgr32, null, 0);
             int stride = image.PixelWidth * 4;
-            var px = new byte[stride * image.PixelHeight];
-            bgr.CopyPixels(px, stride, 0);
+            int rows = Math.Min(32, image.PixelHeight);
+            var px = new byte[stride * rows];
             ulong h = 14695981039346656037UL ^ (ulong)(image.PixelWidth * 31 + image.PixelHeight);
-            for (int i = 0; i < px.Length; i += 3)
+            for (int y = 0; y < image.PixelHeight; y += rows)
             {
-                h ^= px[i];
-                h *= 1099511628211UL;
+                int n = Math.Min(rows, image.PixelHeight - y);
+                bgr.CopyPixels(new Int32Rect(0, y, image.PixelWidth, n), px, stride, 0);
+                for (int r = 0; r < n; r++)
+                {
+                    if (((y + r) & 3) != 0) continue;
+                    int off = r * stride;
+                    for (int i = 0; i < stride; i += 3)
+                    {
+                        h ^= px[off + i];
+                        h *= 1099511628211UL;
+                    }
+                }
             }
             return h;
         }
@@ -348,20 +372,48 @@ namespace Pegline
             lastHash = hash;
             lastHashAt = DateTime.UtcNow;
 
-            try
+            // Encoding a 6K capture to PNG is a fifth of a second of work, so it
+            // runs on a worker: the clipboard notification returns at once and
+            // the line never freezes when you take the shot.
+            if (!image.IsFrozen && image.CanFreeze) image.Freeze();
+            bool edit = editArmed && DateTime.UtcNow < armedUntil;
+            armedUntil = DateTime.MinValue;
+            editArmed = false;
+            var area = CaptureArea.Guess(image.PixelWidth, image.PixelHeight, foregroundAtCapture);
+
+            Func<BitmapSource, string> save = delegate(BitmapSource bitmap)
             {
-                Directory.CreateDirectory(Line.InboxFolder);
-                string name = Loc.L("Screenshot", "Captura", "截图") + " " + DateTime.Now.ToString("yyyy-MM-dd HHmmss") + ".png";
-                string path = Line.UniquePath(Line.InboxFolder, name);
-                var enc = new PngBitmapEncoder();
-                enc.Frames.Add(BitmapFrame.Create(image));
-                using (var fs = File.Create(path)) enc.Save(fs);
-                bool edit = editArmed && DateTime.UtcNow < armedUntil;
-                armedUntil = DateTime.MinValue;
-                editArmed = false;
-                onCapture(path, CaptureArea.Guess(image.PixelWidth, image.PixelHeight, foregroundAtCapture), edit);
+                try
+                {
+                    Directory.CreateDirectory(Line.InboxFolder);
+                    string name = Loc.L("Screenshot", "Captura", "截图") + " " + DateTime.Now.ToString("yyyy-MM-dd HHmmss") + ".png";
+                    string path = Line.UniquePath(Line.InboxFolder, name);
+                    var enc = new PngBitmapEncoder();
+                    enc.Frames.Add(BitmapFrame.Create(bitmap));
+                    using (var fs = File.Create(path)) enc.Save(fs);
+                    return path;
+                }
+                catch (Exception) { return null; }
+            };
+
+            if (image.IsFrozen)
+            {
+                BitmapSource bitmap = image;
+                Background.Run(
+                    delegate { return save(bitmap); },
+                    delegate(object result)
+                    {
+                        var saved = result as string;
+                        if (saved != null) onCapture(saved, area, edit);
+                    });
             }
-            catch (Exception) { }
+            else
+            {
+                // An image that cannot be frozen belongs to another thread:
+                // saving it here is the only safe way left.
+                var saved = save(image);
+                if (saved != null) onCapture(saved, area, edit);
+            }
         }
     }
 }

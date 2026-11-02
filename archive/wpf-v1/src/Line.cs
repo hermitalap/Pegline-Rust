@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.VisualBasic.FileIO;
@@ -112,8 +113,15 @@ namespace Pegline
 
         public Guid Hang(string path, bool quietly = false, bool flying = false)
         {
+            return Hang(path, LoadThumb(path), quietly, flying);
+        }
+
+        /// The same, but with the picture already decoded on a worker thread: a
+        /// full screen capture is a fifth of a second of decoder work, and it
+        /// used to happen on the UI thread the instant you took the shot.
+        public Guid Hang(string path, BitmapSource thumb, bool quietly, bool flying)
+        {
             if (Items.Any(i => SamePath(i.Path, path) && !i.Falling)) return Guid.Empty;
-            var thumb = LoadThumb(path);
             if (thumb == null) return Guid.Empty;
             var item = new Pegged(path, thumb) { Flying = flying };
             Items.Add(item);
@@ -557,6 +565,24 @@ namespace Pegline
             catch (Exception) { return null; }
         }
 
+        /// A smaller copy of a picture that is already decoded, made on a
+        /// worker thread: the card's thumbnail without decoding the file a
+        /// second time.
+        public static BitmapSource Scaled(BitmapSource source, int maxPixels)
+        {
+            if (source == null) return null;
+            double longest = Math.Max(source.PixelWidth, source.PixelHeight);
+            if (longest <= maxPixels || longest <= 0) return source;
+            double f = maxPixels / longest;
+            var scaled = new TransformedBitmap(source, new ScaleTransform(f, f));
+            // Made real here, on the caller's thread: a TransformedBitmap
+            // re-samples lazily, which would put that work back on the UI thread
+            // the first time the card is drawn.
+            var ready = new WriteableBitmap(scaled);
+            ready.Freeze();
+            return ready;
+        }
+
         public static Size PixelSizeOf(string path)
         {
             try
@@ -570,6 +596,12 @@ namespace Pegline
             catch (Exception) { return new Size(0, 0); }
         }
 
+        /// The longest side at which two pictures are compared. A twin is the
+        /// same capture saved twice, so the comparison does not need all twenty
+        /// million pixels of a 6K screen, and decoding both at full size cost a
+        /// quarter of a gigabyte for a moment every time a capture arrived.
+        public const int ComparePixels = 2048;
+
         /// Whether two image files hold the same picture. The clipboard copy
         /// and the file Windows saves can differ in encoding and alpha, so
         /// only colour counts, with a little slack for rounding; anything
@@ -578,10 +610,9 @@ namespace Pegline
         {
             try
             {
-                byte[] pa, pb;
-                int wa, ha, wb, hb;
-                if (!Pixels(a, out pa, out wa, out ha) || !Pixels(b, out pb, out wb, out hb)) return false;
-                return SamePixels(pa, wa, ha, pb, wb, hb);
+                var pa = Load(a, ComparePixels);
+                var pb = Load(b, ComparePixels);
+                return pa != null && pb != null && SamePixels(pa, pb);
             }
             catch (Exception) { return false; }
         }
@@ -593,48 +624,49 @@ namespace Pegline
         {
             try
             {
-                byte[] pa, pb;
-                int wa, ha, wb, hb;
-                if (!Pixels(image, out pa, out wa, out ha) || !Pixels(path, out pb, out wb, out hb)) return false;
-                return SamePixels(pa, wa, ha, pb, wb, hb);
+                var pa = Scaled(image, ComparePixels);
+                var pb = Load(path, ComparePixels);
+                return pa != null && pb != null && SamePixels(pa, pb);
             }
             catch (Exception) { return false; }
         }
 
-        static bool SamePixels(byte[] pa, int wa, int ha, byte[] pb, int wb, int hb)
+        /// Colour only, so an alpha channel (often all zero on a clipboard
+        /// bitmap) cannot make two identical pictures look different.
+        static BitmapSource Bgr(BitmapSource source)
         {
-            if (wa != wb || ha != hb) return false;
-            long allowed = (long)wa * ha / 200, differing = 0;
-            for (int i = 0; i < pa.Length; i += 4)
-            {
-                if (Math.Abs(pa[i] - pb[i]) > 8 || Math.Abs(pa[i + 1] - pb[i + 1]) > 8 || Math.Abs(pa[i + 2] - pb[i + 2]) > 8)
-                    if (++differing > allowed) return false;
-            }
-            return true;
+            if (source.Format == System.Windows.Media.PixelFormats.Bgr32) return source;
+            var converted = new FormatConvertedBitmap(source, System.Windows.Media.PixelFormats.Bgr32, null, 0);
+            converted.Freeze();
+            return converted;
         }
 
-        static bool Pixels(string path, out byte[] px, out int w, out int h)
+        /// Pixel by pixel, a band of rows at a time: two full-size copies of a
+        /// 6K capture would be a 160 MB pair of arrays on the large object heap,
+        /// and that heap keeps them long after the comparison is over.
+        static bool SamePixels(BitmapSource a, BitmapSource b)
         {
-            px = null; w = h = 0;
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            if (a.PixelWidth != b.PixelWidth || a.PixelHeight != b.PixelHeight) return false;
+            var ca = Bgr(a);
+            var cb = Bgr(b);
+            int width = ca.PixelWidth, height = ca.PixelHeight, stride = width * 4;
+            int rows = Math.Min(64, height);
+            var pa = new byte[stride * rows];
+            var pb = new byte[stride * rows];
+            long allowed = (long)width * height / 200, differing = 0;
+            for (int y = 0; y < height; y += rows)
             {
-                var frame = BitmapFrame.Create(fs, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-                var bgr = new FormatConvertedBitmap(frame, System.Windows.Media.PixelFormats.Bgr32, null, 0);
-                w = bgr.PixelWidth; h = bgr.PixelHeight;
-                px = new byte[w * h * 4];
-                bgr.CopyPixels(px, w * 4, 0);
+                int n = Math.Min(rows, height - y);
+                var band = new Int32Rect(0, y, width, n);
+                ca.CopyPixels(band, pa, stride, 0);
+                cb.CopyPixels(band, pb, stride, 0);
+                int bytes = n * stride;
+                for (int i = 0; i < bytes; i += 4)
+                {
+                    if (Math.Abs(pa[i] - pb[i]) > 8 || Math.Abs(pa[i + 1] - pb[i + 1]) > 8 || Math.Abs(pa[i + 2] - pb[i + 2]) > 8)
+                        if (++differing > allowed) return false;
+                }
             }
-            return true;
-        }
-
-        static bool Pixels(BitmapSource image, out byte[] px, out int w, out int h)
-        {
-            px = null; w = h = 0;
-            if (image == null) return false;
-            var bgr = new FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgr32, null, 0);
-            w = bgr.PixelWidth; h = bgr.PixelHeight;
-            px = new byte[w * h * 4];
-            bgr.CopyPixels(px, w * 4, 0);
             return true;
         }
 
