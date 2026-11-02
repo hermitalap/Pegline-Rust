@@ -27,6 +27,7 @@
 | 4.1 | 单击复制 | 剪贴板含 `PNG`(2.5 KB)、`CF_DIB`、`CF_DIBV5`、`CF_HDROP` |
 | 4.12 | 点叉 | 卡片下绳，文件进回收站（own 文件），列表同步 |
 | 5.1 | 文件监听 | 往 `FOLDERID_Screenshots` 写入 PNG，0.3 s 内挂上 |
+| 5.2 | 剪贴板接管 | 以 `PNG` 格式写入剪贴板，0.2 s 内保存到收件箱（`截图 yyyy-MM-dd HHmmss.png`）并挂上 |
 | 5.12 | 文件被删 | 连续 2 次缺失（1 s 定时）后下绳 |
 | 10.1 | exe 大小 | 887,296 B（≤ 15 MB） |
 | 10.6 | 60 Hz 飞行 | `probe --mode=flight`：62.35 fps |
