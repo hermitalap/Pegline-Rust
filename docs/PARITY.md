@@ -12,7 +12,7 @@
 |:--|:--|:--|
 | 0.1 | 启动 | 托盘注册成功（无 error.log 记录），无控制台窗口 |
 | 0.2 | 单实例 | 第二个进程 exit 0，互斥体 `Local\Pegline.SingleInstance` |
-| 0.6 | 单文件 | `pegline.exe` 887,296 B，`+crt-static`，无 VC++ 运行时依赖 |
+| 0.6 | 单文件 | `pegline.exe` 884,224 B，`+crt-static`，无 VC++ 运行时依赖 |
 | 1.1 | 指针顶到屏幕上沿 | 0.3 s 后放下，日志 `reveal: dwell elapsed`，肉眼顺滑 |
 | 1.2 | 指针移开 | 0.5 s 后收起，`slide=-222` |
 | 1.6 | 空线带 | 中央显示提示 pill（截图核对） |
@@ -29,7 +29,7 @@
 | 5.1 | 文件监听 | 往 `FOLDERID_Screenshots` 写入 PNG，0.3 s 内挂上 |
 | 5.2 | 剪贴板接管 | 以 `PNG` 格式写入剪贴板，0.2 s 内保存到收件箱（`截图 yyyy-MM-dd HHmmss.png`）并挂上 |
 | 5.12 | 文件被删 | 连续 2 次缺失（1 s 定时）后下绳 |
-| 10.1 | exe 大小 | 887,296 B（≤ 15 MB） |
+| 10.1 | exe 大小 | 884,224 B（≤ 15 MB） |
 | 10.6 | 60 Hz 飞行 | `probe --mode=flight`：62.35 fps |
 | 10.8 | 冷启动 | 约 120 ms 到 `app started` |
 
