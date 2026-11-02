@@ -206,6 +206,15 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 
 这补上了之前因热键被占用而一直“无法实测”的 §5.8 真实链路。
 
+### 3.6.3 丢弃到回收站
+
+从自己的截图卡片右键选择“丢弃”：
+
+- 源文件立即消失，trace 记录 `recycled 1 files`，并有完整的掉落动画
+  （`drop render start` → `drop finished after 36 frames`）。
+- 通过 `Shell.Application.Namespace(10)` 在回收站里找到同名条目，确认是
+  `SHFileOperationW(FO_DELETE)` 的回收，不是直接删除。
+
 ### 3.6.2 拖到资源管理器
 
 - 先把资源管理器窗口移到终端窗口之外并确认 `GetForegroundWindow` 就是它，

@@ -224,6 +224,8 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 26. 修复**“保存到桌面”写到 `%USERPROFILE%\Desktop` 而不是重定向后的桌面**：
     改用 `SHGetKnownFolderPath(FOLDERID_Desktop)`；本机 OneDrive 桌面
     `D:\UserData\OneDrive\Desktop` 实测收到文件，旧路径没有。
+27. 丢弃补测：真实右键“丢弃”后 trace `recycled 1 files`，源文件消失，回收站
+    namespace 里能查到同名条目，掉落动画完整。
 
 同机数值（release，6016×3384 @200%，单屏）：
 

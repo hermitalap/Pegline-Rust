@@ -102,6 +102,7 @@
 | 4.10 | 拖拽预览 | ghost 0.9 倍、0.85 不透明度、跟随指针；原卡半透明；`visual/line-drag-ghost.png` |
 | 4.7/4.8 | 拖到文件夹 | 真实拖进资源管理器 `target\drops`，`demo-2.png` 1.23 KB 落地；`visual/drag-drop-explorer.png` |
 | 4.9 | 保存到桌面 | 走 `SHGetKnownFolderPath(FOLDERID_Desktop)`；本机 OneDrive 重定向的桌面收到文件，`%USERPROFILE%\Desktop` 没有文件 |
+| 4.12 | 丢弃 | 右键“丢弃”后源文件消失，trace `recycled 1 files`，回收站里能查到同名条目；掉落动画完整 |
 | 4.11 | 右键菜单 | 自己的 PNG 剪贴板截图（own=true）显示“保存到桌面/丢弃”；外部图显示“取下/移到回收站”；`visual/context-menu-own.png`、`visual/context-menu-external.png` |
 | 5.8 | Ctrl+Alt+S 全链路 | 默认热键被占用，临时改为 `Ctrl+Alt+K`；真实截图工具选 1200×800 → 编辑器 1200×800 → `Ctrl+S` 输出 1200×800 PNG；trace 有 `clipboard duplicate ignored` |
 | 6.1 | 预览位置 | 预览从按钮行下方 12 DIP 开始，不再遮挡复制/打开；`visual/line-hover-preview.png` |
