@@ -90,6 +90,8 @@
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
 | 1.7 | 首次运行 | 首次运行自动放下空线带显示提示，5 s 后无卡自动收起；`visual/line-welcome.png` |
 | — | 接管询问 | 1.2 s 后出现一次 MessageBox；点“是”写 `catchClipboard=1`，`catchOffered` 只写一次；`visual/first-run-offer.png` |
+| 9.1 | 左键托盘 | 展开任务栏溢出面板后真实左键点击 Pegline 图标，空线带放下；`visual/line-tray-click.png` |
+| 9.2 | 托盘菜单 | 真实右键托盘图标打开菜单：热键占用提示、清空计数 0、接管截图勾选；`visual/tray-menu-real.png` |
 | 2.3/2.4 | 间距/容量 | 连续加 13 张后线上保持 12 张，间距 174 DIP 居中，最旧一张掉落；`visual/line-capacity.png` |
 | 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮，按钮/便签色点为手形光标；截图 `visual/line-hover-preview.png` |
 | 3.4/3.5 | 飞行相框/阴影 | 相框和夹子随进度出现，落地前与线上卡片一致；修复前是裸图盖住已落地相框；截图 `visual/line-flight.png` |
@@ -115,8 +117,8 @@
 修复但不在清单编号里的：卡片外 10 DIP 只用于悬停、不用于点击（防止点空白
 复制）；`--demo` 的真实临时文件；`RegisterClassW` 的错误码判断。
 
-仍然缺口：音效听感、真实托盘图标点击、中文输入法在文字工具里的组合输入、
-120 Hz、副屏、休眠/唤醒。
+仍然缺口：音效听感、中文输入法在文字工具里的组合输入、120 Hz、副屏、
+休眠/唤醒。
 
 ---
 
