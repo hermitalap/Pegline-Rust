@@ -515,9 +515,13 @@ impl App {
         self.restore_pegged();
 
         if !self.settings.welcomed() {
+            // First run: show the empty line with its hint for a few seconds,
+            // exactly like the WPF app's welcome (keepOpen + Refresh + Reveal).
             self.keep_open = true;
             self.welcome_until = Some(self.start_time + WELCOME_SECONDS);
             self.settings.mark_welcomed();
+            self.present();
+            self.reveal(true, 0.0);
         }
 
         if self.demo {

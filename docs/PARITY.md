@@ -77,7 +77,7 @@
 | 8.4 | 取消 | WM_CLOSE → `Command::Cancel` → `EditorEvent::Cancelled`，应用删除自己的临时截图 |
 | 8.5 | 双胞胎 | 编辑器打开期间收到 Windows 保存副本则改写该副本并删除收件箱副本；保存前已上绳的副本按缩略图哈希改写 |
 | 4.10 | 拖拽预览 | `window::ghost::tests` 3 项（尺寸/位置/非法输入）+ 外部冒烟：130×101 @96、260×202 @192，移动只 `SetWindowPos`，隐藏后 2×2 |
-| 9.6 | 音效 | 三段 WAV 合成单测（头部/长度/范围）；`PlaySound(SND_MEMORY\|SND_ASYNC)`；挂上/取下/清空三处调用 |
+| 9.6 | 音效 | 三段 WAV 合成单测（头部/长度/范围）；`PlaySound(SND_MEMORY\|SND_ASYNC)` 在真实进程返回 TRUE；默认输出为扬声器、只采到 VB-Cable 静音，听感仍未确认 |
 | 9.7 | 三语 | 新增预览/便签/编辑器/快捷键字符串全部补齐 en/es/zh；`i18n` 完整性单测 |
 
 ## 2026-11-03 视觉回归（Rust 版，release）
@@ -88,6 +88,7 @@
 | # | 项 | 证据 |
 |:--|:--|:--|
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
+| 1.7 | 首次运行 | 首次运行自动放下空线带显示提示，5 s 后无卡自动收起；`visual/line-welcome.png` |
 | 2.3/2.4 | 间距/容量 | 连续加 13 张后线上保持 12 张，间距 174 DIP 居中，最旧一张掉落；`visual/line-capacity.png` |
 | 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮，按钮/便签色点为手形光标；截图 `visual/line-hover-preview.png` |
 | 3.4/3.5 | 飞行相框/阴影 | 相框和夹子随进度出现，落地前与线上卡片一致；修复前是裸图盖住已落地相框；截图 `visual/line-flight.png` |
