@@ -80,8 +80,11 @@ struct Card {
     image: Option<ID2D1Bitmap1>,
     note: bool,
     note_color: usize,
+    /// Seconds left before this card's scheduled gust starts.
+    nudge_delay: f32,
     nudge_from: f32,
     nudge_to: f32,
+    /// -1 is idle, 0..1 is the ease-out progress of an active nudge.
     nudge_t: f32,
 }
 
@@ -105,6 +108,7 @@ impl Card {
             image: None,
             note: spec.note,
             note_color: 0,
+            nudge_delay: 0.0,
             nudge_from: 0.0,
             nudge_to: 0.0,
             nudge_t: -1.0,
@@ -132,6 +136,65 @@ impl Card {
         self.nudge_from = self.swing.value;
         self.nudge_to = degrees;
         self.nudge_t = 0.0;
+        self.nudge_delay = 0.0;
+    }
+
+    /// Schedules a gust for this card: it keeps swinging for `delay` seconds,
+    /// then is eased out to `degrees` and released back to the rope.
+    fn schedule_gust(&mut self, degrees: f32, delay: f32) {
+        self.nudge_to = degrees;
+        if delay <= 0.0 {
+            // No stagger for this card: start now, from where it hangs.
+            self.nudge_from = self.swing.value;
+            self.nudge_t = 0.0;
+            self.nudge_delay = 0.0;
+        } else {
+            self.nudge_delay = delay;
+            self.nudge_t = -1.0;
+        }
+    }
+
+    /// Whether the swing is visually at rest. The generic spring threshold
+    /// (0.001) is far below one pixel for a rotation, and a lightly damped
+    /// spring takes many seconds to reach its velocity; stopping the frame loop
+    /// at a twentieth of a degree is what matters here.
+    fn swing_at_rest(&self) -> bool {
+        self.nudge_delay <= 0.0
+            && self.nudge_t < 0.0
+            && self.swing.value.abs() < 0.02
+            && self.swing.velocity.abs() < 0.1
+    }
+
+    /// Advances the swing by `dt`: a pending gust counts down, an active gust
+    /// eases the card out, and the rest of the time the damped spring pulls it
+    /// back to the rope.
+    fn step_swing(&mut self, dt: f32) {
+        if self.nudge_delay > 0.0 {
+            // Wait for this card's turn, but do not freeze it: the spring keeps
+            // running so the gust starts from wherever the card is.
+            self.nudge_delay -= dt;
+            self.swing.step(dt);
+            if self.nudge_delay <= 0.0 {
+                self.nudge_delay = 0.0;
+                self.nudge_from = self.swing.value;
+                self.nudge_t = 0.0;
+            }
+            return;
+        }
+        if self.nudge_t >= 0.0 {
+            self.nudge_t += dt / 0.3;
+            if self.nudge_t >= 1.0 {
+                self.nudge_t = -1.0;
+                self.swing.value = self.nudge_to;
+                self.swing.velocity = 0.0;
+                self.swing.set_stiffness(38.0, 2.4);
+            } else {
+                self.swing.value = self.nudge_from
+                    + (self.nudge_to - self.nudge_from) * ease::out_quad(self.nudge_t);
+            }
+            return;
+        }
+        self.swing.step(dt);
     }
 
     /// Top of the card frame in slot-local DIP (before rotation).
@@ -256,6 +319,16 @@ impl Scene {
         self.slide.value
     }
 
+    /// Seconds until the next automatic gust, when the frame loop may sleep
+    /// until then. `None` means no timer is pending (hidden line, no cards, or
+    /// a drag in progress).
+    pub fn next_wake_in(&self, now: f64) -> Option<f64> {
+        if !self.visible || !self.revealed || self.cards.is_empty() || self.dragging.is_some() {
+            return None;
+        }
+        Some((self.next_gust - now).max(0.001))
+    }
+
     /// Debug summary of the cards, for the trace log.
     pub fn debug_cards(&self) -> String {
         self.cards
@@ -310,6 +383,10 @@ impl Scene {
                         self.hide_t = -1.0;
                         // Let the spring start from wherever it is and keep the
                         // velocity: the quadratic ease-out takes over below.
+                    } else if now >= self.next_gust {
+                        // Do not fire a stale gust the instant the line drops;
+                        // start the breeze clock again.
+                        self.next_gust = now + self.rng.range(7.0, 16.0) as f64;
                     }
                     self.dirty = true;
                 }
@@ -420,11 +497,9 @@ impl Scene {
         for card in &mut self.cards {
             let delay = self.rng.range(0.0, 0.35);
             let amount = self.rng.range(1.6, 3.4);
-            // The original used a timer per card; with a fixed-step scene a
-            // delayed nudge is enough and avoids extra timers.
-            card.nudge_from = card.swing.value;
-            card.nudge_to = amount;
-            card.nudge_t = -delay;
+            // The original used a timer per card; a countdown on the card has
+            // the same stagger without extra timers.
+            card.schedule_gust(amount, delay);
         }
         self.next_gust = now + self.rng.range(7.0, 16.0) as f64;
         self.dirty = true;
@@ -458,6 +533,15 @@ impl Scene {
             }
         }
 
+        if !self.revealed && self.hide_t >= 1.0 {
+            // The line is fully tucked away: freeze the cards, stop the breeze
+            // clock and let the render thread block until the line comes back.
+            if self.dirty {
+                self.publish(now);
+            }
+            return false;
+        }
+
         // Hint fades with the card count.
         let hint_target = if self.cards.is_empty() { 1.0 } else { 0.0 };
         if (self.hint_alpha - hint_target).abs() > 0.001 {
@@ -489,20 +573,7 @@ impl Scene {
             let pressed_here = pressed == Some(card.id);
             let copying = copied == Some(card.id);
 
-            if card.nudge_t >= 0.0 || card.nudge_t < -0.0001 {
-                card.nudge_t += dt / 0.3;
-                if card.nudge_t >= 1.0 {
-                    card.nudge_t = -1.0;
-                    card.swing.value = card.nudge_to;
-                    card.swing.velocity = 0.0;
-                    card.swing.set_stiffness(38.0, 2.4);
-                } else if card.nudge_t >= 0.0 {
-                    card.swing.value = card.nudge_from
-                        + (card.nudge_to - card.nudge_from) * ease::out_quad(card.nudge_t);
-                }
-            } else {
-                card.swing.step(dt);
-            }
+            card.step_swing(dt);
 
             if pressed_here {
                 card.press.set_response(0.45, 1.0);
@@ -542,7 +613,7 @@ impl Scene {
 
             animating |= !card.x.settled()
                 || !card.drop.settled()
-                || !card.swing.settled()
+                || !card.swing_at_rest()
                 || (card.press.value - card.press.target).abs() > 0.002
                 || (card.opacity - if card.flying { 0.0 } else { 1.0 }).abs() > 0.002
                 || card.cross_alpha > 0.002
@@ -796,11 +867,121 @@ mod tests {
         }
     }
 
+    fn card() -> Card {
+        Card::new(
+            CardSpec {
+                id: 1,
+                card_size: (144.0, 112.0),
+                tilt: 0.0,
+                arriving: true,
+                image: None,
+                note: false,
+            },
+            100.0,
+        )
+    }
+
     #[test]
     fn slot_order_follows_the_card_list() {
         // Three cards in a 1920 DIP line: 786 / 960 / 1134.
         assert!((layout::slot_x(0, 3, 1920.0) - 786.0).abs() < 1e-3);
         assert!((layout::slot_x(1, 3, 1920.0) - 960.0).abs() < 1e-3);
         assert!((layout::slot_x(2, 3, 1920.0) - 1134.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gust_eases_out_and_settles_instead_of_repeating() {
+        let mut card = card();
+        card.schedule_gust(3.0, 0.25);
+        let mut max_angle = 0.0f32;
+        // Ten seconds at 60 Hz: a 0.25 s delay, a 0.3 s ease-out and then the
+        // damped spring. The old state machine restarted the nudge every 0.3 s
+        // and never settled (the visible "twitch").
+        for _ in 0..600 {
+            card.step_swing(1.0 / 60.0);
+            max_angle = max_angle.max(card.swing.value.abs());
+        }
+        assert!(
+            card.swing_at_rest(),
+            "swing did not settle: value={} velocity={} nudge_t={}",
+            card.swing.value,
+            card.swing.velocity,
+            card.nudge_t
+        );
+        assert!(
+            max_angle < 20.0,
+            "gust produced an implausible {max_angle} degrees"
+        );
+        assert_eq!(card.nudge_t, -1.0);
+    }
+
+    #[test]
+    fn a_pending_gust_keeps_the_spring_running() {
+        let mut card = card();
+        // Give the spring somewhere to go, so "did it move" is observable.
+        card.swing.value = 10.0;
+        card.schedule_gust(3.0, 0.3);
+        let before = card.swing.value;
+        // During the delay the card must keep moving, not freeze.
+        card.step_swing(0.1);
+        assert!(card.nudge_delay < 0.3);
+        assert!(card.nudge_t < 0.0);
+        assert!((card.swing.value - before).abs() > 1e-4);
+    }
+
+    #[test]
+    fn a_gust_swings_past_zero_once_and_decays() {
+        let mut card = card();
+        card.schedule_gust(3.0, 0.0);
+        // Run out the ease first.
+        while card.nudge_t >= 0.0 {
+            card.step_swing(1.0 / 60.0);
+        }
+        // The spring is underdamped, so it crosses the rope once and comes back
+        // with a smaller overshoot. It must never look like a jump cut.
+        let mut minimum = 0.0f32;
+        for _ in 0..600 {
+            card.step_swing(1.0 / 60.0);
+            minimum = minimum.min(card.swing.value);
+        }
+        assert!(
+            (-2.5..-0.5).contains(&minimum),
+            "first overshoot was {minimum} degrees"
+        );
+        assert!(
+            card.swing_at_rest(),
+            "value={} velocity={}",
+            card.swing.value,
+            card.swing.velocity
+        );
+    }
+
+    #[test]
+    fn a_finished_gust_releases_the_spring_back_to_zero() {
+        let mut card = card();
+        card.schedule_gust(3.0, 0.0);
+        for _ in 0..30 {
+            card.step_swing(1.0 / 60.0);
+            if card.nudge_t < 0.0 {
+                break;
+            }
+        }
+        assert_eq!(card.nudge_t, -1.0);
+        assert!(
+            (card.swing.value - 3.0).abs() < 0.2,
+            "value={} nudge_t={} delay={}",
+            card.swing.value,
+            card.nudge_t,
+            card.nudge_delay
+        );
+        for _ in 0..300 {
+            card.step_swing(1.0 / 60.0);
+        }
+        assert!(
+            card.swing_at_rest(),
+            "value={} velocity={}",
+            card.swing.value,
+            card.swing.velocity
+        );
     }
 }

@@ -41,9 +41,27 @@ impl Spring {
         self.damping = damping;
     }
 
+    /// The largest distance and speed that are still "at rest". At 6K a card
+    /// sits around x = 1600 DIP, where one f32 ulp is ~0.0001 DIP; a tighter
+    /// threshold than this makes the spring creep forever below the precision
+    /// of its own coordinates (the card never settles and the frame loop never
+    /// idles).
+    const REST_DISTANCE: f32 = 0.01;
+    /// See [`Self::REST_DISTANCE`]; degrees/DIP per second are invisible here.
+    const REST_SPEED: f32 = 0.05;
+
     /// Advances by `dt` seconds, split into steps of at most 1/240 s.
     pub fn step(&mut self, dt: f32) {
         if dt <= 0.0 {
+            return;
+        }
+        if (self.value - self.target).abs() < Self::REST_DISTANCE
+            && self.velocity.abs() < Self::REST_SPEED
+        {
+            // Snap out of the asymptotic tail instead of creeping below the
+            // representable step of a large coordinate.
+            self.value = self.target;
+            self.velocity = 0.0;
             return;
         }
         let steps = ((dt * 240.0).ceil() as usize).max(1);
@@ -58,7 +76,8 @@ impl Spring {
 
     /// Close enough that the next frame would not visibly move.
     pub fn settled(&self) -> bool {
-        (self.value - self.target).abs() < 0.001 && self.velocity.abs() < 0.001
+        (self.value - self.target).abs() < Self::REST_DISTANCE
+            && self.velocity.abs() < Self::REST_SPEED
     }
 
     /// Snaps to the target and stops. Used when a card is created already in
@@ -144,5 +163,24 @@ mod tests {
         assert_eq!(spring.value, -222.0);
         assert_eq!(spring.velocity, 0.0);
         assert!(spring.settled());
+    }
+
+    #[test]
+    fn does_not_creep_below_float_precision() {
+        // A card slot at 6K widths lives around x = 1600 DIP; without a snap
+        // the last few thousandths of a DIP are below one f32 ulp and the
+        // spring keeps a tiny velocity forever.
+        let mut spring = Spring::new(0.55, 0.78, 0.0);
+        spring.target = 1591.0;
+        for _ in 0..600 {
+            spring.step(1.0 / 60.0);
+        }
+        assert!(
+            spring.settled(),
+            "value={} velocity={}",
+            spring.value,
+            spring.velocity
+        );
+        assert_eq!(spring.value, 1591.0);
     }
 }

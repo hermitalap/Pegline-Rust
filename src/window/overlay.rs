@@ -307,21 +307,46 @@ fn render_thread(
 
     'outer: loop {
         // Wait for work when the line is hidden or nothing is moving: this is
-        // what makes idle CPU exactly zero.
+        // what makes idle CPU exactly zero. While the line is visible with
+        // cards on it, wake up for the next breeze instead of blocking forever.
         if !visible || !needs_frame {
-            match rx.recv() {
-                Ok(command) => {
-                    if !handle(
-                        command,
-                        &mut scene,
-                        &mut renderer,
-                        &mut visible,
-                        &mut frame_cap,
-                    ) {
-                        break 'outer;
+            let wake = if visible {
+                scene.next_wake_in(win32::now_seconds())
+            } else {
+                None
+            };
+            match wake {
+                Some(seconds) => {
+                    match rx.recv_timeout(std::time::Duration::from_secs_f64(seconds)) {
+                        Ok(command) => {
+                            if !handle(
+                                command,
+                                &mut scene,
+                                &mut renderer,
+                                &mut visible,
+                                &mut frame_cap,
+                            ) {
+                                break 'outer;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                Err(_) => break,
+                None => match rx.recv() {
+                    Ok(command) => {
+                        if !handle(
+                            command,
+                            &mut scene,
+                            &mut renderer,
+                            &mut visible,
+                            &mut frame_cap,
+                        ) {
+                            break 'outer;
+                        }
+                    }
+                    Err(_) => break,
+                },
             }
         }
         let mut stop = false;
