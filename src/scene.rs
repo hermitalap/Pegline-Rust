@@ -47,6 +47,8 @@ pub enum Command {
     Press(Option<CardId>),
     /// Which card is being dragged (its frame goes translucent).
     Dragging(Option<CardId>),
+    /// The flight window carries this card; keep it invisible until it lands.
+    SetFlying { id: CardId, flying: bool },
     /// Flash the "Copied" pill on a card.
     Copied(CardId),
     /// A gust of wind (also fired by the internal timer).
@@ -70,6 +72,7 @@ struct Card {
     copied_alpha: f32,
     arriving: bool,
     arrived: bool,
+    flying: bool,
     image: Option<ID2D1Bitmap1>,
     nudge_from: f32,
     nudge_to: f32,
@@ -92,6 +95,7 @@ impl Card {
             copied_alpha: 0.0,
             arriving: spec.arriving,
             arrived: false,
+            flying: false,
             image: None,
             nudge_from: 0.0,
             nudge_to: 0.0,
@@ -355,6 +359,18 @@ impl Scene {
                     self.dirty = true;
                 }
             }
+            Command::SetFlying { id, flying } => {
+                if let Some(card) = self.cards.iter_mut().find(|card| card.id == id) {
+                    if card.flying != flying {
+                        card.flying = flying;
+                        if !flying {
+                            card.arrived = true;
+                            card.nudge(2.2);
+                        }
+                        self.dirty = true;
+                    }
+                }
+            }
             Command::Copied(id) => {
                 self.copied = Some(id);
                 self.copied_until = now + COPIED_SECONDS;
@@ -503,7 +519,7 @@ impl Scene {
                 || !card.drop.settled()
                 || !card.swing.settled()
                 || (card.press.value - card.press.target).abs() > 0.002
-                || (card.opacity - 1.0).abs() > 0.002
+                || (card.opacity - if card.flying { 0.0 } else { 1.0 }).abs() > 0.002
                 || card.cross_alpha > 0.002
                 || card.actions_alpha > 0.002
                 || card.copied_alpha > 0.002

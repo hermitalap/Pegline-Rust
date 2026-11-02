@@ -642,21 +642,21 @@ impl Renderer {
         // SAFETY: the layer and geometry are alive; the bitmap is borrowed and
         // outlives the calls.
         unsafe {
-            {
-                self.context
-                    .PushLayer(&params, &self.layers[self.layer_depth]);
-                self.layer_depth += 1;
-                self.context.DrawBitmap(
-                    bitmap,
-                    Some(&dst),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    Some(&src),
-                    None,
-                );
-                self.context.PopLayer();
-                self.layer_depth -= 1;
-            }
+            // PushLayer returns () in windows 0.62; a failure surfaces from
+            // EndDraw, which the caller checks.
+            self.context
+                .PushLayer(&params, &self.layers[self.layer_depth]);
+            self.layer_depth += 1;
+            self.context.DrawBitmap(
+                bitmap,
+                Some(&dst),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                Some(&src),
+                None,
+            );
+            self.context.PopLayer();
+            self.layer_depth -= 1;
         }
     }
 

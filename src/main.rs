@@ -6,25 +6,8 @@
 //! swap chain and frame clock.
 
 #![windows_subsystem = "windows"]
-// Phase A is still landing: several helpers are used by the flight window and
-// the probe, which are the next milestone. Remove this before the v0.1 tag.
-#![allow(dead_code)]
 
-mod app;
-mod capture;
-mod dragdrop;
-mod i18n;
-mod layout;
-mod logging;
-mod render;
-mod scene;
-mod settings;
-mod shortcut;
-mod spring;
-mod tray;
-mod types;
-mod win32;
-mod window;
+use pegline::{app, logging, win32};
 
 fn main() {
     win32::ensure_dpi_awareness();
@@ -59,7 +42,7 @@ fn already_running() -> bool {
     // SAFETY: GetLastError reads the calling thread's last error.
     let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if already {
-        // SAFETY: the handle is ours; close it because this process exits.
+        // SAFETY: the handle is ours; we close it because this process exits.
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(handle);
         }

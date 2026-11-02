@@ -37,6 +37,7 @@ use crate::shortcut;
 use crate::tray::{MenuCommand, MenuState, Tray};
 use crate::types::{CardId, CardSpec, ImageData, RectI};
 use crate::win32::{self, Monitor};
+use crate::window::flight::{Flight, FlightEvent};
 use crate::window::overlay::Overlay;
 use crate::window::{self, WM_APP_QUIT, WM_APP_WAKE, WM_TRAY_CALLBACK};
 
@@ -81,6 +82,8 @@ struct Item {
     size_px: (u32, u32),
     card_size: (f32, f32),
     tilt: f32,
+    /// The 480 px thumbnail, kept so a drop can be drawn without re-decoding.
+    thumb: ImageData,
     missing: u32,
     last_write: SystemTime,
 }
@@ -95,17 +98,21 @@ enum Event {
         size_px: (u32, u32),
         thumb: ImageData,
         area: Option<RectI>,
+        flight_image: Option<ImageData>,
     },
     RestoreReady {
         id: CardId,
+        path: PathBuf,
         size_px: (u32, u32),
-        thumb: ImageData,
+        thumb: Option<ImageData>,
     },
     CopyReady {
         id: CardId,
         dib: ImageData,
         png: Vec<u8>,
     },
+    /// The flight window reported progress.
+    Flight(FlightEvent),
     TrashDone {
         paths: Vec<PathBuf>,
     },
@@ -239,6 +246,10 @@ struct App {
 
     hook: Option<HHOOK>,
     watcher: Option<watcher::Watcher>,
+    flight: Option<Flight>,
+    /// How many restored cards are still decoding; `pegged.txt` is not
+    /// rewritten until they are all back.
+    restore_pending: usize,
     clipboard_at: Option<f64>,
     start_time: f64,
     last_prune: f64,
@@ -279,6 +290,8 @@ impl App {
             menu_open: false,
             hook: None,
             watcher: None,
+            flight: None,
+            restore_pending: 0,
             clipboard_at: None,
             start_time: start,
             last_prune: start,
@@ -315,6 +328,15 @@ impl App {
         }
 
         self.open_overlay();
+
+        let flight_tx = self.events_tx.clone();
+        match Flight::create(Box::new(move |event| {
+            let _ = flight_tx.send(Event::Flight(event));
+            window::wake(HWND::default());
+        })) {
+            Ok(flight) => self.flight = Some(flight),
+            Err(error) => logging::error(format!("flight window: {error}")),
+        }
 
         // Watch the real Windows screenshot folder. The watcher treats existing
         // files as known, so only new captures are reported.
@@ -618,13 +640,28 @@ impl App {
                     size_px,
                     thumb,
                     area,
-                } => self.on_capture_ready(path, own, size_px, thumb, area, now),
-                Event::RestoreReady { id, size_px, thumb } => {
-                    self.on_restore_ready(id, size_px, thumb)
-                }
+                    flight_image,
+                } => self.on_capture_ready(path, own, size_px, thumb, area, flight_image, now),
+                Event::RestoreReady {
+                    id,
+                    path,
+                    size_px,
+                    thumb,
+                } => self.on_restore_ready(id, path, size_px, thumb),
                 Event::CopyReady { id, dib, png } => self.on_copy_ready(id, dib, png),
                 Event::TrashDone { paths } => {
                     logging::trace(format!("recycled {} files", paths.len()));
+                }
+                Event::Flight(FlightEvent::Landed { token, .. }) => {
+                    self.send_scene(Command::SetFlying {
+                        id: token,
+                        flying: false,
+                    });
+                }
+                Event::Flight(FlightEvent::Finished(_id)) => {
+                    if let Some(flight) = self.flight.as_mut() {
+                        flight.hide();
+                    }
                 }
             }
         }
@@ -986,7 +1023,11 @@ impl App {
     // ---- items ------------------------------------------------------------
 
     fn restore_pegged(&mut self) {
-        let paths = settings::read_pegged();
+        let paths: Vec<PathBuf> = settings::read_pegged()
+            .into_iter()
+            .filter(|path| path.exists() && wic::is_image_path(path))
+            .collect();
+        self.restore_pending = paths.len();
         for path in paths {
             if !path.exists() || !wic::is_image_path(&path) {
                 continue;
@@ -997,33 +1038,45 @@ impl App {
             let thread_path = path.clone();
             let _ = std::thread::Builder::new()
                 .name("pegline-restore".to_string())
-                .spawn(
-                    move || match wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX) {
-                        Ok(thumb) => {
-                            let _ = tx.send(Event::RestoreReady {
-                                id,
-                                size_px: (thumb.width, thumb.height),
-                                thumb,
-                            });
-                            window::wake(HWND::default());
-                        }
-                        Err(error) => {
-                            logging::error(format!("restore {}: {error}", thread_path.display()))
-                        }
-                    },
-                );
+                .spawn(move || {
+                    let thumb = wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX).ok();
+                    if thumb.is_none() {
+                        logging::error(format!("restore {}", thread_path.display()));
+                    }
+                    let size_px = thumb
+                        .as_ref()
+                        .map(|thumb| (thumb.width, thumb.height))
+                        .unwrap_or((0, 0));
+                    let _ = tx.send(Event::RestoreReady {
+                        id,
+                        path: thread_path.clone(),
+                        size_px,
+                        thumb,
+                    });
+                    window::wake(HWND::default());
+                });
         }
     }
 
-    fn on_restore_ready(&mut self, id: CardId, size_px: (u32, u32), thumb: ImageData) {
-        let Some(path) = settings::read_pegged().into_iter().nth(self.items.len()) else {
+    fn on_restore_ready(
+        &mut self,
+        id: CardId,
+        path: PathBuf,
+        size_px: (u32, u32),
+        thumb: Option<ImageData>,
+    ) {
+        self.restore_pending = self.restore_pending.saturating_sub(1);
+        let Some(thumb) = thumb else {
+            if self.restore_pending == 0 {
+                self.save_pegged();
+            }
             return;
         };
         if self.items.len() >= layout::capacity(100_000.0) {
             return;
         }
         let own = path.starts_with(win32::inbox_dir());
-        self.add_item(id, path, own, size_px, thumb, None, false);
+        self.add_item(id, path, own, size_px, thumb, None, false, false);
     }
 
     fn on_capture_file(&mut self, path: PathBuf) {
@@ -1050,36 +1103,46 @@ impl App {
     fn spawn_capture(&mut self, path: PathBuf, own: bool, area: Option<RectI>) {
         let tx = self.events_tx.clone();
         let thread_path = path.clone();
+        let want_flight = area.is_some();
         let _ = std::thread::Builder::new()
             .name("pegline-decode".to_string())
-            .spawn(
-                move || match wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX) {
-                    Ok(thumb) => {
-                        let size_px =
-                            wic::pixel_size(&thread_path).unwrap_or((thumb.width, thumb.height));
-                        let _ = tx.send(Event::CaptureReady {
-                            path: thread_path,
-                            own,
-                            size_px,
-                            thumb,
-                            area,
-                        });
-                        window::wake(HWND::default());
-                    }
+            .spawn(move || {
+                let thumb = match wic::decode_scaled(&thread_path, crate::capture::THUMB_MAX) {
+                    Ok(thumb) => thumb,
                     Err(error) => {
-                        logging::error(format!("decode {}: {error}", thread_path.display()))
+                        logging::error(format!("decode {}: {error}", thread_path.display()));
+                        return;
                     }
-                },
-            );
+                };
+                let size_px = wic::pixel_size(&thread_path).unwrap_or((thumb.width, thumb.height));
+                // Only a capture with a known origin flies, so only then is the
+                // big texture worth decoding.
+                let flight_image = if want_flight {
+                    wic::decode_scaled(&thread_path, crate::capture::FLIGHT_MAX).ok()
+                } else {
+                    None
+                };
+                let _ = tx.send(Event::CaptureReady {
+                    path: thread_path,
+                    own,
+                    size_px,
+                    thumb,
+                    area,
+                    flight_image,
+                });
+                window::wake(HWND::default());
+            });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_capture_ready(
         &mut self,
         path: PathBuf,
         own: bool,
         size_px: (u32, u32),
         thumb: ImageData,
-        _area: Option<RectI>,
+        area: Option<RectI>,
+        flight_image: Option<ImageData>,
         now: f64,
     ) {
         if self.items.iter().any(|item| item.path == path) {
@@ -1087,10 +1150,58 @@ impl App {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.add_item(id, path, own, size_px, thumb, None, true);
+        let mut flying = false;
+        if let (Some(area), Some(image), Some(dpi)) = (area, flight_image, self.screen_dpi()) {
+            let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
+            let index = self.items.len();
+            if let Some(end) = self.card_frame_px(index, index + 1, card_size) {
+                if let Some(flight) = self.flight.as_mut() {
+                    flying = flight.fly(id, image, area, end, dpi);
+                }
+            }
+        }
+        self.add_item(id, path, own, size_px, thumb, area, true, flying);
         self.present();
         self.reveal(false, PEEK_SECONDS);
         let _ = now;
+    }
+
+    /// The DPI of the monitor the line is on.
+    fn screen_dpi(&self) -> Option<u32> {
+        self.screen.as_ref().map(|screen| screen.dpi)
+    }
+
+    /// Where card `index` of `count` will hang, in screen pixels.
+    fn card_frame_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
+        let overlay = self.overlay.as_ref()?;
+        let window = win32::window_rect(overlay.hwnd())?;
+        let scale = overlay.scale().max(0.1);
+        let width_dip = overlay.width_px() as f32 / scale;
+        let x = layout::slot_x(index, count, width_dip);
+        let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
+        let left = x - card_size.0 * 0.5;
+        Some(RectI::new(
+            window.left + (left * scale).round() as i32,
+            window.top + (top * scale).round() as i32,
+            window.left + ((left + card_size.0) * scale).round() as i32,
+            window.top + ((top + card_size.1) * scale).round() as i32,
+        ))
+    }
+
+    /// The card's current rectangle on screen, in pixels.
+    fn current_card_px(&self, id: CardId) -> Option<RectI> {
+        let overlay = self.overlay.as_ref()?;
+        let window = win32::window_rect(overlay.hwnd())?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        let card = snapshot.cards.iter().find(|card| card.id == id)?;
+        let scale = snapshot.scale.max(0.1);
+        Some(RectI::new(
+            window.left + (card.frame.left * scale).round() as i32,
+            window.top + (card.frame.top * scale).round() as i32,
+            window.left + (card.frame.right * scale).round() as i32,
+            window.top + (card.frame.bottom * scale).round() as i32,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1103,6 +1214,7 @@ impl App {
         thumb: ImageData,
         area: Option<RectI>,
         arriving: bool,
+        flying: bool,
     ) {
         let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
         let tilt = pseudo_random(id) * 5.0 - 2.5;
@@ -1113,6 +1225,7 @@ impl App {
             size_px,
             card_size,
             tilt,
+            thumb: thumb.clone(),
             missing: 0,
             last_write: std::fs::metadata(&path)
                 .and_then(|meta| meta.modified())
@@ -1126,6 +1239,9 @@ impl App {
             arriving,
             image: Some(thumb),
         }));
+        if flying {
+            self.send_scene(Command::SetFlying { id, flying: true });
+        }
         let _ = area;
         self.enforce_capacity();
         self.save_pegged();
@@ -1150,6 +1266,7 @@ impl App {
         let capacity = layout::capacity(width_dip);
         while self.items.len() > capacity {
             let id = self.items[0].id;
+            self.start_fall(id);
             self.remove_item(id);
         }
     }
@@ -1163,6 +1280,9 @@ impl App {
     }
 
     fn save_pegged(&mut self) {
+        if self.restore_pending > 0 {
+            return;
+        }
         let paths: Vec<PathBuf> = self.items.iter().map(|item| item.path.clone()).collect();
         settings::write_pegged(&paths);
     }
@@ -1284,6 +1404,7 @@ impl App {
         };
         let path = item.path.clone();
         let own = item.own;
+        self.start_fall(id);
         if own {
             let tx = self.events_tx.clone();
             let _ = std::thread::Builder::new()
@@ -1296,6 +1417,24 @@ impl App {
                 });
         }
         self.remove_item(id);
+    }
+
+    /// Starts the falling animation for a card that is leaving the line.
+    fn start_fall(&mut self, id: CardId) {
+        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+            return;
+        };
+        let thumb = item.thumb.clone();
+        let tilt = item.tilt;
+        let Some(rect) = self.current_card_px(id) else {
+            return;
+        };
+        let Some(dpi) = self.screen_dpi() else {
+            return;
+        };
+        if let Some(flight) = self.flight.as_mut() {
+            let _ = flight.drop_card(id, thumb, rect, tilt, dpi);
+        }
     }
 
     fn clear_line(&mut self) {
@@ -1473,6 +1612,7 @@ impl App {
                     size_px: size,
                     thumb,
                     area,
+                    flight_image: None,
                 });
                 window::wake(HWND::default());
                 let _ = now;
@@ -1561,13 +1701,10 @@ impl App {
                 size_px,
                 card_size,
                 tilt,
+                thumb: ImageData::new(w, h, pixels.clone()),
                 missing: 0,
                 last_write: UNIX_EPOCH,
             });
-            logging::trace(format!(
-                "demo card id={id} px={w}x{h} card={:.1}x{:.1} tilt={tilt:.2}",
-                card_size.0, card_size.1
-            ));
             self.send_scene(Command::AddCard(CardSpec {
                 id,
                 card_size,
@@ -1579,11 +1716,6 @@ impl App {
         self.present();
         self.keep_open = true;
         self.reveal(true, 0.0);
-        logging::trace(format!(
-            "demo cards: {} present={}",
-            self.items.len(),
-            self.is_present
-        ));
         let _ = now;
     }
 
@@ -1605,6 +1737,9 @@ impl App {
         }
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.shutdown();
+        }
+        if let Some(flight) = self.flight.as_mut() {
+            flight.shutdown();
         }
         if let Some(watcher) = self.watcher.as_mut() {
             watcher.stop();

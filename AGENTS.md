@@ -28,9 +28,14 @@ number.
 
 ## Status
 
-Design phase finished. **M0 (`docs/SPIKE-01.md`) passed on 2026-11-02** — see
-`docs/SPIKE-01-RESULTS.md`. The crate, manifest, icon and static CRT build exist.
-Next milestone is M1 (shell); do not start M2+ features before M1 exits.
+**Phase A (M0–M4) is functionally complete as of 2026-11-02**: shell, tray, settings,
+hotkeys, the DirectComposition line with springs/cards/hover/copy/context menu, the
+folder and clipboard capture pipeline, and the flight/drop windows all run. `probe`
+measures fps and private memory.
+
+**One MVP gate is missed: private memory with six cards idle is ~100 MB, not ≤ 60 MB.**
+The cause is located and written down in `PLAN.md` §3.2; do the M6 memory work before
+adding phase B features (M5). Read `PLAN.md` §8 for the exact next steps.
 
 ## Read first
 
