@@ -43,7 +43,7 @@
 | ![全屏抑制](visual/fullscreen-suppressed.png) | 上：修复前线带压在蓝色全屏窗口上；下：修复后全屏窗口保持干净 |
 | ![点击穿透](visual/clickthrough.png) | 绿色窗口在下方：空白处点击落到窗体（日志 50,400），卡片上的点击被线带接住 |
 | ![拖到资源管理器](visual/drag-drop-explorer.png) | 把 demo 卡片拖进资源管理器，`demo-2.png`（1.23 KB）真实落地 |
-| ![音频波形](visual/audio-cues.png) | 临时解除默认端点静音后，WASAPI loopback 录到 Pop（约 320 Hz）和 Tink（1760/3520 Hz） |
+| ![音频波形](visual/audio-cues.png) | 临时解除默认端点静音后，WASAPI loopback 录到 Pop（约 320 Hz）、Tink（1760/3520 Hz）和 Rustle（低频噪声） |
 | ![三语编辑器工具栏](visual/editor-languages.png) | 中/西/英三套标题与工具栏标签完整，无裁切（上：中，中：西，下：英） |
 | ![西班牙语空提示](visual/line-es.png) | 西班牙语提示整句放入 pill；托盘菜单的西语长标签同样完整 |
 
@@ -155,13 +155,14 @@
 - 本机默认渲染端点是 **`U32T1`**（`43cea139-…` 的显示音频），查询到它处于
   **mute=True、volume=0.00**，所以之前 WASAPI loopback 和 `dshow` 都录到静音。
 - 临时把它设为 mute=False、volume=0.5，用自写 WASAPI loopback（48 kHz / 2 ch /
-  32-bit float）录到：
-  - Pop：0.00–0.10 s，主频约 **320 Hz**（生成式 420→? 的向下扫频）；
-  - Tink：0.48–0.60 s，峰值 **1760 Hz** 和 **3520 Hz**，与合成参数一致。
+  32-bit float）录到三段：
+  - Pop：0.00–0.10 s，主频约 **320 Hz**（向下扫频的第一段）；
+  - Tink：0.48–0.60 s，峰值 **1760 Hz** 和 **3520 Hz**；
+  - Rustle：清空截图文件（1 个）时，0.01–0.27 s、峰值 0.041、宽带低频噪声。
 - 录完立即恢复 mute=True、volume=0.00，并确认端点状态；`settings.ini` 也恢复
   `soundOff=1`。
-- Rustle 仍只有合成单测；三段音效的**主观听感**没有做（没有扬声器监听），
-  但输出波形已经证明声音离开进程并到达系统混音器。
+- 三段音效的主观听感仍未做（没有扬声器监听），但输出波形已证明三段声音都
+  离开进程并到达系统混音器。
 
 ### 3.4 三语界面
 

@@ -77,7 +77,7 @@
 | 8.4 | 取消 | WM_CLOSE → `Command::Cancel` → `EditorEvent::Cancelled`，应用删除自己的临时截图 |
 | 8.5 | 双胞胎 | 编辑器打开期间收到 Windows 保存副本则改写该副本并删除收件箱副本；保存前已上绳的副本按缩略图哈希改写 |
 | 4.10 | 拖拽预览 | `window::ghost::tests` 3 项（尺寸/位置/非法输入）+ 外部冒烟：130×101 @96、260×202 @192，移动只 `SetWindowPos`，隐藏后 2×2 |
-| 9.6 | 音效 | 三段 WAV 合成单测；`PlaySound` 返回 TRUE；默认端点 U32T1 原为静音，临时解除静音后 WASAPI loopback 录到 Pop≈320 Hz、Tink 1760/3520 Hz，随后恢复静音；`visual/audio-cues.png`；Rustle 和主观听感仍未验证 |
+| 9.6 | 音效 | 三段 WAV 合成单测；`PlaySound` 返回 TRUE；默认端点 U32T1 原为静音，临时解除静音后 loopback 录到 Pop≈320 Hz、Tink 1760/3520 Hz、Rustle 0.01–0.27 s 宽带噪声，随后恢复静音；`visual/audio-cues.png`；主观听感仍未验证 |
 | 9.7 | 三语 | 新增预览/便签/编辑器/快捷键字符串全部补齐 en/es/zh；`i18n` 完整性单测 |
 
 ## 2026-11-03 视觉回归（Rust 版，release）

@@ -227,8 +227,8 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 27. 丢弃补测：真实右键“丢弃”后 trace `recycled 1 files`，源文件消失，回收站
     namespace 里能查到同名条目，掉落动画完整。
 28. 音频输出补测：默认端点 U32T1 原本 mute/0%；临时 unmute 后用 WASAPI
-    loopback 录到 Pop≈320 Hz、Tink 1760/3520 Hz，随后恢复 mute/0%。Rustle
-    和主观听感仍未验证。
+    loopback 录到 Pop≈320 Hz、Tink 1760/3520 Hz、Rustle 0.01–0.27 s 宽带
+    噪声，随后恢复 mute/0%；主观听感仍未验证。
 
 同机数值（release，6016×3384 @200%，单屏）：
 
