@@ -278,6 +278,16 @@ pub fn set_lang(lang: Lang) -> &'static Strings {
 
 /// Windows UI language, mapped to the three supported languages.
 pub fn detect() -> Lang {
+    // Test hook: lets the visual acceptance runs exercise all three layouts
+    // without changing the Windows display language.
+    if let Ok(value) = std::env::var("PEGLINE_LANG") {
+        match value.to_ascii_lowercase().as_str() {
+            "es" => return Lang::Es,
+            "zh" => return Lang::Zh,
+            "en" => return Lang::En,
+            _ => {}
+        }
+    }
     // SAFETY: GetUserDefaultUILanguage has no parameters and cannot fail.
     let langid = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
     // The low 10 bits are the primary language id.

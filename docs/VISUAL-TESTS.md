@@ -34,6 +34,8 @@
 | ![中文文字框](visual/editor-text-chinese.png) | 中文正文“中文测试”输入、字体回退和光标定位都正确 |
 | ![空格剪贴板提示](visual/clipboard-empty.png) | 剪贴板没有文字时按 `Ctrl+Alt+N`：系统气泡显示“剪贴板里没有文字…”和当前快捷键 |
 | ![快捷键录制](visual/shortcut-recorder.png) | 冲突提示：红字完整显示在按钮上方；录制时本程序的全局热键已全部释放 |
+| ![三语编辑器工具栏](visual/editor-languages.png) | 中/西/英三套标题与工具栏标签完整，无裁切（上：中，中：西，下：英） |
+| ![西班牙语空提示](visual/line-es.png) | 西班牙语提示整句放入 pill；托盘菜单的西语长标签同样完整 |
 
 空线带提示、首次运行欢迎与三语字符串：
 
@@ -130,6 +132,18 @@
   7 s 波形仍是静音。因此没有“已经听到”的证据，听感仍待有音频回环的机器确认；
   不把 API 成功当成听感通过。
 
+### 3.4 三语界面
+
+新增仅供验收的 `PEGLINE_LANG=en|es|zh` 环境变量；同一份 release 依次启动三次：
+
+- 中文：标题“标注截图”，撤销/重做/取消/保存。
+- 西班牙语：标题“Anotar captura”，Deshacer/Rehacer/Cancelar/Guardar；西语
+  是三种语言里最长的，工具栏没有裁切，空线带提示整句放入 pill。
+- 英语：标题“Mark up screenshot”，Undo/Redo/Cancel/Save。
+
+西班牙语托盘菜单的长项（“Atajo de captura: Ctrl+Alt+S (en uso por otra
+aplicación)”等）也完整显示；菜单由系统绘制、按内容自适应宽度。
+
 ## 4. 逐帧结果
 
 - **放下**：0.3 s 悬停后开始，约 0.65 s 内从 -222 DIP 弹到 0，轻微过冲
@@ -144,7 +158,7 @@
 
 | 项 | 实测 | 备注 |
 |:--|:--|:--|
-| `pegline.exe` | **1,379,328 B（1.32 MB）** | 预算 ≤ 10 MB |
+| `pegline.exe` | **1,380,352 B（1.32 MB）** | 预算 ≤ 10 MB |
 | 6 卡线带 @60 Hz | **60.32 fps**，p95 17.11 ms，draw p50 0.73 / p95 1.82 ms | ≥ 58 fps |
 | 飞行（1600 px，复用） | **61.96 fps**，draw max 15.9 ms | 最大值为首帧上传；p50 仍在预算内 |
 | 私有内存（6 卡、probe 可见） | **92.0 MB** | 用户已接受；多一张悬停阴影纹理 |
