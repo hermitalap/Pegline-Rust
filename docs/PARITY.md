@@ -88,12 +88,15 @@
 | # | 项 | 证据 |
 |:--|:--|:--|
 | 1.6 | 空线带 | 快捷键打开后保持显示；灰底截图 `visual/line-empty.png` |
+| 2.3/2.4 | 间距/容量 | 连续加 13 张后线上保持 12 张，间距 174 DIP 居中，最旧一张掉落；`visual/line-capacity.png` |
 | 2.5 | 悬停 | 叉/复制/打开淡入；悬停按钮分别有 `#F2FFFFFF` 底色，整行 4 DIP 上浮；截图 `visual/line-hover-preview.png` |
 | 3.4/3.5 | 飞行相框/阴影 | 相框和夹子随进度出现，落地前与线上卡片一致；修复前是裸图盖住已落地相框；截图 `visual/line-flight.png` |
 | 3.7 | 掉落 | 37 帧 @60 Hz，白框/夹子全程可见，`e=k³` 加速、旋转、淡出；截图 `visual/line-drop.png` |
 | 4.1/4.2 | 复制 | 点击卡片后剪贴板含 PNG/CF_DIB/CF_HDROP；300 ms 截图可见“✓ 已复制”；`visual/line-copied.png` |
 | 4.10 | 拖拽预览 | ghost 0.9 倍、0.85 不透明度、跟随指针；原卡半透明；`visual/line-drag-ghost.png` |
 | 6.1 | 预览位置 | 预览从按钮行下方 12 DIP 开始，不再遮挡复制/打开；`visual/line-hover-preview.png` |
+| 6.6 | 大图尺寸 | 4000×3000 源图 → 预览白框 **1726×1300** 物理像素（≤1800×1300，4:3 等比）；不放大源图 |
+| 7.5 | 便签颜色 | 蓝/粉/灰点击后纸面/折角/墨色/勾选同步，`noteColor:` 写入并重启恢复；`visual/line-note-colors.png` |
 | 7.2 | 空剪贴板 | `Ctrl+Alt+N` 后出现系统气泡“剪贴板里没有文字…”和当前快捷键；`visual/clipboard-empty.png` |
 | 7.3 | 重复便签 | 文件夹里已有、线上没有时，挂回原 `.txt`（不新建副本）；`visual/line-note-swatches.png` |
 | 8.1 | 四种工具 | 真实拖拽箭头、蓝 12 px 矩形、文字、16 px 马赛克；文字输入有白底框/彩色边框/光标，中文“中文测试”正常（`visual/editor-text-box.png`、`visual/editor-text-chinese.png`）；工具栏手形、画布十字/I 形 |
