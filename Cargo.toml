@@ -12,6 +12,10 @@ name = "pegline"
 path = "src/main.rs"
 
 [[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
 name = "spike"
 path = "src/bin/spike.rs"
 
@@ -25,16 +29,33 @@ features = [
   "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_DirectComposition",
+  "Win32_Graphics_DirectWrite",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Win32_Globalization",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_DataExchange",
+  "Win32_System_IO",
   "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
   "Win32_System_Performance",
   "Win32_System_ProcessStatus",
+  "Win32_System_Registry",
+  "Win32_System_SystemInformation",
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
+  "Win32_System_Time",
   "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ]
 
@@ -42,6 +63,11 @@ features = [
 # the same crate the windows crate depends on, pinned by the lock file.
 [dependencies.windows-numerics]
 version = "0.3"
+
+# The #[implement] macro expands to absolute `windows_core::` paths, so the
+# crate must also be nameable from this crate root (same version as `windows`).
+[dependencies.windows-core]
+version = "0.62"
 
 [build-dependencies]
 embed-resource = "3.0"
