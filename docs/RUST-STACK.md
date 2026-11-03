@@ -194,8 +194,10 @@ CI（GitHub Actions `windows-latest`）：`fmt`、`clippy -D warnings`、`test`�
 4. 资源压缩：图标多尺寸用 PNG 条目；多语言字符串用 `&'static str` 表，不进资源 DLL。
 
 - 不做安装包；开机启动写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
-- 版本号写入 exe 资源（`VERSIONINFO`），托盘提示显示 `Pegline <version>`。
-- 发布页附 SHA-256；可选代码签名（暂不做，签名证书成本高于收益）。
+- 版本号写入 exe 资源（`VERSIONINFO`，2.0.0 对应 `2,0,0,0`）；托盘提示保持
+  WPF 的 `Pegline`，不改用户可见文案。
+- 发布包由 `tools/package-release.ps1` 生成 zip + SHA-256；可选代码签名
+  暂不做，签名证书成本高于收益。
 
 ## 8.1 帧率与 120 Hz
 
