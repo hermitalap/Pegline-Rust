@@ -14,7 +14,7 @@
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -71,7 +71,9 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, Co
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::Ime::{
-    HIMC, ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmSetOpenStatus,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, ImmAssociateContext,
+    ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
+    ImmSetCompositionWindow, ImmSetOpenStatus,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -82,9 +84,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HTCLIENT, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW, MINMAXINFO,
     PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_IME_CHAR, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_SETCURSOR, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -261,6 +263,8 @@ impl Editor {
             stopping: AtomicBool::new(false),
             text_tool: AtomicBool::new(false),
             ime: AtomicIsize::new(0),
+            caret_x: AtomicI32::new(-1),
+            caret_y: AtomicI32::new(-1),
         });
         // SAFETY: the pointer stays valid while the window exists: `Editor`
         // holds the `Arc` and `shutdown` destroys the window before that `Arc`
@@ -433,6 +437,9 @@ struct Shared {
     text_tool: AtomicBool,
     /// IME context associated with the editor window (0 when unavailable).
     ime: AtomicIsize,
+    /// Last text caret position in client pixels, for the IME candidate window.
+    caret_x: AtomicI32,
+    caret_y: AtomicI32,
 }
 
 impl Shared {
@@ -634,6 +641,15 @@ unsafe extern "system" fn editor_wndproc(
                     }
                 }
             }
+            // If the Text tool is armed, publish the caret in client pixels
+            // before the renderer has painted; IME composition can start on the
+            // next keystroke.
+            if shared.text_tool.load(Ordering::Acquire) && dy > TOOLBAR_HEIGHT {
+                shared.caret_x.store(x.max(0), Ordering::Relaxed);
+                shared
+                    .caret_y
+                    .store((y + (42.0 * scale) as i32).max(0), Ordering::Relaxed);
+            }
             shared.captured.store(true, Ordering::Release);
             // SAFETY: capturing the mouse for our own window.
             unsafe { SetCapture(hwnd) };
@@ -710,6 +726,9 @@ unsafe extern "system" fn editor_wndproc(
         WM_CHAR => {
             forward_char(shared, wparam);
             return LRESULT(0);
+        }
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
+            position_ime(hwnd, shared);
         }
         WM_IME_CHAR => {
             // A composing IME (e.g. Microsoft Pinyin) commits the chosen
@@ -799,6 +818,41 @@ fn report(shared: &Shared, hwnd: HWND, event: EditorEvent) {
     // post fails and the app sees `is_closed` instead.
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_APP_EDITOR_DONE, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Moves the IME composition/candidate windows to the text caret published by
+/// the render thread. `COMPOSITIONFORM` and `CANDIDATEFORM` take client-area
+/// coordinates relative to `hwnd`, not screen coordinates.
+fn position_ime(hwnd: HWND, shared: &Shared) {
+    let x = shared.caret_x.load(Ordering::Relaxed);
+    let y = shared.caret_y.load(Ordering::Relaxed);
+    logging::trace(format!("IME position {x},{y}"));
+    if x < 0 || y < 0 {
+        return;
+    }
+    // SAFETY: our own window; the returned HIMC is released below.
+    let context = unsafe { ImmGetContext(hwnd) };
+    if context.0.is_null() {
+        return;
+    }
+    let composition = COMPOSITIONFORM {
+        dwStyle: CFS_POINT,
+        ptCurrentPos: POINT { x, y },
+        rcArea: RECT::default(),
+    };
+    let candidate = CANDIDATEFORM {
+        dwIndex: 0,
+        dwStyle: CFS_CANDIDATEPOS,
+        ptCurrentPos: POINT { x, y },
+        rcArea: RECT::default(),
+    };
+    // SAFETY: both forms are live for the calls; the HIMC came from
+    // ImmGetContext and is released with the matching HWND.
+    unsafe {
+        let _ = ImmSetCompositionWindow(context, &composition);
+        let _ = ImmSetCandidateWindow(context, &candidate);
+        let _ = ImmReleaseContext(hwnd, context);
     }
 }
 
@@ -900,7 +954,13 @@ fn render_thread(
             return;
         }
     };
-    let mut state = match EditorState::new(start.width_px, start.height_px, start.dpi, surface) {
+    let mut state = match EditorState::new(
+        start.width_px,
+        start.height_px,
+        start.dpi,
+        surface,
+        Arc::clone(&shared),
+    ) {
         Ok(state) => state,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -1113,10 +1173,18 @@ struct EditorState {
     texts_dirty: bool,
     dirty: bool,
     lost: u32,
+    /// UI-thread side shared state; used to publish the IME caret position.
+    shared: Arc<Shared>,
 }
 
 impl EditorState {
-    fn new(width_px: u32, height_px: u32, dpi: u32, surface: Surface) -> Result<Self, String> {
+    fn new(
+        width_px: u32,
+        height_px: u32,
+        dpi: u32,
+        surface: Surface,
+        shared: Arc<Shared>,
+    ) -> Result<Self, String> {
         let labels = Labels::build(&surface.dwrite, i18n::s())?;
         let text_format = create_format(
             &surface.dwrite,
@@ -1155,6 +1223,7 @@ impl EditorState {
             texts_dirty: false,
             dirty: true,
             lost: 0,
+            shared,
         })
     }
 
@@ -1826,6 +1895,13 @@ impl EditorState {
                             rt.FillRectangle(&caret, pen);
                         }
                     }
+                    // Publish the bottom of the caret in client pixels so the
+                    // IME composition and candidate windows open right below
+                    // the text box instead of at (0, 0).
+                    let (caret_x, caret_y) =
+                        ime_caret_client_px(self.canvas, *origin, text_w, text_h, self.dpi);
+                    self.shared.caret_x.store(caret_x, Ordering::Relaxed);
+                    self.shared.caret_y.store(caret_y, Ordering::Relaxed);
                     if let Some(mark) = doc.marks().get(index) {
                         painter.mark(mark, &self.texts);
                     }
@@ -2142,6 +2218,26 @@ fn drag_rect(start: (f32, f32), end: (f32, f32)) -> (f32, f32, f32, f32) {
         start.1.min(end.1),
         (end.0 - start.0).abs(),
         (end.1 - start.1).abs(),
+    )
+}
+
+/// Converts a text mark's caret and box bottom into client physical pixels for
+/// `COMPOSITIONFORM` / `CANDIDATEFORM` (which expect client coordinates, never
+/// screen coordinates).
+fn ime_caret_client_px(
+    canvas: CanvasLayout,
+    origin: (f32, f32),
+    text_w: f32,
+    text_h: f32,
+    dpi: f32,
+) -> (i32, i32) {
+    let pad = 4.0;
+    let pixel_scale = (dpi / 96.0).max(1.0);
+    let client_x = canvas.image.left + (origin.0 + text_w.max(0.0) + 1.0) * canvas.scale;
+    let client_y = canvas.image.top + (origin.1 + text_h.max(24.0) + pad + 2.0) * canvas.scale;
+    (
+        (client_x * pixel_scale).round().max(0.0) as i32,
+        (client_y * pixel_scale).round().max(0.0) as i32,
     )
 }
 
@@ -3119,5 +3215,20 @@ mod tests {
         assert_eq!(mosaic.bgra[0], 5);
         assert_eq!(mosaic.bgra[4], 25);
         assert_eq!(mosaic.bgra[3], 255);
+    }
+
+    #[test]
+    fn ime_caret_is_below_the_text_box_in_client_pixels() {
+        let canvas = canvas_layout(CLIENT_WIDTH_DIP, CLIENT_HEIGHT_DIP, (697, 584));
+        // The text box bottom is at source y = 120 + 38, the IME anchor two
+        // DIPs below it (the four DIP box padding plus the two DIP gap).
+        let (x96, y96) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 96.0);
+        let (x192, y192) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 192.0);
+        assert_eq!((x96, y96), (409, 278));
+        assert_eq!((x192, y192), (817, 556));
+        assert!(x96 < pixels(CLIENT_WIDTH_DIP, 96));
+        assert!(y96 < pixels(CLIENT_HEIGHT_DIP, 96));
+        let top_px = ((canvas.image.top + 120.0 * canvas.scale) * 2.0).round() as i32;
+        assert!(y192 > top_px + 70, "IME anchor must sit below the text box");
     }
 }
