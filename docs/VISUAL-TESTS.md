@@ -34,6 +34,8 @@
 | ![中文文字框](visual/editor-text-chinese.png) | 中文正文“中文测试”输入、字体回退和光标定位都正确 |
 | ![IME 中文字](visual/editor-ime-char.png) | `WM_IME_CHAR` 与 `WM_CHAR` 各注入 `0x4E2D`，文字工具出现“中中” |
 | ![IME 中文上屏](visual/editor-ime-composed.png) | 真实拼音 `zhongwen` + 空格，文字工具上屏“中文” |
+| ![修复前的 IME 候选窗](visual/editor-ime-candidate-before.png) | 修复前：组合串和候选列表停在屏幕左上角，压在浏览器标签栏上 |
+| ![修复后的 IME 候选窗](visual/editor-ime-candidate.png) | 修复后：组合串和候选列表紧跟文字框光标，落在屏幕 (2890,1703) |
 | ![空格剪贴板提示](visual/clipboard-empty.png) | 剪贴板没有文字时按 `Ctrl+Alt+N`：系统气泡显示“剪贴板里没有文字…”和当前快捷键 |
 | ![快捷键录制](visual/shortcut-recorder.png) | 冲突提示：红字完整显示在按钮上方；录制时本程序的全局热键已全部释放 |
 | ![西语快捷键录制](visual/shortcut-recorder-es.png) | 西语标题、两行说明和三个按钮完整，无截断 |
@@ -130,6 +132,16 @@
     `ImmSetOpenStatus(TRUE)`，WM_DESTROY 时解绑并 `ImmDestroyContext`；
     实测输入 `zhongwen` 后按空格上屏 **“中文”**。`WM_IME_CHAR` 的直接注入
     仍保留为兜底。
+23. **输入法候选窗跑到屏幕左上角。** 补上 IME 上下文后，组合串和候选列表
+    虽然能出现，但位置固定在 (0,0) 附近，和文字框完全分离（修复前截图里
+    组合串压在浏览器标签栏上）。原因是只创建了 IME 上下文，从未告诉 IME
+    插入点在哪里；`IMM32` 的默认位置就是客户区原点。现在渲染线程把文字光标的
+    客户区物理像素坐标写进共享状态，UI 线程在 `WM_IME_STARTCOMPOSITION` /
+    `WM_IME_COMPOSITION` 里调用 `ImmSetCompositionWindow(CFS_POINT)` 和
+    `ImmSetCandidateWindow(CFS_CANDIDATEPOS)`。200% DPI 下实测客户端坐标
+    **1002,797** 对应组合窗 `MSCTFIME Composition` 屏幕矩形
+    **(2890,1703)–(2978,1725)**，候选列表紧接其下，见
+    `visual/editor-ime-candidate.png`。
 
 ### 3.1 标注编辑器实测（2026-11-03）
 
@@ -253,6 +265,23 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 - 真实右键点击同一图标能打开菜单：截图快捷键显示“（被其他程序占用）”、
   “接管截图”有勾选、清空计数为 0；菜单关闭正常。
 
+### 3.8 输入法候选窗（2026-11-03 收尾）
+
+用 `--editor-demo --editor-hold` 打开 900×600 源图，依次点击文字工具和画布，
+再用 `SendInput` 发送 `z h o n g w e n` 八个字母（不按空格，保持组合）：
+
+- trace 记录 `IME position 1002,797`，位置随每次 `WM_IME_COMPOSITION` 重发。
+- 枚举窗口找到本进程的 `MSCTFIME Composition`，屏幕矩形
+  **(2890,1703)–(2978,1725)**；编辑器客户区原点 (1888,906)，换算正好是
+  客户端 **(1002,797)**，与 trace 一致。这说明 `ImmSetCompositionWindow` 的
+  客户区坐标被 IME 接受，而不再退回 (0,0)。
+- 候选列表从组合串下方开始，整行（1 中文 … 7 宗文）在光标右下方展开；
+  截图见 `visual/editor-ime-candidate.png`。
+- 组合完成后按空格上屏“中文”，`editor-ime-composed.png` 仍是同一路径。
+
+修复前同一操作下组合串和候选列表出现在屏幕左上角，见
+`visual/editor-ime-candidate-before.png`；本轮修复后不再复现。
+
 ## 4. 逐帧结果
 
 - **放下**：0.3 s 悬停后开始，约 0.65 s 内从 -222 DIP 弹到 0，轻微过冲
@@ -267,10 +296,10 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 
 | 项 | 实测 | 备注 |
 |:--|:--|:--|
-| `pegline.exe` | **1,383,936 B（1.32 MB）** | 预算 ≤ 10 MB |
-| 6 卡线带 @60 Hz | **60.32 fps**，p95 17.11 ms，draw p50 0.73 / p95 1.82 ms | ≥ 58 fps |
-| 飞行（1600 px，复用） | **61.96 fps**，draw max 15.9 ms | 最大值为首帧上传；p50 仍在预算内 |
-| 私有内存（6 卡、probe 可见） | **92.0 MB** | 用户已接受；多一张悬停阴影纹理 |
-| 私有内存（飞行） | **89.4 MB** | 低于 100 MB MVP 门槛 |
+| `pegline.exe` | **1,385,984 B（1.32 MB）** | 预算 ≤ 10 MB；含 2.0.0 版本资源 |
+| 6 卡线带 @60 Hz | **60.30 fps**，p95 16.96 ms，draw p50 0.79 / p95 1.11 ms | 发布前复测（≥ 58 fps） |
+| 飞行（1600 px，复用 3 次） | **61.52 fps**，draw max 10.9 ms | 发布前复测；最大值为首帧上传 |
+| 私有内存（6 卡、probe 可见） | **92.4 MB** | 用户已接受；与上一轮 92.0 MB 持平 |
+| 私有内存（飞行） | **89.3 MB** | 低于 100 MB MVP 门槛 |
 | 私有内存（6 卡 1 帧） | **61.5 MB** | 之前 58.8 MB；+2.7 MB 来自第二张阴影和夹子阴影 |
 | 200 次连拍 | 峰值 135.7 MB，45 s 后 **105.8 MB**（热身 104.2 MB，+1.5%），PASS |

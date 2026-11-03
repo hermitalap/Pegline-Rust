@@ -8,3 +8,6 @@ Cargo.lock.bak
 
 # WPF era: generated exe, icon, probes (root and archived copy)
 build/
+
+# Release packages (built by tools/package-release.ps1)
+/dist/
