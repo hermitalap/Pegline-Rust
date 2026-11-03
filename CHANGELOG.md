@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.1 — 2026-11-03
+
+### Changes
+
+- The line drops for 2.5 s on every launch (5 s on the first run, together
+  with the empty hint), so a start is visible instead of just a tray icon
+  appearing. It tucks itself away as usual unless the pointer is inside the
+  strip.
+
 ## 2.1.0 — 2026-11-03
 
 ### Fixes

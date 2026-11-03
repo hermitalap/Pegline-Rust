@@ -73,6 +73,8 @@ const PEEK_SECONDS: f64 = 2.5;
 const EMPTY_DELAY: f64 = 0.7;
 /// First-run welcome duration.
 const WELCOME_SECONDS: f64 = 5.0;
+/// How long the line stays down on every launch so a start is visible.
+const STARTUP_SECONDS: f64 = 2.5;
 /// Clipboard settle delay.
 const CLIPBOARD_SETTLE: f64 = 0.15;
 /// Long press threshold.
@@ -333,7 +335,8 @@ struct App {
     away_since: Option<f64>,
     band_suppressed: bool,
     keep_open: bool,
-    welcome_until: Option<f64>,
+    /// While set, the line stays down after a launch until this deadline.
+    startup_until: Option<f64>,
     /// When to show the one-time "let Pegline handle your screenshots?" box.
     catch_offer_at: Option<f64>,
     empty_since: Option<f64>,
@@ -427,7 +430,7 @@ impl App {
             away_since: None,
             band_suppressed: false,
             keep_open: false,
-            welcome_until: None,
+            startup_until: None,
             catch_offer_at: None,
             empty_since: None,
             hide_at: None,
@@ -525,15 +528,24 @@ impl App {
 
         self.restore_pegged();
 
-        if !self.settings.welcomed() {
-            // First run: show the empty line with its hint for a few seconds,
-            // exactly like the WPF app's welcome (keepOpen + Refresh + Reveal).
-            self.keep_open = true;
-            self.welcome_until = Some(self.start_time + WELCOME_SECONDS);
+        // Drop the line on every launch so a start is visible instead of just
+        // a tray icon appearing. The first run keeps the longer welcome with
+        // its empty hint; `startup_until` holds the line down even when the
+        // pointer is nowhere near the top edge (update_pointer treats it as
+        // busy), then it retracts normally unless the pointer is inside.
+        let first_run = !self.settings.welcomed();
+        let hold = if first_run {
+            WELCOME_SECONDS
+        } else {
+            STARTUP_SECONDS
+        };
+        self.keep_open = true;
+        self.startup_until = Some(self.start_time + hold);
+        if first_run {
             self.settings.mark_welcomed();
-            self.present();
-            self.reveal(true, 0.0);
         }
+        self.present();
+        self.reveal(false, 0.0);
         // The WPF app asked once, 1.2 s after the first start, whether it may
         // take over screenshots (BEHAVIOR §3.2). Reading the clipboard is the
         // user's call, never ours.
@@ -1323,8 +1335,11 @@ impl App {
             if inside && self.pinned {
                 self.pinned = false;
             }
-            let busy =
-                self.pinned || self.pressed.is_some() || self.menu_open || now < self.peek_until;
+            let busy = self.pinned
+                || self.pressed.is_some()
+                || self.menu_open
+                || now < self.peek_until
+                || self.startup_until.is_some_and(|until| now < until);
             if inside || busy {
                 self.away_since = None;
             } else {
@@ -1405,9 +1420,9 @@ impl App {
                 self.is_present = false;
             }
         }
-        if let Some(until) = self.welcome_until {
+        if let Some(until) = self.startup_until {
             if now >= until {
-                self.welcome_until = None;
+                self.startup_until = None;
                 self.keep_open = false;
                 if self.items.is_empty() {
                     self.dismiss(now);
