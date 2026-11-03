@@ -74,6 +74,21 @@ pub fn slot_x(index: usize, count: usize, width: f32) -> f32 {
     width / 2.0 - total / 2.0 + index as f32 * SPACING
 }
 
+/// Horizontal centre where a flying card lands before the row re-centres.
+///
+/// It hangs one full spacing beyond the last card of the current row — half a
+/// spacing beyond its final slot — so it lands clear of its neighbour; the
+/// whole row then slides left by that half spacing. An empty line puts the
+/// first card in the middle (BEHAVIOR §5.2).
+pub fn flight_slot_x(index: usize, count: usize, width: f32) -> f32 {
+    let slot = slot_x(index, count, width);
+    if count <= 1 {
+        slot
+    } else {
+        slot + SPACING * 0.5
+    }
+}
+
 /// How many cards fit on a screen of `width` DIP. The WPF app kept at least 3
 /// and at most 12 visible no matter how narrow or wide the screen is.
 pub fn capacity(width: f32) -> usize {
@@ -183,6 +198,19 @@ mod tests {
         assert!((slot_x(0, 3, width) - 786.0).abs() < 1e-4);
         assert!((slot_x(2, 3, width) - 1134.0).abs() < 1e-4);
         assert!((slot_x(1, 3, width) - slot_x(0, 3, width) - SPACING).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_flying_card_lands_one_spacing_beyond_the_last_hanging_card() {
+        let width = 1920.0;
+        // Three cards hang at 786 / 960 / 1134. The fourth lands a whole
+        // spacing to the right of the third, then slides left to 1221 with the
+        // rest of the row.
+        assert!((slot_x(3, 4, width) - 1221.0).abs() < 1e-4);
+        assert!((flight_slot_x(3, 4, width) - 1308.0).abs() < 1e-4);
+        assert!((flight_slot_x(3, 4, width) - slot_x(3, 4, width) - SPACING * 0.5).abs() < 1e-4);
+        // An empty line puts the first card in the middle.
+        assert!((flight_slot_x(0, 1, width) - 960.0).abs() < 1e-4);
     }
 
     #[test]

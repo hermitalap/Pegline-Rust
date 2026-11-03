@@ -49,11 +49,13 @@ measured in `PLAN.md` §3.3: 1.29 MB exe, ~105 ms cold start, 60.5 fps on the li
 10–30 s idle. The remaining acceptance gaps are a 120 Hz display, a second monitor
 and sleep/wake; do not invent numbers for them.
 
-**2.0.0 was released on 2026-11-03.** The last user-visible gap, the IME candidate
-window sitting at the top-left instead of the editor caret, is fixed and verified
-with Microsoft Pinyin at 200% DPI (`docs/VISUAL-TESTS.md` §3.8). The release build,
-checksum and known limitations are in `docs/RELEASE-2.0.0.md`; rebuild the portable
-package with `pwsh tools\package-release.ps1`. The only open items are hardware
+**2.1.0 was released on 2026-11-03** (2.0.0 was the first complete Rust release).
+The landing hand-off now mirrors the real card's row spring and 2.2° sway while
+the flight window fades over an opaque copy, so the two images never separate;
+the IME candidate window is also fixed and verified with Microsoft Pinyin at
+200% DPI (`docs/VISUAL-TESTS.md` §3.8). The 2.0.0 release build, checksum and
+known limitations are in `docs/RELEASE-2.0.0.md`; rebuild the portable package
+with `pwsh tools\package-release.ps1`. The only open items are hardware
 specific (120 Hz, a second monitor, sleep/wake) and the subjective listening check
 for the three audio cues; see `PLAN.md` §8. Do not trade features or visual quality
 for memory to chase the original 60 MB MVP target — the user accepted the measured

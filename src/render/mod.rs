@@ -144,8 +144,24 @@ impl Texts {
     }
 
     fn build(dwrite: &IDWriteFactory) -> Result<Self, String> {
-        let ui = create_format(dwrite, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
-        let hint = create_format(dwrite, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        // Chinese falls back from Segoe UI to a CJK face. At 11 DIP the
+        // fallback's weight and hinting are whatever the system picks, and a
+        // dense glyph like "复" fills in; name the Windows UI CJK face
+        // explicitly, use its regular weight, and give the buttons the same
+        // 13 DIP the editor labels use. Latin text keeps Segoe UI SemiBold.
+        let chinese = i18n::detect() == i18n::Lang::Zh;
+        let family = if chinese {
+            w!("Microsoft YaHei UI")
+        } else {
+            w!("Segoe UI")
+        };
+        let label_weight = if chinese {
+            DWRITE_FONT_WEIGHT_MEDIUM
+        } else {
+            DWRITE_FONT_WEIGHT_SEMI_BOLD
+        };
+        let ui = create_format(dwrite, family, 13.0, label_weight)?;
+        let hint = create_format(dwrite, family, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         let strings = i18n::s();
 
         let mut items: HashMap<TextId, TextItem> = HashMap::new();
@@ -191,13 +207,14 @@ impl Texts {
 
 fn create_format(
     dwrite: &IDWriteFactory,
+    family: PCWSTR,
     size: f32,
     weight: DWRITE_FONT_WEIGHT,
 ) -> Result<IDWriteTextFormat, String> {
     // SAFETY: the factory is alive; the family and locale are static strings.
     unsafe {
         dwrite.CreateTextFormat(
-            w!("Segoe UI"),
+            family,
             None,
             weight,
             DWRITE_FONT_STYLE_NORMAL,
@@ -1091,13 +1108,16 @@ impl Renderer {
             return;
         };
         let brush = self.palette.solid(brush);
+        // Centred text lands on fractions of a device pixel; at button size
+        // that is the difference between sharp strokes and a grey smear, so
+        // the origin goes to the pixel grid before drawing.
+        let scale = self.scale();
+        let x = (origin.0 * scale).round() / scale;
+        let y = (origin.1 * scale).round() / scale;
         // SAFETY: layout and brush are alive; the origin is by value.
         unsafe {
             self.context.DrawTextLayout(
-                Vector2 {
-                    X: origin.0,
-                    Y: origin.1,
-                },
+                Vector2 { X: x, Y: y },
                 &item.layout,
                 brush,
                 D2D1_DRAW_TEXT_OPTIONS(0),

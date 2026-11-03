@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.0 — 2026-11-03
+
+### Fixes
+
+- The landing hand-off is now seamless: the real card is already opaque
+  underneath, while the flight window mirrors the card's row spring and 2.2°
+  landing sway and fades over it. The two copies stay aligned, so the card no
+  longer ghosts sideways or flickers through a double-transparency dip.
+
+- `Win+Shift+S` and PrtScn captures take off from where they were taken again:
+  the clipboard path decodes and sends the same 1600 px flight texture as a
+  file capture, so the card no longer appears on the line out of nowhere.
+- A card no longer shows on the line while it is still flying. It lands one
+  full slot clear of the current right end, then the whole row — including the
+  new card — slides left half a spacing into the centred layout.
+- One screenshot no longer hangs twice when the clipboard copy and the
+  Windows-saved file arrive at the same moment. The second capture now checks
+  the line for the other half (same size and thumbnail, other owner) and folds
+  into it; the twin window grew from 4 s to 8 s because Windows can save the
+  file a few seconds after the snip.
+- Taking a card down falls straight down instead of swinging to the left: the
+  drop rotates about the card's own pin and no longer spins, travels 200 DIP
+  (was 520) in 0.32 s (was 0.55).
+- Card button labels are 13 px instead of 11 px. Chinese uses Microsoft YaHei
+  UI Medium — the system's Segoe UI fallback at 11 px filled in dense glyphs
+  such as "复" — and text origins snap to the device pixel grid.
+
 ## 2.0.0 — 2026-11-03
 
 The first complete Rust release. Pegline is now one 1.32 MB executable with no

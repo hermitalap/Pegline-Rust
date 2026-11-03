@@ -63,6 +63,32 @@ pub enum Command {
     Stop,
 }
 
+/// Horizontal targets for a row of `count` cards.
+///
+/// A card that is still flying is not on the line yet: it waits at the slot it
+/// will land on — half a spacing to the right of the cards already hanging —
+/// while those cards keep their old places. Once it lands, `flying` is `None`
+/// and every card gets the centred layout, so the row glides left under the
+/// new card on the horizontal spring (BEHAVIOR §5.2).
+fn row_targets(count: usize, flying: Option<usize>, width: f32) -> Vec<f32> {
+    let visible = if flying.is_some() {
+        count.saturating_sub(1)
+    } else {
+        count
+    };
+    let mut targets = Vec::with_capacity(count);
+    let mut index = 0;
+    for slot in 0..count {
+        if flying == Some(slot) {
+            targets.push(layout::flight_slot_x(visible, visible + 1, width));
+        } else {
+            targets.push(layout::slot_x(index, visible, width));
+            index += 1;
+        }
+    }
+    targets
+}
+
 /// One card's animated state.
 struct Card {
     id: CardId,
@@ -375,6 +401,8 @@ impl Scene {
         self.scale = scale;
         self.width_dip = width_px as f32 / scale;
         let _ = height_px;
+        // The slots depend on the line width, so they move with the window.
+        self.relayout_cards();
         self.dirty = true;
     }
 
@@ -495,15 +523,46 @@ impl Scene {
                 }
             }
             Command::SetFlying { id, flying } => {
+                // Where a flight lands: one spacing beyond the current last
+                // card, so the invisible scene card is already there when the
+                // flight window hands over.
+                let visible = self.cards.len().saturating_sub(1);
+                let landing_x = layout::flight_slot_x(visible, visible + 1, self.width_dip);
+                let mut changed = false;
                 if let Some(card) = self.cards.iter_mut().find(|card| card.id == id) {
                     if card.flying != flying {
                         card.flying = flying;
-                        if !flying {
-                            card.arrived = true;
+                        card.arrived = true;
+                        if flying {
+                            // The flight window is drawing the card until it
+                            // lands; the one on the line stays invisible
+                            // underneath it (BEHAVIOR §5.2). Its swing starts
+                            // from rest so the flight window can mirror the
+                            // same landing sway from a known state.
+                            card.opacity = 0.0;
+                            card.swing.snap(0.0);
+                            card.nudge_t = -1.0;
+                            card.x.value = landing_x;
+                            card.x.velocity = 0.0;
+                            card.x.target = landing_x;
+                        } else {
+                            // Landing starts the row glide immediately. The
+                            // real card is already opaque: the flight window,
+                            // which mirrors the same row spring and 2.2° sway,
+                            // is still on top and fades out over it. Two
+                            // identical, aligned copies therefore composite at
+                            // full opacity — no double-exposure, no mid-fade
+                            // transparency dip.
+                            card.opacity = 1.0;
+                            card.x.velocity = 0.0;
                             card.nudge(2.2);
                         }
-                        self.dirty = true;
+                        changed = true;
                     }
+                }
+                if changed {
+                    self.dirty = true;
+                    self.relayout_cards();
                 }
             }
             Command::Copied(id) => {
@@ -520,9 +579,10 @@ impl Scene {
     }
 
     fn relayout_cards(&mut self) {
-        let count = self.cards.len();
-        for (index, card) in self.cards.iter_mut().enumerate() {
-            card.x.target = layout::slot_x(index, count, self.width_dip);
+        let flying = self.cards.iter().position(|card| card.flying);
+        let targets = row_targets(self.cards.len(), flying, self.width_dip);
+        for (card, target) in self.cards.iter_mut().zip(targets) {
+            card.x.target = target;
         }
     }
 
@@ -596,9 +656,7 @@ impl Scene {
         let pressed = self.pressed;
         let dragging = self.dragging;
         let copied = self.copied;
-        let count = self.cards.len();
-        for (index, card) in self.cards.iter_mut().enumerate() {
-            card.x.target = layout::slot_x(index, count, self.width_dip);
+        for card in self.cards.iter_mut() {
             let was = card.x.value;
             card.x.step(dt);
             card.drop.step(dt);
@@ -623,8 +681,10 @@ impl Scene {
             card.press.step(dt);
 
             // Fade-in follows the drop; a card only becomes visible once it has
-            // arrived (flying cards arrive through `arriving`).
-            if !card.arrived {
+            // arrived, and a card in flight is drawn by the flight window.
+            if card.flying {
+                card.opacity = 0.0;
+            } else if !card.arrived {
                 card.opacity = 0.0;
                 if !card.arriving || card.drop.value > -0.5 {
                     card.arrived = true;
@@ -675,8 +735,13 @@ impl Scene {
         snapshot.width_dip = self.width_dip;
         snapshot.cards.clear();
         snapshot.cards.reserve(self.cards.len());
-        for (index, card) in self.cards.iter().enumerate() {
-            let slot_center = layout::slot_x(index, self.cards.len(), self.width_dip);
+        for card in &self.cards {
+            // A card in flight is drawn by the flight window and must not take
+            // clicks on the line under it.
+            if card.flying {
+                continue;
+            }
+            let slot_center = card.x.value;
             let slot_left = slot_center - layout::CARD_WIDTH * 0.5;
             // The published box is in window DIP: the slot origin plus the
             // rope height, the drop offset and the slide.
@@ -748,8 +813,9 @@ impl Scene {
 
         let count = self.cards.len();
         for index in 0..count {
-            let slot_x = layout::slot_x(index, count, self.width_dip);
-            let slot_left = slot_x - layout::CARD_WIDTH * 0.5;
+            // The drawn position is the spring value, not the final slot: the
+            // row glides when a card is added, removed or lands.
+            let slot_left = self.cards[index].x.value - layout::CARD_WIDTH * 0.5;
             let hovered = self.hover == Some(self.cards[index].id) && self.dragging.is_none();
             self.draw_card(renderer, index, slot_left, hovered);
         }
@@ -925,6 +991,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_landing_is_opaque_under_the_flight_and_glides() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            32.0,
+            snapshot,
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.value = 0.0;
+
+        // A card that has just been handed over by the flight window: it is
+        // 87 DIP right of its final slot, already fully opaque (the flight
+        // window is still on top of it), and both the row spring and the 2.2°
+        // landing sway start on this frame.
+        let mut item = card();
+        item.flying = false;
+        item.arrived = true;
+        item.opacity = 1.0;
+        item.swing.snap(0.0);
+        item.nudge_t = -1.0;
+        item.nudge(2.2);
+        item.x.value = 1047.0;
+        item.x.target = 960.0;
+        item.x.velocity = 0.0;
+        item.drop.snap(0.0);
+        scene.cards.push(item);
+
+        let dt = 1.0 / 60.0;
+        let mut now = 0.0;
+        for _ in 0..6 {
+            now += f64::from(dt);
+            scene.update(dt, now);
+        }
+        // The real card moves and sways immediately and stays opaque, so the
+        // flight window can never reveal a transparency dip underneath.
+        assert!((scene.cards[0].x.target - 960.0).abs() < 0.01);
+        assert!(
+            scene.cards[0].x.value < 1040.0,
+            "x={} did not glide",
+            scene.cards[0].x.value
+        );
+        assert_eq!(scene.cards[0].opacity, 1.0);
+        assert!(scene.cards[0].nudge_t >= 0.0);
+    }
+
     fn card() -> Card {
         Card::new(
             CardSpec {
@@ -945,6 +1061,40 @@ mod tests {
         assert!((layout::slot_x(0, 3, 1920.0) - 786.0).abs() < 1e-3);
         assert!((layout::slot_x(1, 3, 1920.0) - 960.0).abs() < 1e-3);
         assert!((layout::slot_x(2, 3, 1920.0) - 1134.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_flying_card_waits_at_the_right_end_until_it_lands() {
+        let width = 1920.0;
+        // Four cards, the last one still in the air. The three cards already
+        // hanging keep the slots they had, and the flier waits a whole spacing
+        // to the right of the third card, clear of it.
+        let held = row_targets(4, Some(3), width);
+        for (index, target) in held.iter().enumerate().take(3) {
+            assert!((target - layout::slot_x(index, 3, width)).abs() < 1e-4);
+        }
+        assert!((held[3] - layout::flight_slot_x(3, 4, width)).abs() < 1e-4);
+        assert!((held[3] - layout::slot_x(3, 4, width) - 87.0).abs() < 1e-4);
+
+        // Landing slides the whole row left by half a spacing: the flier moves
+        // from its landing spot to its final slot, the others by the same 87.
+        let landed = row_targets(4, None, width);
+        for (index, target) in landed.iter().enumerate() {
+            assert!((target - layout::slot_x(index, 4, width)).abs() < 1e-4);
+        }
+        for (target, old) in landed.iter().zip(&held) {
+            assert!((target - old + 87.0).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn no_flight_means_the_plain_centred_row() {
+        let width = 1920.0;
+        let targets = row_targets(3, None, width);
+        assert_eq!(targets.len(), 3);
+        for (index, target) in targets.iter().enumerate() {
+            assert!((target - layout::slot_x(index, 3, width)).abs() < 1e-4);
+        }
     }
 
     #[test]

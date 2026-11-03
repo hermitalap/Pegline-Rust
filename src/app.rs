@@ -84,7 +84,11 @@ const DOUBLE_CLICK: f64 = 0.4;
 /// Missing file ticks before a card is dropped (one per second).
 const MISSING_LIMIT: u32 = 2;
 /// Inbox and Windows-saved copies of one screenshot merge within this window.
-const TWIN_SECONDS: f64 = 4.0;
+///
+/// The Windows file can appear several seconds after the snip (the watcher
+/// then debounces for another quarter second before the decode and compare),
+/// so the WPF's 4 s is too tight for this pipeline.
+const TWIN_SECONDS: f64 = 8.0;
 /// The same copied image is ignored for this long.
 const CLIPBOARD_DUPLICATE_SECONDS: f64 = 10.0;
 /// A pooled flight window idle for this long is destroyed to release its device
@@ -117,6 +121,9 @@ struct Item {
     /// Bumped whenever `thumb` changes; the hover preview uses it to notice an
     /// edit under the pointer.
     revision: u64,
+    /// When this card was caught, for the twin window. `0.0` for cards restored
+    /// at startup: an old card is never the twin of a new capture.
+    captured_at: f64,
 }
 
 /// A capture that is being annotated before it hangs (`Ctrl+Alt+S`).
@@ -1086,6 +1093,11 @@ impl App {
                     if self.flying_card == Some(token) {
                         self.flying_card = None;
                     }
+                    // The real card is already opaque; keep the fading flight
+                    // image above it so the hand-off stays a clean dissolve.
+                    if let Some(flight) = self.flight.as_ref() {
+                        win32::set_topmost(flight.hwnd());
+                    }
                     self.send_scene(Command::SetFlying {
                         id: token,
                         flying: false,
@@ -1776,48 +1788,71 @@ impl App {
         self.recent.retain(|recent| now - recent.at < TWIN_SECONDS);
     }
 
-    /// Folds the two halves of one screenshot into one card. The Windows-saved
-    /// file always wins; the inbox copy is deleted, as in the WPF app.
-    fn resolve_twin(&mut self, path: PathBuf, own: bool, twin: PathBuf) {
+    /// Folds a capture into the card that already shows its twin. The
+    /// Windows-saved file always wins; the inbox copy is deleted, as in the WPF
+    /// app. Returns false when the twin is not on the line yet: the caller then
+    /// hangs this copy normally, and the twin folds into it when it arrives.
+    fn resolve_twin(&mut self, path: &Path, own: bool, twin: &Path) -> bool {
         logging::trace(format!(
             "twin: {} + {} (new own={own})",
             path.display(),
             twin.display()
         ));
+        if !self.items.iter().any(|item| item.path == twin) {
+            return false;
+        }
         self.recent
-            .retain(|recent| recent.path != path && recent.path != twin);
+            .retain(|recent| recent.path.as_path() != path && recent.path.as_path() != twin);
+        let now = win32::now_seconds();
         if own {
             // New arrival is our inbox copy; the external file stays.
-            if let Err(error) = std::fs::remove_file(&path) {
+            if let Err(error) = std::fs::remove_file(path) {
                 logging::error(format!("twin remove {}: {error}", path.display()));
             }
-            return;
+            self.recent.push(Recent {
+                at: now,
+                path: twin.to_path_buf(),
+                own: false,
+            });
+            return true;
         }
         // New arrival is the Windows-saved copy: repoint the existing card and
         // delete the inbox file it was showing.
         if let Some(item) = self.items.iter_mut().find(|item| item.path == twin) {
-            item.path = path.clone();
+            item.path = path.to_path_buf();
             item.own = false;
-            item.last_write = std::fs::metadata(&path)
+            item.last_write = std::fs::metadata(path)
                 .and_then(|meta| meta.modified())
                 .unwrap_or(UNIX_EPOCH);
-            if let Err(error) = std::fs::remove_file(&twin) {
-                logging::error(format!("twin remove {}: {error}", twin.display()));
-            }
-            self.save_pegged();
-            self.recent.push(Recent {
-                at: win32::now_seconds(),
-                path,
-                own: false,
-            });
-            return;
         }
-        // The old card is gone: hang the Windows-saved file normally.
+        if let Err(error) = std::fs::remove_file(twin) {
+            logging::error(format!("twin remove {}: {error}", twin.display()));
+        }
+        self.save_pegged();
         self.recent.push(Recent {
-            at: win32::now_seconds(),
-            path,
+            at: now,
+            path: path.to_path_buf(),
             own: false,
         });
+        true
+    }
+
+    /// Whether a card already on the line is the other half of this capture:
+    /// the other owner, the same picture size, caught inside the twin window
+    /// and with the same thumbnail.
+    fn is_twin_candidate(
+        item: &Item,
+        own: bool,
+        size_px: (u32, u32),
+        thumb_hash: u64,
+        now: f64,
+    ) -> bool {
+        !item.note
+            && item.own != own
+            && item.size_px == size_px
+            && item.captured_at > 0.0
+            && now - item.captured_at < TWIN_SECONDS
+            && Self::image_hash(&item.thumb) == thumb_hash
     }
 
     /// FNV-1a over a sampled view of the pixels. The sampling matches the WPF
@@ -1878,6 +1913,23 @@ impl App {
             self.open_editor_for(path, own, area, size_px, thumb);
             return;
         }
+        if self.items.iter().any(|item| item.path == path) {
+            return;
+        }
+        // The worker's twin search can miss when both workers decide at the
+        // same moment: the clipboard decode and the folder watcher race, and
+        // each sees only the captures registered before it started. The line
+        // is the tie-breaker — both CaptureReady events are handled in order
+        // on this thread, so the second one always sees the first card. The
+        // thumbnails are the same picture at the same size, which makes a
+        // hash match conclusive (and the card that arrived first is kept).
+        let thumb_hash = Self::image_hash(&thumb);
+        let line_twin = self
+            .items
+            .iter()
+            .find(|item| Self::is_twin_candidate(item, own, size_px, thumb_hash, now))
+            .map(|item| item.path.clone());
+        let twin = line_twin.or(twin);
         // A Windows-saved copy of the picture being edited is the twin: the
         // edit is written there instead of leaving a duplicate (BEHAVIOR §9.5).
         if let Some(twin_path) = twin.as_ref() {
@@ -1890,11 +1942,9 @@ impl App {
             }
         }
         if let Some(twin) = twin {
-            self.resolve_twin(path, own, twin);
-            return;
-        }
-        if self.items.iter().any(|item| item.path == path) {
-            return;
+            if self.resolve_twin(&path, own, &twin) {
+                return;
+            }
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -1902,7 +1952,7 @@ impl App {
         if let (Some(area), Some(image), Some(dpi)) = (area, flight_image, self.screen_dpi()) {
             let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
             let index = self.items.len();
-            if let Some(end) = self.card_frame_px(index, index + 1, card_size) {
+            if let Some(end) = self.flight_target_px(index, index + 1, card_size) {
                 // A burst of captures must not queue flights: show the old card
                 // at its slot and let the flight window switch to the new one.
                 if let Some(previous) = self.flying_card.take() {
@@ -1912,7 +1962,16 @@ impl App {
                     });
                 }
                 if let Some(flight) = self.ensure_flight() {
-                    flying = flight.fly(id, image, area, end, dpi);
+                    // Same tilt `add_item` gives the real card, and the row
+                    // glide it will perform after landing. The flight window
+                    // mirrors both during the hand-off.
+                    let tilt = pseudo_random(id) * 5.0 - 2.5;
+                    let slide_dip = if index == 0 {
+                        0.0
+                    } else {
+                        -layout::SPACING * 0.5
+                    };
+                    flying = flight.fly(id, image, area, end, tilt, slide_dip, dpi);
                     if flying {
                         self.flight_idle_at = None;
                         self.flying_card = Some(id);
@@ -1933,11 +1992,22 @@ impl App {
             0,
             None,
         );
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            item.captured_at = now;
+        }
         self.recent.retain(|recent| recent.path != path);
         self.recent.push(Recent { at: now, path, own });
         self.sound(Cue::Tink);
         self.present();
         self.reveal(false, PEEK_SECONDS);
+        // `present`/`reveal` may put the line above the flight window when the
+        // strip was hidden. The flight image has to stay on top of the real
+        // card: the latter is already opaque underneath it during the hand-off.
+        if flying {
+            if let Some(flight) = self.flight.as_ref() {
+                win32::set_topmost(flight.hwnd());
+            }
+        }
     }
     /// The DPI of the monitor the line is on.
     fn screen_dpi(&self) -> Option<u32> {
@@ -1979,13 +2049,18 @@ impl App {
             .clamp(96.0, crate::capture::THUMB_MAX as f32) as u32
     }
 
-    /// Where card `index` of `count` will hang, in screen pixels.
-    fn card_frame_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
+    /// Where the flight should land card `index` of `count`, in screen pixels.
+    ///
+    /// The landing spot is one full spacing beyond the last card of the
+    /// current row — half a spacing beyond the final slot — so the new card
+    /// lands clear of its neighbour; the row then slides left to centre it
+    /// (BEHAVIOR §5.2).
+    fn flight_target_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
         let overlay = self.overlay.as_ref()?;
         let window = win32::window_rect(overlay.hwnd())?;
         let scale = overlay.scale().max(0.1);
         let width_dip = overlay.width_px() as f32 / scale;
-        let x = layout::slot_x(index, count, width_dip);
+        let x = layout::flight_slot_x(index, count, width_dip);
         let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
         let left = x - card_size.0 * 0.5;
         Some(RectI::new(
@@ -2045,6 +2120,7 @@ impl App {
                 .and_then(|meta| meta.modified())
                 .unwrap_or(UNIX_EPOCH),
             revision: 1,
+            captured_at: 0.0,
         };
         self.items.push(item);
         self.send_scene(Command::AddCard(CardSpec {
@@ -3055,6 +3131,21 @@ impl App {
                         return;
                     }
                 };
+                // Win+Shift+S and PrtScn deliver the capture through the
+                // clipboard, so this is the only place the take-off can start
+                // from: decode the big texture here, on the worker, exactly as
+                // a file capture does (BEHAVIOR §6.1).
+                let flight_image = if area.is_some() {
+                    match wic::decode_scaled(&path, crate::capture::FLIGHT_MAX) {
+                        Ok(image) => Some(image),
+                        Err(error) => {
+                            logging::error(format!("clipboard flight image: {error}"));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let hash = App::image_hash(&image);
                 let _ = tx.send(Event::CaptureReady {
                     path,
@@ -3062,7 +3153,7 @@ impl App {
                     size_px: size,
                     thumb,
                     area,
-                    flight_image: None,
+                    flight_image,
                     twin: None,
                     clip_hash: Some(hash),
                 });
@@ -3213,6 +3304,7 @@ impl App {
                 missing: 0,
                 last_write: UNIX_EPOCH,
                 revision: 1,
+                captured_at: 0.0,
             });
             self.send_scene(Command::AddCard(CardSpec {
                 id,
@@ -3489,5 +3581,49 @@ mod tests {
             let value = pseudo_random(id);
             assert!((0.0..=1.0).contains(&value));
         }
+    }
+
+    fn twin_card(own: bool, captured_at: f64, thumb: ImageData) -> Item {
+        Item {
+            id: 1,
+            path: PathBuf::from("C:\\shots\\a.png"),
+            own,
+            note: false,
+            color: 0,
+            text: None,
+            size_px: (2, 2),
+            card_size: (144.0, 112.0),
+            tilt: 0.0,
+            thumb,
+            missing: 0,
+            last_write: UNIX_EPOCH,
+            revision: 1,
+            captured_at,
+        }
+    }
+
+    #[test]
+    fn a_twin_needs_the_other_owner_a_recent_capture_and_the_same_picture() {
+        // 2x2 premultiplied BGRA.
+        let pixels = vec![
+            10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255,
+        ];
+        let thumb = ImageData::new(2, 2, pixels);
+        let hash = App::image_hash(&thumb);
+        let now = 100.0;
+
+        let card = twin_card(true, now - 1.0, thumb.clone());
+        assert!(App::is_twin_candidate(&card, false, (2, 2), hash, now));
+        // Same owner is a duplicate, not a twin; the clipboard hash handles it.
+        assert!(!App::is_twin_candidate(&card, true, (2, 2), hash, now));
+        // A different picture size or picture is another capture.
+        assert!(!App::is_twin_candidate(&card, false, (3, 2), hash, now));
+        assert!(!App::is_twin_candidate(&card, false, (2, 2), hash ^ 1, now));
+        // Cards restored at startup (`0.0`) and cards older than the window
+        // are never twins of a fresh capture.
+        let restored = twin_card(true, 0.0, thumb.clone());
+        assert!(!App::is_twin_candidate(&restored, false, (2, 2), hash, now));
+        let old = twin_card(true, now - TWIN_SECONDS - 0.1, thumb);
+        assert!(!App::is_twin_candidate(&old, false, (2, 2), hash, now));
     }
 }

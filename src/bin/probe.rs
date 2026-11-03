@@ -346,7 +346,15 @@ fn run_flight(config: &Config) -> Result<String, String> {
     let mut flight_seconds = 0.0f32;
     let mut draw_max = 0.0f32;
     for repeat in 0..config.repeat.max(1) {
-        if !flight.fly(repeat as u64 + 1, image.clone(), from, to, monitor.dpi) {
+        if !flight.fly(
+            repeat as u64 + 1,
+            image.clone(),
+            from,
+            to,
+            0.0,
+            0.0,
+            monitor.dpi,
+        ) {
             return Err("flight did not start".to_string());
         }
         match rx.recv_timeout(Duration::from_secs(5)) {
