@@ -34,6 +34,9 @@ use crate::win32;
 /// Note bitmap width and height in DIP.
 pub const CARD_WIDTH: f32 = 136.0;
 pub const CARD_HEIGHT: f32 = 88.0;
+/// Font size of a short note, DIP. The blank entry's "New note" label uses the
+/// same size so it reads as text that has already been typed on the paper.
+pub const BRIEF_FONT_DIP: f32 = 16.0;
 /// Supersampling factor; the card shows the note at 136×88 DIP.
 const SCALE: u32 = 3;
 /// Width of the dog-eared corner, DIP.
@@ -382,7 +385,7 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
     let brief = text.chars().count() <= 24 && !text.contains('\n');
     let (bold, font_height, margin) = if brief {
         if text.chars().count() <= 12 {
-            (true, 16.0, (8.0, 4.0, 8.0, 6.0))
+            (true, BRIEF_FONT_DIP, (8.0, 4.0, 8.0, 6.0))
         } else {
             (true, 13.0, (8.0, 4.0, 8.0, 6.0))
         }

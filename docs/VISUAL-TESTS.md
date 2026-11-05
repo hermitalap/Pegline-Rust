@@ -364,7 +364,7 @@
 
 | 模式 | 复现 | 证据 |
 |:--|:--|:--|
-| `--note-hover-demo` | 线带保持放下，合成指针停在入口热点中心右下 78/80 DIP | `visual/note-hover-physics.png`：空白便签**装在和挂图一致的玻璃外框里**（144×96 DIP，纸面内缩 4 DIP），纸面中央是灰色的“新建便签”，停在理论挂点，被指针力拉向右下、**顺时针倾斜**并上下浮动；`visual/note-entry-frame.png` 是同一帧里入口便签与左侧挂图的并排对比（外框厚度、圆角、阴影一致） |
+| `--note-hover-demo` | 线带保持放下，合成指针停在入口热点中心右下 78/80 DIP | `visual/note-hover-physics.png`：空白便签**装在和挂图一致的玻璃外框里**（144×96 DIP，纸面内缩 4 DIP），纸面上方是同墨色的圆形加号图标，下面“新建便签”与短便签正文同款（16 DIP 半粗、#4A3B12），停在理论挂点，被指针力拉向右下、**顺时针倾斜**并上下浮动；`visual/note-entry-label.jpg` 是图标与文字的近照，`visual/note-entry-frame.png` 是入口便签与左侧挂图的并排对比（外框厚度、圆角、阴影一致） |
 | `--note-hover-demo --note-flow-demo` | 悬停便签存在时自动打开编辑器，1300×2200 连续截帧 | 飞向中央的飞行**没有挂夹**：飞行层只淡入玻璃外框和纸面，纸面上也没有“新建便签”字样（那是入口提示，不是内容） |
 | `--note-discard-demo` | 打开空白新便签，1.5 s 后自动提交（空文本），连续截帧 | `visual/note-discard-frames.png`：编辑窗口（占位符）→ 飞行层接管（纸面大小不变、只多一圈外框）→ 缩小到 45 % 并自转 → 带横向速度下落；trace `tumble finished after 57 frames, 0.89s, angle=202`，随后 `note editor closed` |
 | `PEGLINE_NOTE_DEMO_POINTER` 四象限 | 同一模式，指针分别放在热点中心左上/右上/左下/右下 | `visual/note-hover-lean-quadrants.png`：左上 **+2.3°**、右上 **−2.3°**、左下 **−4.0°**、右下 **+4.0°**（正值 = 顺时针），即“左上/右下顺时针、右上/左下逆时针” |

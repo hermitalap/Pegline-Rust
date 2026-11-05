@@ -76,8 +76,9 @@ new note and its card flight. The entry hover is a fixed home slot with a
 pointer-distance pull capped at 30 DIP and a 15 ms physics timer (0.22 s quick
 drop from the peeking corner, 0.42 s fly-out); the blank note wears the same
 glass card as a hanging picture
-(144×96 DIP frame, the 136×88 paper inset by `PHOTO_INSET`) with a grey
-`new_note` label centred on the paper; a second spring of the same response and
+(144×96 DIP frame, the 136×88 paper inset by `PHOTO_INSET`) with an ink add-note
+icon above an ink `new_note` label sized and coloured like a short note's body
+text; a second spring of the same response and
 damping leans that card by up to 5° about its centre — clockwise in the
 top-left/bottom-right quadrants, counter-clockwise in the other two, zero on the
 crosshair through the centre — so the twist lags and settles with the travel

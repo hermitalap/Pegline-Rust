@@ -46,8 +46,8 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_METRICS, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -107,11 +107,10 @@ pub enum Brush {
     Paper,
     /// The cross glyph.
     CrossInk,
-    /// The blank entry note's label: a grey that reads as a hint on the note
-    /// paper, #606060.
-    Placeholder,
     /// The default note paper, used by the entry's peeking corner: #FFF4B8.
     NotePaper,
+    /// The default note ink: the same #4A3B12 a short note's text uses.
+    NoteInk,
 }
 
 /// Cached text layouts.
@@ -121,7 +120,7 @@ pub enum TextId {
     Copy,
     Open,
     Copied,
-    /// The blank entry note's centred label.
+    /// The blank entry note's label, below its add-note icon.
     NewNote,
 }
 
@@ -158,6 +157,14 @@ impl Texts {
         // is reserved for the opaque editor and shortcut-dialog surfaces.
         let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         let hint = create_format(dwrite, font::UI_FAMILY, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        // The blank note's label is deliberately the same size and weight as a
+        // short note's body text, not a hint-sized caption.
+        let new_note = create_format(
+            dwrite,
+            font::UI_FAMILY,
+            crate::notes::BRIEF_FONT_DIP,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        )?;
         let strings = i18n::s();
 
         let mut items: HashMap<TextId, TextItem> = HashMap::new();
@@ -179,7 +186,7 @@ impl Texts {
             add(TextId::Hint, strings.hint, &hint)?;
             add(TextId::Copy, strings.copy, &ui)?;
             add(TextId::Open, strings.open, &ui)?;
-            add(TextId::NewNote, strings.new_note, &ui)?;
+            add(TextId::NewNote, strings.new_note, &new_note)?;
             let copied = format!("\u{2713} {}", strings.copied);
             add(TextId::Copied, &copied, &ui)?;
         }
@@ -283,8 +290,8 @@ struct Palette {
     white: ID2D1SolidColorBrush,
     paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
-    placeholder: ID2D1SolidColorBrush,
     note_paper: ID2D1SolidColorBrush,
+    note_ink: ID2D1SolidColorBrush,
     pin_slot: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
@@ -324,8 +331,8 @@ impl Palette {
             white: solid(context, [0xFF, 0xFF, 0xFF], 1.0)?,
             paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
-            placeholder: solid(context, [0x60, 0x60, 0x60], 1.0)?,
             note_paper: solid(context, split(crate::notes::PALETTE[0].paper), 1.0)?,
+            note_ink: solid(context, split(crate::notes::PALETTE[0].ink), 1.0)?,
             pin_slot: solid(context, [0, 0, 0], 0x52 as f32 / 255.0)?,
             metal,
             metal_edge,
@@ -349,8 +356,8 @@ impl Palette {
             Brush::White => &self.white,
             Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
-            Brush::Placeholder => &self.placeholder,
             Brush::NotePaper => &self.note_paper,
+            Brush::NoteInk => &self.note_ink,
         }
     }
 }
@@ -931,6 +938,38 @@ impl Renderer {
                 None,
             );
         }
+    }
+
+    /// Draws the blank note's "add note" icon: a stroked circle with a plus,
+    /// scaled from the supplied 48-unit SVG geometry.
+    ///
+    /// The plus is drawn as two rounded bars so its ends are round like the
+    /// SVG's `stroke-linecap`; no stroke style object is needed.
+    pub fn draw_note_add_icon(&mut self, center: (f32, f32), size: f32, brush: Brush) {
+        if size <= 0.0 {
+            return;
+        }
+        let stroke = (size * 4.0 / 48.0).max(0.5);
+        let radius = (size * 20.0 / 48.0).max(0.1);
+        let ellipse = D2D1_ELLIPSE {
+            point: Vector2 {
+                X: center.0,
+                Y: center.1,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let color = self.palette.solid(brush);
+        // SAFETY: the ellipse and brush are live; the context is drawing.
+        unsafe {
+            self.context.DrawEllipse(&ellipse, color, stroke, None);
+        }
+        let arm = size * 8.0 / 48.0;
+        let vertical = RectF::from_xywh(center.0 - stroke * 0.5, center.1 - arm, stroke, arm * 2.0);
+        let horizontal =
+            RectF::from_xywh(center.0 - arm, center.1 - stroke * 0.5, arm * 2.0, stroke);
+        self.fill_round(vertical, stroke * 0.5, brush);
+        self.fill_round(horizontal, stroke * 0.5, brush);
     }
 
     /// Draws one note colour dot, with a check mark when it is the active one.

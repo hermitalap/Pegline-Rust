@@ -42,6 +42,10 @@ const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
 /// Transparent margin around the hover note, DIP (the shadow lives here).
 pub const NOTE_PADDING_DIP: f32 = 24.0;
+/// The blank entry's "add note" icon: the supplied SVG's 24×24 box, DIP.
+const NOTE_ICON_DIP: f32 = 24.0;
+/// Gap between that icon and the label below it, DIP.
+const NOTE_ICON_GAP_DIP: f32 = 4.0;
 /// Smallest lean change, in degrees, that is worth a repaint. Well below what
 /// the eye can see on a 5° tilt, and it lets a settled paper sleep.
 const NOTE_TILT_STEP_DEG: f32 = 0.05;
@@ -479,13 +483,24 @@ fn draw_note(
     renderer.draw_shadow(card, 0.18, false);
     renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
     renderer.draw_photo(bitmap, paper, layout::PHOTO_RADIUS);
-    // The blank note says what it is, in the same light grey a placeholder
-    // would use, centred on the paper.
+    // The blank note says what it is in the note's own ink: an add-note icon
+    // above, and a label at the same size and weight as a short note's body
+    // text, so it reads as something already written on the paper.
     let (text_w, text_h) = renderer.text_size(TextId::NewNote);
+    let content_h = NOTE_ICON_DIP + NOTE_ICON_GAP_DIP + text_h;
+    let top = center_y - content_h * 0.5;
+    renderer.draw_note_add_icon(
+        (center_x, top + NOTE_ICON_DIP * 0.5),
+        NOTE_ICON_DIP,
+        Brush::NoteInk,
+    );
     renderer.draw_text(
         TextId::NewNote,
-        (center_x - text_w * 0.5, center_y - text_h * 0.5),
-        Brush::Placeholder,
+        (
+            center_x - text_w * 0.5,
+            top + NOTE_ICON_DIP + NOTE_ICON_GAP_DIP,
+        ),
+        Brush::NoteInk,
     );
     renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
     renderer.reset_transform();
