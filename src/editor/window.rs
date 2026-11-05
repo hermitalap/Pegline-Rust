@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE,
     D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
@@ -128,8 +128,11 @@ const TEXT_SIZE: f32 = 32.0;
 const MOSAIC_CACHE: usize = 16;
 
 /// Button and icon geometry, DIP. The pills themselves are pure layout.
-const BUTTON_RADIUS: f32 = 8.0;
-const ICON_STROKE: f32 = 2.2;
+const ICON_STROKE: f32 = 2.0;
+/// The Lucide icons are designed on a 24×24 grid with a 2 px stroke; they are
+/// drawn in an 18 DIP box inside the 34 DIP tool button.
+const ICON_BOX: f32 = 18.0;
+const ICON_DESIGN: f32 = 24.0;
 
 /// The floating chrome: white glass like the cards on the line, dark ink and
 /// the one blue accent the buttons already used.
@@ -1782,36 +1785,47 @@ impl EditorState {
     fn paint_colours(&self) {
         for (index, rect) in self.layout.colours.iter().enumerate() {
             let rgb = COLORS[index].0;
-            let rounded = rounded(*rect, 5.0);
+            let center = rect.center();
+            // The dots are round, concentric with the pill's end radius.
+            let disc = D2D1_ELLIPSE {
+                point: Vector2 {
+                    X: center.0,
+                    Y: center.1,
+                },
+                radiusX: rect.width() * 0.5,
+                radiusY: rect.height() * 0.5,
+            };
             if let Some(brush) = self.assets.brush(rgb) {
                 // SAFETY: the brush and the render target are alive.
                 unsafe {
-                    self.assets.rt.FillRoundedRectangle(&rounded, brush);
+                    self.assets.rt.FillEllipse(&disc, brush);
                 }
             }
             let selected = rgb == self.color;
             let hovered = self.hover == Some(Hit::Colour(index));
-            // A white swatch needs a dark ring to stay visible on the glass;
-            // every other colour takes the same quiet hairline.
-            let border = if selected || hovered {
-                &self.chrome.accent
-            } else {
-                &self.chrome.ink_dim
-            };
+            // The hairline keeps a white dot readable on the glass; the accent
+            // ring sits just outside the dot so it never eats into the colour.
             // SAFETY: the brush and the render target are alive.
             unsafe {
-                self.assets.rt.DrawRoundedRectangle(
-                    &rounded,
-                    border,
-                    if selected {
-                        2.5
-                    } else if hovered {
-                        1.5
-                    } else {
-                        1.0
-                    },
-                    None,
-                );
+                self.assets
+                    .rt
+                    .DrawEllipse(&disc, &self.chrome.ink_dim, 1.0, None);
+            }
+            if selected || hovered {
+                let ring = D2D1_ELLIPSE {
+                    radiusX: disc.radiusX + 1.6,
+                    radiusY: disc.radiusY + 1.6,
+                    ..disc
+                };
+                // SAFETY: the brush and the render target are alive.
+                unsafe {
+                    self.assets.rt.DrawEllipse(
+                        &ring,
+                        &self.chrome.accent,
+                        if selected { 2.0 } else { 1.5 },
+                        None,
+                    );
+                }
             }
         }
     }
@@ -2007,8 +2021,15 @@ impl EditorState {
         }
     }
 
+    /// Radius that keeps a button concentric with the pill around it: half its
+    /// short side, so the tool buttons and the colour dots are circles and the
+    /// wide action buttons are stadiums.
+    fn button_radius(rect: RectF) -> f32 {
+        rect.width().min(rect.height()) * 0.5
+    }
+
     fn paint_button(&self, rect: RectF, selected: bool, hovered: bool) {
-        let rounded = rounded(rect, BUTTON_RADIUS);
+        let rounded = rounded(rect, Self::button_radius(rect));
         let fill = if selected {
             Some(if hovered {
                 &self.chrome.accent_hover
@@ -2036,101 +2057,93 @@ impl EditorState {
         }
     }
 
-    /// Draws the four tool icons as stroked geometry instead of font glyphs, so
-    /// they share one stroke weight and optical size on every Windows version.
+    /// Draws one of the four Lucide tool icons (ISC/MIT; the SVG sources and
+    /// license are in `assets/icons/`). Each icon lives on Lucide's 24x24 grid
+    /// with a 2 px stroke; here it is centred in the button at 18 DIP and the
+    /// stroke is scaled to match, so all four share one optical weight.
     fn paint_tool_icon(&self, index: usize, rect: RectF, brush: &ID2D1SolidColorBrush) {
         let (cx, cy) = rect.center();
         let rt = &self.assets.rt;
         let stroke = &self.surface.stroke_round;
-        // SAFETY: the render target is in a draw, the brush is alive and the
-        // stroke style belongs to the surface.
-        unsafe {
-            match index {
-                // Arrow: one diagonal shaft and two axis-aligned head wings.
-                0 => {
-                    let tip = Vector2 {
-                        X: cx + 7.0,
-                        Y: cy - 7.0,
-                    };
-                    rt.DrawLine(
-                        Vector2 {
-                            X: cx - 7.0,
-                            Y: cy + 7.0,
-                        },
-                        tip,
-                        brush,
-                        ICON_STROKE,
-                        Some(stroke),
-                    );
-                    rt.DrawLine(
-                        tip,
-                        Vector2 {
-                            X: tip.X - 6.0,
-                            Y: tip.Y,
-                        },
-                        brush,
-                        ICON_STROKE,
-                        Some(stroke),
-                    );
-                    rt.DrawLine(
-                        tip,
-                        Vector2 {
-                            X: tip.X,
-                            Y: tip.Y + 6.0,
-                        },
-                        brush,
-                        ICON_STROKE,
-                        Some(stroke),
-                    );
-                }
-                // Rectangle.
-                1 => {
-                    let frame = RectF::from_xywh(cx - 8.0, cy - 6.0, 16.0, 12.0);
-                    rt.DrawRoundedRectangle(&rounded(frame, 2.5), brush, 2.0, Some(stroke));
-                }
-                // Text: a capital T drawn from two round-capped strokes.
-                2 => {
-                    rt.DrawLine(
-                        Vector2 {
-                            X: cx - 7.0,
-                            Y: cy - 6.5,
-                        },
-                        Vector2 {
-                            X: cx + 7.0,
-                            Y: cy - 6.5,
-                        },
-                        brush,
-                        2.4,
-                        Some(stroke),
-                    );
-                    rt.DrawLine(
-                        Vector2 { X: cx, Y: cy - 6.5 },
-                        Vector2 { X: cx, Y: cy + 7.0 },
-                        brush,
-                        2.4,
-                        Some(stroke),
-                    );
-                }
-                // Mosaic: a 3x3 grid of filled blocks with a visible gap.
-                3 => {
-                    let (cell, gap) = (4.6, 1.4);
-                    let span = cell * 3.0 + gap * 2.0;
-                    let left = cx - span * 0.5;
-                    let top = cy - span * 0.5;
-                    for row in 0..3 {
-                        for column in 0..3 {
-                            let block = RectF::from_xywh(
-                                left + column as f32 * (cell + gap),
-                                top + row as f32 * (cell + gap),
-                                cell,
-                                cell,
-                            );
-                            rt.FillRoundedRectangle(&rounded(block, 1.2), brush);
-                        }
-                    }
-                }
-                _ => {}
+        // The arrow glyph sits in a 14x14 part of Lucide's 24x24 grid, so it is
+        // grown a little to share the optical size of the rectangle and grid.
+        let design_scale = if index == 0 { 1.12 } else { 1.0 };
+        let scale = ICON_BOX / ICON_DESIGN * design_scale;
+        let width = ICON_STROKE * ICON_BOX / ICON_DESIGN;
+        let point = |x: f32, y: f32| Vector2 {
+            X: cx + (x - 12.0) * scale,
+            Y: cy + (y - 12.0) * scale,
+        };
+        let box_rect = |x: f32, y: f32, w: f32, h: f32| {
+            RectF::from_xywh(
+                cx + (x - 12.0) * scale,
+                cy + (y - 12.0) * scale,
+                w * scale,
+                h * scale,
+            )
+        };
+        let line = |from: (f32, f32), to: (f32, f32)| {
+            // SAFETY: the render target is in a draw, the brush is alive and
+            // the stroke style belongs to the surface.
+            unsafe {
+                rt.DrawLine(
+                    point(from.0, from.1),
+                    point(to.0, to.1),
+                    brush,
+                    width,
+                    Some(stroke),
+                );
             }
+        };
+        match index {
+            // Lucide `move-up-right`: M13 5H19V11 and M19 5L5 19.
+            0 => {
+                line((13.0, 5.0), (19.0, 5.0));
+                line((19.0, 5.0), (19.0, 11.0));
+                line((19.0, 5.0), (5.0, 19.0));
+            }
+            // Lucide `rectangle-horizontal`: rect x=2 y=6 w=20 h=12 rx=2.
+            1 => {
+                let frame = box_rect(2.0, 6.0, 20.0, 12.0);
+                // SAFETY: the render target is in a draw and the brush is alive.
+                unsafe {
+                    rt.DrawRoundedRectangle(
+                        &rounded(frame, 2.0 * scale),
+                        brush,
+                        width,
+                        Some(stroke),
+                    );
+                }
+            }
+            // Lucide `type`: M12 4v16, M9 20h6 and the rounded top bar
+            // M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2.
+            2 => {
+                line((12.0, 4.0), (12.0, 20.0));
+                line((9.0, 20.0), (15.0, 20.0));
+                line((4.0, 7.0), (4.0, 5.0));
+                line((4.0, 5.0), (5.0, 4.0));
+                line((5.0, 4.0), (19.0, 4.0));
+                line((19.0, 4.0), (20.0, 5.0));
+                line((20.0, 5.0), (20.0, 7.0));
+            }
+            // Lucide `grid-3x3`: rect 3 3 18 18 rx2 with lines at 9 and 15.
+            3 => {
+                let frame = box_rect(3.0, 3.0, 18.0, 18.0);
+                // SAFETY: the render target is in a draw and the brush is alive.
+                unsafe {
+                    rt.DrawRoundedRectangle(
+                        &rounded(frame, 2.0 * scale),
+                        brush,
+                        width,
+                        Some(stroke),
+                    );
+                }
+                line((3.0, 9.0), (21.0, 9.0));
+                line((3.0, 15.0), (21.0, 15.0));
+                line((9.0, 3.0), (9.0, 21.0));
+                line((15.0, 3.0), (15.0, 21.0));
+            }
+            _ => {}
         }
     }
 

@@ -8,8 +8,11 @@
   bar and no window buttons: a frameless, transparent, always-on-top window
   holds an enlarged white-glass card with a clothespin and a baked shadow, and
   the toolbar floats around it as five glass pills — tools, colours and line
-  widths above the card, undo/redo and Cancel/Save below it, each 26 DIP from
-  the card and from the window edge. The picture is fitted to the work area
+  widths above the card, undo/redo and Cancel/Save below it, 18 DIP from
+  the card and 26 DIP from the window edge. Inside the pills every control is
+  concentric with it: the tools, colour dots and line-width buttons are
+  circles, the wide action buttons are stadiums. The four tool icons are the
+  open-source Lucide glyphs (ISC/MIT, sources and license in `assets/icons/`). The picture is fitted to the work area
   (never upscaled, capped at 1400×1000 DIP), the photo and its marks are painted
   into an opaque card bitmap so text keeps ClearType, and the pads are
   composited through a rounded mask. Opening from a card grows the picture out of

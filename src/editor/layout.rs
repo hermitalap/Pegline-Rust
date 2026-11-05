@@ -27,8 +27,8 @@ pub const COLOUR_SIZE: f32 = 22.0;
 pub const COLOUR_GAP: f32 = 6.0;
 pub const COLOUR_PAD: f32 = 7.0;
 pub const COLOUR_COUNT: usize = 6;
-/// Line-width buttons.
-pub const WIDTH_SIZE: f32 = 38.0;
+/// Line-width buttons: circles like the colour dots.
+pub const WIDTH_SIZE: f32 = 34.0;
 pub const WIDTH_GAP: f32 = 2.0;
 pub const WIDTH_COUNT: usize = 3;
 
@@ -42,8 +42,8 @@ pub const CANCEL_WIDTH: f32 = 88.0;
 pub const SAVE_WIDTH: f32 = 88.0;
 
 /// Gap between the card and the pills above and below it. It leaves room for
-/// the clothespin poking out of the card's top edge.
-pub const ROW_GAP: f32 = 26.0;
+/// the clothespin poking out of the card's top edge (14 DIP) with a little air.
+pub const ROW_GAP: f32 = 18.0;
 /// The glass frame around the photo matches a hanging picture's card exactly,
 /// so the flight's card and this one hand over without a jump in the chrome.
 pub const CARD_INSET: f32 = crate::layout::PHOTO_INSET;
