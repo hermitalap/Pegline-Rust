@@ -47,6 +47,13 @@
 
 ### Fixes
 
+- The annotation arrow's head now points the way the drag went and sits on the
+  end of its shaft. `atan2` returns radians while `Matrix3x2::rotation` wraps
+  `D2D1MakeRotateMatrix`, which takes **degrees**, so every head was rotated by
+  a fraction of a degree: an arrow drawn left, up or down grew a right-pointing
+  triangle beside its line instead of on its tip. The shaft end and the head
+  transform now come from one `arrow_head` helper, covered by a regression test
+  over all four directions (see `docs/visual/editor-arrows.png`).
 - Choosing an item from a card or tray context menu no longer also replays the
   click on the card control underneath it. The low-level mouse queue is now
   discarded after the modal menu closes, so a card cannot be opened or copied

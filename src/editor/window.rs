@@ -2559,6 +2559,39 @@ fn build_mosaic(source: &ImageData, key: MosaicKey) -> Option<ImageData> {
 
 // ---- painting -------------------------------------------------------------
 
+/// The shaft end and the head transform for an arrow, in source pixels.
+///
+/// The cached head is a unit triangle with its tip at the origin, so the
+/// returned transform scales it to `head`, turns local +x down the shaft and
+/// puts the tip exactly on `to`. The shaft stops 60 % of a head short of that
+/// tip, which keeps its round cap inside the filled triangle.
+///
+/// `Matrix3x2::rotation` takes **degrees** (it wraps `D2D1MakeRotateMatrix`),
+/// while `atan2` returns radians; converting here keeps the two in step.
+fn arrow_head(
+    from: (f32, f32),
+    to: (f32, f32),
+    width: f32,
+    base: Matrix3x2,
+) -> Option<((f32, f32), Matrix3x2)> {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    if dx * dx + dy * dy < 1.0 {
+        return None;
+    }
+    let angle = dy.atan2(dx);
+    let head = (width * 3.2).max(18.0);
+    let shaft = (
+        to.0 - angle.cos() * head * 0.6,
+        to.1 - angle.sin() * head * 0.6,
+    );
+    let transform = Matrix3x2::scale(head, head)
+        * Matrix3x2::rotation(angle.to_degrees())
+        * Matrix3x2::translation(to.0, to.1)
+        * base;
+    Some((shaft, transform))
+}
+
 /// Draws marks in source coordinates through the current base transform.
 struct Painter<'a> {
     rt: &'a ID2D1RenderTarget,
@@ -2630,21 +2663,9 @@ impl<'a> Painter<'a> {
         let Some(brush) = self.assets.brush(color) else {
             return;
         };
-        let dx = to.0 - from.0;
-        let dy = to.1 - from.1;
-        if dx * dx + dy * dy < 1.0 {
+        let Some((shaft, transform)) = arrow_head(from, to, width, self.base) else {
             return;
-        }
-        let angle = dy.atan2(dx);
-        let head = (width * 3.2).max(18.0);
-        let shaft = (
-            to.0 - angle.cos() * head * 0.6,
-            to.1 - angle.sin() * head * 0.6,
-        );
-        let transform = Matrix3x2::scale(head, head)
-            * Matrix3x2::rotation(angle)
-            * Matrix3x2::translation(to.0, to.1)
-            * self.base;
+        };
         // SAFETY: the brush, the triangle and the target are alive; the head is
         // a transformed fill of the cached unit triangle.
         unsafe {
@@ -3427,6 +3448,57 @@ mod tests {
     fn drags_normalize_negative_directions() {
         assert_eq!(drag_rect((10.0, 20.0), (4.0, 5.0)), (4.0, 5.0, 6.0, 15.0));
         assert_eq!(drag_rect((1.0, 1.0), (1.0, 1.0)), (1.0, 1.0, 0.0, 0.0));
+    }
+
+    /// Row-vector transform of one point through a `Matrix3x2`.
+    fn transformed(matrix: Matrix3x2, x: f32, y: f32) -> (f32, f32) {
+        (
+            x * matrix.M11 + y * matrix.M21 + matrix.M31,
+            x * matrix.M12 + y * matrix.M22 + matrix.M32,
+        )
+    }
+
+    #[test]
+    fn arrow_heads_point_down_the_shaft_from_the_drag_end() {
+        // The screenshot that reported the bug: four arrows pulled out of the
+        // centre, plus one diagonal. Every head must sit on the end of its own
+        // shaft, pointing the way the drag went, not off to the right.
+        let drags = [
+            ((100.0f32, 100.0f32), (300.0f32, 100.0f32)),
+            ((300.0, 100.0), (100.0, 100.0)),
+            ((200.0, 100.0), (200.0, 10.0)),
+            ((200.0, 100.0), (200.0, 300.0)),
+            ((50.0, 60.0), (140.0, 118.0)),
+        ];
+        for (from, to) in drags {
+            let width = 8.0f32;
+            let (shaft_end, transform) =
+                arrow_head(from, to, width, Matrix3x2::identity()).expect("an arrow head");
+            let head = (width * 3.2).max(18.0);
+            let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+            let length = (dx * dx + dy * dy).sqrt();
+            let direction = (dx / length, dy / length);
+            let trailing = (to.0 - direction.0 * head, to.1 - direction.1 * head);
+
+            // The triangle's tip is the drag end and its base trails back along
+            // the shaft, so the head covers the shaft instead of missing it.
+            let tip = transformed(transform, 0.0, 0.0);
+            assert!(
+                (tip.0 - to.0).abs() < 0.05 && (tip.1 - to.1).abs() < 0.05,
+                "tip {tip:?} is not the drag end {to:?}"
+            );
+            let base = transformed(transform, -1.0, 0.0);
+            assert!(
+                (base.0 - trailing.0).abs() < 0.05 && (base.1 - trailing.1).abs() < 0.05,
+                "head base {base:?} does not trail {to:?} along {direction:?}"
+            );
+            // The shaft stops inside the head, short of the tip.
+            let along = (shaft_end.0 - from.0) * direction.0 + (shaft_end.1 - from.1) * direction.1;
+            assert!(
+                along > length - head && along < length,
+                "shaft ends outside the head"
+            );
+        }
     }
 
     #[test]
