@@ -143,7 +143,7 @@
     **(2890,1703)–(2978,1725)**，候选列表紧接其下，见
     `visual/editor-ime-candidate.png`。
 
-### 3.1 标注编辑器实测（2026-11-03）
+### 3.1 标注编辑器实测（2026-11-03，2026-11-03 晚更新工具栏）
 
 用新开发开关 `--editor-demo --editor-hold` 打开真实 900×600 源图，逐项操作：
 
@@ -152,7 +152,10 @@
 - **文字**：点击落点后输入英文/中文（“中文测试”），白底框、彩色边框、光标、
   字体回退都正确；回车后框消失。
 - **马赛克**：拖动 16 px 块；保存后的 PNG 里仍是块状像素。
-- **缩放**：窗口从 2266×1591 缩到 1500×1111，工具栏不重叠，画布等比重新适配。
+- **缩放**：窗口从 2266×1591 缩到 1470×1111（客户区 720×520 DIP 以上），工具栏不重叠，
+  画布等比重新适配；紧凑布局下撤销/重做自动变为图标。
+- **图标与分组**：标题栏显示 Pegline 图标；工具栏按“工具 | 颜色 | 线宽 | 操作”
+  分组，组间有 1 px 分隔线；工具图标为矢量线条，线宽按钮显示 4/8/12 px 横线预览。
 - **保存**：`Ctrl+S` 输出 **900×600** PNG（与源图同像素尺寸），文件随即挂回线带。
 - **取消**：`Esc` 关闭，源文件时间戳不变，不留新卡。
 - **光标**：工具栏手形、画布十字、文字工具 I 形（见上）。
@@ -192,8 +195,8 @@
   是三种语言里最长的，工具栏没有裁切，空线带提示整句放入 pill。
 - 英语：标题“Mark up screenshot”，Undo/Redo/Cancel/Save。
 
-西班牙语托盘菜单的长项（“Atajo de captura: Ctrl+Alt+S (en uso por otra
-aplicación)”等）也完整显示；菜单由系统绘制、按内容自适应宽度。
+托盘菜单的西语长项（“Atajo de nota: Ctrl+Alt+N…”等）也完整显示；菜单由系统
+绘制、按内容自适应宽度。
 
 最小窗口 **720×520 DIP**（200% 下客户区 1440×1040）：西语的 Deshacer/Rehacer
 自动切换为紧凑图标，Cancelar/Guardar 仍是完整文字，工具栏没有重叠。
@@ -215,7 +218,9 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 鼠标点“是”后设置正确写入；正常从资源管理器双击启动时由 Windows 决定焦点。
 为避免打断开发流程，`--demo` / `--editor-demo` 不弹这个框。
 
-### 3.6 真实 Ctrl+Alt+S 全链路
+### 3.6 旧版 Ctrl+Alt+S 全链路（2026-11-03 晚移除）
+
+> 该功能已按用户要求移除；本节保留为历史记录，不再对应当前版本。
 
 默认 `Ctrl+Alt+S` 被本机其他程序占用，所以把 `snipKey` 临时设为 `Ctrl+Alt+K`，
 走同一条代码路径：
@@ -262,8 +267,8 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
   溢出按钮），展开溢出面板后，深蓝底、三张彩色卡片的 Pegline 图标清晰可见。
 - 真实左键点击该图标（不是向隐藏窗口发消息）后，空线带放下并显示提示，
   证明 `Shell_NotifyIcon` 回调与回调消息参数在真实任务栏路径上工作。
-- 真实右键点击同一图标能打开菜单：截图快捷键显示“（被其他程序占用）”、
-  “接管截图”有勾选、清空计数为 0；菜单关闭正常。
+- 真实右键点击同一图标能打开菜单：“接管截图”有勾选、清空计数为 0；菜单关闭正常。
+  （2026-11-03 晚起菜单不再包含“截图”和“截图快捷键”，只保留便签快捷键。）
 
 ### 3.8 输入法候选窗（2026-11-03 收尾）
 
@@ -281,6 +286,131 @@ aplicación)”等）也完整显示；菜单由系统绘制、按内容自适�
 
 修复前同一操作下组合串和候选列表出现在屏幕左上角，见
 `visual/editor-ime-candidate-before.png`；本轮修复后不再复现。
+
+### 3.9 图片右键“标注”与工具栏改版（2026-11-03）
+
+需求变更：图片右键的“编辑”改为“标注”，复用原标注窗口；移除 `Ctrl+Alt+S`
+“截图并标注”；标注窗口补标题栏图标并优化图标/间距。
+
+已完成的验证：
+
+- `cargo test`（117 项通过）、`cargo clippy --all-targets -- -D warnings`、
+  `cargo fmt --check` 全部通过。
+- `--editor-demo --editor-hold` 在 200% DPI 下实测默认 **1120×760 DIP** 与
+  最小 **720×520 DIP** 两种客户区：
+  - 标题栏和 Alt-Tab 图标显示 Pegline 图标，不再是空白方块；
+  - 工具栏四组（工具 | 颜色 | 线宽 | 操作）之间的 1 px 分隔线、组内 3–6 DIP
+    与组间 8–14 DIP 的间距一致；撤销/重做与取消/保存右对齐；
+  - 720 DIP 下自动切换紧凑尺寸，中文、西语、英语三种标签都不重叠、不裁切；
+  - 线宽按钮显示 4/8/12 px 的横线预览，黑色/白色线也有灰色轮廓。
+- 截图更新：`visual/editor.png`、`visual/editor-minimum-es.png`。
+
+真实点击验收（隔离的 `--demo`，3 张演示卡片）：
+
+- 右键第 1 张图片卡片，菜单第三项为**“标注”**（`visual/context-menu-annotate.png`）；
+  点选后编辑器打开 `demo-0.png`，标题栏图标正常。
+- 画一条红色箭头后 `Ctrl+S`：源文件 SHA-256 从 `B94D…` 变为 `A142…`，
+  尺寸仍为 **480×270**；线带上的第 1 张卡片立刻显示箭头，卡片总数仍为 **3**
+  （没有多挂一张）。
+- 再打开同一张卡片后按 `Esc`：源文件 SHA-256 完全不变，卡片保持原样。
+- 便签卡片右键菜单第三项仍是**“编辑”**（`visual/context-menu-note.png`），
+  没有变成“标注”。
+- 菜单选择点击不会再被低层鼠标钩子当成卡片按钮：修复后 trace 只有
+  `editor opened`，不再同时出现 `action Open on card 1`。
+- `Ctrl+Alt+S` 按下后没有出现 `ScreenClippingHost`/截图工具进程，trace 也没有
+  新的 `editor opened`；快捷键注册日志中没有 `RegisterHotKey(snip)`。
+- 托盘菜单的“截图/截图快捷键”两项已从 `MenuCommand` 和构建代码中删除，由
+  `tray::tests` 的全量枚举测试覆盖；本轮未单独截图托盘菜单。
+
+![图片右键标注](visual/context-menu-annotate.png)
+
+![便签右键编辑](visual/context-menu-note.png)
+
+![标注保存后卡片原地刷新](visual/line-annotated.png)
+
+### 3.10 统一 Microsoft YaHei UI 与 ClearType（2026-11-04）
+
+需求：除符号外所有字体统一为 Microsoft YaHei / Microsoft YaHei UI，并适配或
+优化 ClearType。
+
+- 字体统一：
+  - 线带卡片标签/空提示、标注编辑器工具栏与文字工具、快捷键窗口、便签正文
+    全部改为 `Microsoft YaHei UI`；
+  - 只有撤销/重做的 `↶/↷` 保留 `Segoe UI Symbol`；工具图标仍是矢量绘制。
+  - 200% DPI 下实测中文、西语、英语的卡片标签和编辑器按钮都不裁切；西语
+    720×520 DIP 最小窗口仍完整显示 `Cancelar/Guardar`（`visual/editor-minimum-es.png`）。
+  - 便签中英文混排（“Pegline 便签字体测试 YaHei UI 123”）正常折行，没有
+    超出纸面。
+- ClearType 分表面处理：
+  - 标注窗口的交换链不透明，显式设置 `D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE`；
+    放大截图能看到白色文字边缘的红/青子像素条纹，确认不是灰度回退。
+  - 快捷键窗口是普通不透明 GDI 窗口，字体质量改为 `CLEARTYPE_QUALITY`；
+    中文窗口实测见 `visual/shortcut-recorder.png`。西语提示用 GDI
+    `DT_CALCRECT` 在 380 DIP 宽、12 DIP 字号下量得 34 px 高，低于 48 DIP
+    提示区，不会压住输入框。
+  - 线带覆盖层是预乘 alpha 的透明表面，显式固定为
+    `D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE`；文字原点继续按设备像素对齐。
+  - 便签是 3 倍超采样后缩小，保留灰度抗锯齿，避免子像素彩边被重采样。
+  - 标注保存的 PNG 带 alpha，显式固定为灰度抗锯齿，文件里不会出现 ClearType
+    彩边。
+- 体积：字体全部来自 Windows，没有新增字体文件；exe 仍在 **1.4 MB** 级别。
+- 截图更新：`visual/editor.png`（中文、新字体、ClearType）、
+  `visual/editor-minimum-es.png`（西语最小窗口）。
+
+### 3.11 WYSIWYG 便签编辑器（2026-11-04）
+
+本机 6016×3384 @200%，线带 6 张卡（last card 是便签）。用三个开发用命令行
+开关在真实桌面复现，截图裁到应用像素：
+
+| 模式 | 复现 | 证据 |
+|:--|:--|:--|
+| `--note-hover-demo` | 线带保持放下，合成指针停在入口热点中心右侧 60 DIP | `visual/note-hover-physics.png`：空白便签停在理论挂点，被指针力拉向右下并上下浮动 |
+| 连续截帧（90 ms 间隔） | 同一条目，记录 16 帧 | 便签中心从 (4239,195) 缓慢回摆到 (4239,186)，带阻尼；没有抖动或跑出工作区 |
+| `PEGLINE_NOTE_SLOW=4` 飞入 | 慢放 4× 后连续截帧 | `visual/note-hover-enter-frames.png`：便签从工作区上方进入、下降，不再贴住屏幕顶边 |
+| `PEGLINE_NOTE_SLOW=4` 飞出 | 悬停后把指针移出热点，连续截帧 | `visual/note-hover-exit-frames.png`：便签沿 0.42 s 曲线上移消失，窗口随后隐藏 |
+| 同上 + 鼠标点击便签 | 点击进入中央飞行 | `visual/note-center-flight.png`：便签带夹子、玻璃边框沿曲线飞向中央 |
+| `--note-editor-demo` | 打开示例文档，滚轮下滚 | `visual/note-editor-lists.png`（标题/列表/任务）、`visual/note-editor-code.png`（引用/行内代码/链接/代码块/中文） |
+| 同一模式的空文档 | 点击空白便签 | `visual/note-editor-empty.png`：460×360 DIP 纸面、占位符“写点什么…” |
+| `--note-flow-demo` | 自动输入 25 字节并提交 | `visual/note-card.png`：新卡片，有夹子、摘要为 `Demo note / • one / [x] two` |
+| `PEGLINE_LANG=es` + 空编辑器 | 西语占位符 | `visual/note-editor-es.png`：“Escribe algo…” |
+| 双击标题词 | 双击选中 `Pegline` | `visual/note-word-select.png`：选区在字形下方，`#` 标记保持淡化 |
+| 中文 IME 组合 | Microsoft Pinyin 输入 `nihao` | `visual/note-editor-ime-composition.png`：活跃行内 `ni'hao` 带下划线，候选窗贴光标 |
+| 中文 IME 提交 | 按空格选“你好” | `visual/note-editor-ime-committed.png`：`你好` 作为源码插入，组合下划线消失 |
+| `--note-storage-demo` | 临时便签：建卡→同路径编辑器→改字提交→归档→清理 | trace：`has_card=true text_has_edit=true bytes=32 bom=true crlf=true`；归档文件存在，测试文件和卡片已清理 |
+
+- 体积与内存（release，200%，6 卡，线带可见；`PrivateMemorySize64`）：
+  - `pegline.exe` **1,649,664 B（1.57 MB）**，比上一版 1,385,984 B 增加
+    **258 KB（+0.25 MB）**，低于 0.5 MB 预算。
+  - 打开编辑器前 **111.94 MB**，编辑器打开后 **158.11 MB**（+46.02 MB：
+    D3D 设备 + 纸面位图 + 阴影 + 交换链）；提交并等飞行窗口空闲释放后
+    **116.27 MB**（比基线 +4.33 MB，新卡片缩略图/卡片本身）。
+  - 编辑器关闭时渲染线程停止、设备释放；常驻路径不保留编辑器资源。
+
+- 文档内容与行为：
+  - 活跃行（光标在文档开头）显示原文 `# Pegline`，`#` 淡化；其余行实时渲染。
+  - 标题 24 DIP 粗体、正文 15 DIP、列表圆点/复选框/数字、引用 2 DIP 竖线、
+    行内代码浅底、链接下划线 + 强调蓝、代码块 Consolas + 左侧竖线。
+  - 中文与英文混排正常，没有裁切；纸面右下折角沿用到编辑器。
+- 数据：`--note-flow-demo` 生成 `便签 2026-11-04 140758.txt`，30 字节，
+  UTF-8 BOM、CRLF；卡片摘要去掉 Markdown 标记。`pegged.txt` 追加该文件；
+  测试后已删除该文件与对应行。
+- 悬停动画（2026-11-04 打磨）：
+  - 飞入慢放 4× 的 trace：中心 y **-190.4 → 169.8**，连续下降，没有贴住屏幕
+    顶边。之前 `clamp_center` 把入场位置钳在 y=136，造成“先出现在顶部、最后
+    突然落位”；已移除入场阶段的 clamp。
+  - 飞出（正常速度）trace：中心 y **162.5 → -190.4**，0.42 s 连续上移，随后
+    `note hover cancelled` 并隐藏；预览窗口在空闲后释放。
+  - 退出判定改为**固定热点外 24 DIP**，不再看“鼠标是否在便签上”。之前便签会
+    被拖拽力拉向鼠标、一直保持在鼠标下方，所以移开后不飞出；现在离开入口
+    区域后 0.42 s 飞出并消失。
+- 存储链路（`--note-storage-demo`，2026-11-04）：
+  - 临时创建 `Notes\Note …txt`，作为便签卡片挂上，走**已有便签**的编辑器路径；
+  - 追加 ` edited` 后提交；trace 显示 `has_card=true text_has_edit=true`，
+    文件 32 字节、BOM 和 CRLF 都正确；
+  - 随后 `discard` 触发归档，文件出现在 `Notes\Archive`，卡片播放掉落动画
+    （23 帧）并移除；演示结束删除归档文件和残留，`pegged.txt` 回到 7 条。
+- 尚未截图/实测：200% → 100% DPI 改变后的重新居中、三语菜单/气泡、
+  按键到像素延迟。`PARITY` 7.15 仍未标记通过。
 
 ## 4. 逐帧结果
 

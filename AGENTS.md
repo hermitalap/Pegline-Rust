@@ -42,8 +42,9 @@ swap chain, thumbnail atlas, destroying the idle flight window) are optional. Ph
 (M5) is unblocked. Read `PLAN.md` §8 before picking the next task.
 
 **Phase B (M5) landed on 2026-11-02**: hover preview, sticky notes, the annotation
-editor for `Ctrl+Alt+S`, the drag ghost, the three sounds, the shortcut recorder and
-the full tray menu are implemented, with the new `en/es/zh` strings. Phase C is
+editor (opened from a picture's right-click "Annotate" command), the drag ghost,
+the three sounds, the shortcut recorder and the full tray menu are implemented,
+with the new `en/es/zh` strings. Phase C is
 measured in `PLAN.md` §3.3: 1.29 MB exe, ~105 ms cold start, 60.5 fps on the line,
 200 consecutive captures settling at +3.7%, and pooled helper windows released after
 10–30 s idle. The remaining acceptance gaps are a 120 Hz display, a second monitor
@@ -61,6 +62,29 @@ hardware specific (120 Hz, a second monitor, sleep/wake) and the subjective
 listening check for the three audio cues; see `PLAN.md` §8. Do not trade features
 or visual quality for memory to chase the original 60 MB MVP target — the user
 accepted the measured trade-offs in `PLAN.md` §3.2–§3.5.
+
+**The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
+`docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the
+entry hotspot and hover note in `src/app.rs` + `src/window/preview.rs`, and atomic
+write/archive in `src/notes.rs`. It reuses the existing flight window for hover →
+centre and editor → card, paints the paper to an opaque D2D bitmap for ClearType,
+and keeps notes as `.txt` + BOM + CRLF. Verified by desktop screenshots for the
+hover/centre flight, the empty editor, the full Markdown projection (headings,
+lists, tasks, quote, inline code, link, code block, Chinese), scrolling, saving a
+new note and its card flight. The entry hover is a fixed home slot with a
+0.56 s/0.27 damped spring, a pointer-distance pull and a 15 ms physics timer
+(0.48 s fly-in, 0.42 s fly-out); the exit test is the fixed hotspot plus 24 DIP,
+never the moving note itself, so moving the mouse away always flies it out.
+Memory was measured: +46.0 MB while the editor is
+open (release, 200 %), and the editor's device/resources are released on close;
+see `PLAN.md` §9. Chinese IME was verified with Microsoft Pinyin at 200 % DPI:
+the composition run is underlined on the active line, the candidate window sits
+at the caret, and Space commits 你好. The existing-note edit/save/archive path was
+verified with `--note-storage-demo`: a temporary note is edited, written as
+BOM+CRLF, moved to `Notes\Archive`, and cleaned up. Still pending: 200 % DPI
+re-centre, three-language menu/balloon checks and the keyboard-to-pixel latency;
+do not mark those as passed without a measurement. The old note "Edit" path now
+opens this editor instead of Notepad; "Archive" replaces "Discard" for notes.
 
 ## Read first
 

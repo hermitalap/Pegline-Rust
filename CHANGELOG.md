@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- **Sticky notes now have a WYSIWYG editor.** An invisible entry appears to the
+  right of the last card: after 120 ms a blank note flies in to the slot where it
+  would hang and bobs there. The mouse pulls it with a distance/direction force
+  against a damped return spring, so it lags, overshoots and settles instead of
+  following rigidly; leaving the entry flies it out again. Clicking it flies to a
+  460×360 DIP paper at the centre of the screen. The caret line shows
+  its Markdown source while the rest is rendered live (headings, bold, italic,
+  strike, inline code, fenced code, lists, tasks, quotes, links, rules). Clicking
+  outside, losing focus, Esc or Ctrl+S commits; the note is written atomically as
+  UTF-8 BOM + CRLF and flies back to its card. Empty new notes write nothing;
+  empty existing notes and every way of taking a note down move the file into
+  `Notes\Archive`. The editor is borderless, has no scrollbars, and takes keyboard
+  focus and input methods, including inline Chinese composition. See
+  `docs/NOTE-EDITOR.md` and `docs/DECISIONS.md` D9.
+- All non-symbol text now uses `Microsoft YaHei UI`: the card labels and hint,
+  the annotation editor's toolbar and text tool, the shortcut recorder and the
+  sticky-note body. Only the undo/redo arrow glyphs keep `Segoe UI Symbol`; the
+  toolbar tool icons remain vector drawings.
+- ClearType is now explicit per surface: the opaque annotation editor and the
+  GDI shortcut recorder use subpixel ClearType, while the transparent line
+  overlay and the 3x-supersampled notes use grayscale antialiasing. Saved
+  annotation PNGs are forced to grayscale so the file never contains coloured
+  subpixel fringes.
+- A picture's context menu now says **Annotate** and opens the annotation
+  window directly. Saving writes the marked-up PNG back over the card's file
+  and refreshes the thumbnail in place; cancelling leaves the file untouched.
+  A note's **Edit** now opens the WYSIWYG editor, and its old **Discard**
+  command is **Archive**.
+- Removed the old **Ctrl+Alt+S** "screenshot then annotate" flow, along with
+  its tray menu item and shortcut recorder entry. The note shortcut
+  (`Ctrl+Alt+N`) and the fixed show/hide shortcut (`Ctrl+Alt+T`) remain. A
+  legacy `snipKey` in `settings.ini` is preserved but ignored, so switching
+  back to the WPF build keeps working.
+- The annotation window now has the Pegline icon in its title bar and Alt-Tab,
+  and its toolbar was regrouped into tools, colours, line widths and actions.
+  Gaps inside a group are tighter than the gaps around 1 px separators, the
+  undo/redo pair sits with Cancel/Save on the right, tool icons are drawn as
+  crisp vector strokes, and each line-width button previews the actual stroke.
+  A compact layout keeps everything inside the 720 DIP minimum window in all
+  three languages.
+
+### Fixes
+
+- Choosing an item from a card or tray context menu no longer also replays the
+  click on the card control underneath it. The low-level mouse queue is now
+  discarded after the modal menu closes, so a card cannot be opened or copied
+  as a side effect of picking "Annotate" or another menu item.
+
 ## 2.1.1 — 2026-11-03
 
 ### Changes
