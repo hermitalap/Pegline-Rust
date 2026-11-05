@@ -22,6 +22,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::core::PCWSTR;
 
+use crate::font;
 use crate::i18n;
 use crate::logging;
 use crate::types::ImageData;
@@ -313,7 +314,13 @@ fn draw_text(
         let target = std::slice::from_raw_parts_mut(bits as *mut u8, pixels.len());
         target.copy_from_slice(pixels);
 
-        let face: Vec<u16> = "KaiTi".encode_utf16().chain(std::iter::once(0)).collect();
+        let face: Vec<u16> = font::UI_FAMILY_STR
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // The 3x supersampled bitmap is downscaled on the GPU. ClearType
+        // subpixel fringes would be resampled into colour noise, so grayscale
+        // antialiasing is the correct choice here even on an opaque sheet.
         let font = CreateFontW(
             -((font_dip * SCALE as f32).round() as i32),
             0,

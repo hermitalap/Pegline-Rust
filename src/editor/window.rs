@@ -32,9 +32,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1,
-    ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image,
-    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -48,8 +49,8 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -93,6 +94,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::wic;
 use crate::editor::model::{COLORS, Doc, Mark, Tool, WIDTHS};
+use crate::font;
 use crate::i18n;
 use crate::logging;
 use crate::types::{ImageData, RectF};
@@ -1069,14 +1071,14 @@ struct Labels {
 
 impl Labels {
     fn build(dwrite: &IDWriteFactory, strings: &crate::i18n::Strings) -> Result<Self, String> {
-        let ui = create_format(dwrite, w!("Segoe UI"), 13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+        let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         let glyph = create_format(
             dwrite,
-            w!("Segoe UI Symbol"),
+            font::SYMBOL_FAMILY,
             17.0,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
         )
-        .or_else(|_| create_format(dwrite, w!("Segoe UI"), 17.0, DWRITE_FONT_WEIGHT_SEMI_BOLD))?;
+        .or_else(|_| create_format(dwrite, font::UI_FAMILY, 17.0, DWRITE_FONT_WEIGHT_MEDIUM))?;
         Ok(Self {
             tools: [
                 label(dwrite, &glyph, "\u{2197}")?,
@@ -1188,7 +1190,7 @@ impl EditorState {
         let labels = Labels::build(&surface.dwrite, i18n::s())?;
         let text_format = create_format(
             &surface.dwrite,
-            w!("Segoe UI"),
+            font::UI_FAMILY,
             TEXT_SIZE,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
         )?;
@@ -1288,7 +1290,7 @@ impl EditorState {
         let labels = Labels::build(&surface.dwrite, i18n::s())?;
         let text_format = create_format(
             &surface.dwrite,
-            w!("Segoe UI"),
+            font::UI_FAMILY,
             TEXT_SIZE,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
         )?;
@@ -2050,6 +2052,9 @@ impl EditorState {
         unsafe {
             rt.SetDpi(96.0, 96.0);
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            // The saved PNG has an alpha channel; subpixel ClearType would both
+            // be unsupported and leave coloured fringes in the file.
+            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             rt.SetTransform(&Matrix3x2::identity());
             rt.BeginDraw();
             rt.Clear(Some(&D2D1_COLOR_F {
@@ -2924,6 +2929,11 @@ fn create_d2d(
             .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
             .map_err(|error| format!("CreateDeviceContext: {error}"))?;
         context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // The editor swap chain is opaque (DXGI_ALPHA_MODE_IGNORE), so Direct2D
+        // can use subpixel ClearType for the toolbar and the on-screen text
+        // marks. Saved pictures use a separate alpha target below, which must
+        // stay grayscale.
+        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
         context.SetDpi(dpi, dpi);
         Ok((factory, device, context))
     }

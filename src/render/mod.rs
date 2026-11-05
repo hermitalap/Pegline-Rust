@@ -30,8 +30,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
     D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry,
-    ID2D1Layer, ID2D1LinearGradientBrush, ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry, ID2D1Layer, ID2D1LinearGradientBrush,
+    ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -45,8 +46,8 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_METRICS, DWriteCreateFactory,
+    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -60,6 +61,7 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::font;
 use crate::i18n;
 use crate::types::{ImageData, RectF};
 
@@ -144,24 +146,11 @@ impl Texts {
     }
 
     fn build(dwrite: &IDWriteFactory) -> Result<Self, String> {
-        // Chinese falls back from Segoe UI to a CJK face. At 11 DIP the
-        // fallback's weight and hinting are whatever the system picks, and a
-        // dense glyph like "复" fills in; name the Windows UI CJK face
-        // explicitly, use its regular weight, and give the buttons the same
-        // 13 DIP the editor labels use. Latin text keeps Segoe UI SemiBold.
-        let chinese = i18n::detect() == i18n::Lang::Zh;
-        let family = if chinese {
-            w!("Microsoft YaHei UI")
-        } else {
-            w!("Segoe UI")
-        };
-        let label_weight = if chinese {
-            DWRITE_FONT_WEIGHT_MEDIUM
-        } else {
-            DWRITE_FONT_WEIGHT_SEMI_BOLD
-        };
-        let ui = create_format(dwrite, family, 13.0, label_weight)?;
-        let hint = create_format(dwrite, family, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        // One UI family for every language. The overlay is a premultiplied
+        // surface, so Direct2D must use grayscale antialiasing here; ClearType
+        // is reserved for the opaque editor and shortcut-dialog surfaces.
+        let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        let hint = create_format(dwrite, font::UI_FAMILY, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         let strings = i18n::s();
 
         let mut items: HashMap<TextId, TextItem> = HashMap::new();
@@ -1270,6 +1259,11 @@ fn create_d2d(
             .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
             .map_err(|e| format!("CreateDeviceContext: {e}"))?;
         context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // The overlay swap chain carries premultiplied alpha, so ClearType is
+        // not valid. Ask for grayscale explicitly instead of relying on
+        // Direct2D's silent fallback; text origins are already snapped to the
+        // device pixel grid in `draw_text`.
+        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         context.SetDpi(dpi, dpi);
         Ok((factory, device, context))
     }

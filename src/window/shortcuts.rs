@@ -12,7 +12,7 @@
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BeginPaint, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
     DEFAULT_CHARSET, DEFAULT_PITCH, DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK,
     DeleteObject, DrawTextW, EndPaint, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, FillRect, FrameRect,
     GetTextExtentPoint32W, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SelectObject, SetBkMode,
@@ -33,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::font;
 use crate::i18n;
 use crate::logging;
 use crate::shortcut::{self, Hotkey};
@@ -392,12 +393,12 @@ fn measure(dc: HDC, font: HGDIOBJ, text: &str) -> i32 {
 }
 
 fn create_font(scale: f32, height_dip: f32, bold: bool) -> windows::Win32::Graphics::Gdi::HFONT {
-    let face: Vec<u16> = "Segoe UI"
+    let face: Vec<u16> = font::UI_FAMILY_STR
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
     // SAFETY: GDI allocates a font from the stationary description; the caller
-    // deletes it.
+    // deletes it. The dialog is opaque, so ClearType is valid here.
     unsafe {
         CreateFontW(
             -((height_dip * scale).round() as i32),
@@ -415,7 +416,7 @@ fn create_font(scale: f32, height_dip: f32, bold: bool) -> windows::Win32::Graph
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
+            CLEARTYPE_QUALITY,
             (DEFAULT_PITCH.0 as u32) | (FF_DONTCARE.0 as u32),
             PCWSTR(face.as_ptr()),
         )

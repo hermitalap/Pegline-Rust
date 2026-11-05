@@ -13,6 +13,7 @@ pub mod app;
 pub mod capture;
 pub mod dragdrop;
 pub mod editor;
+pub mod font;
 pub mod i18n;
 pub mod layout;
 pub mod logging;
