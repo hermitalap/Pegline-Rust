@@ -42,6 +42,14 @@ const DROP_SECONDS: f32 = 0.32;
 /// has travelled this far, so the fall reads as "gone" without crossing the
 /// whole desktop.
 const DROP_DISTANCE: f32 = 200.0;
+/// The discarded note's tumble: how long it takes to shrink, how small it
+/// gets, and the gravity that carries it off the screen.
+const TUMBLE_SHRINK_SECONDS: f32 = 0.30;
+const TUMBLE_SHRINK: f32 = 0.45;
+const TUMBLE_GRAVITY: f32 = 2600.0;
+/// Safety cap for the tumble, seconds; it normally ends when the note leaves
+/// the window.
+const TUMBLE_SECONDS: f32 = 2.0;
 /// Arc height of the flight, DIP.
 const ARC_DIP: f32 = 30.0;
 /// Chrome fades in between these two fractions of the flight.
@@ -56,6 +64,9 @@ const SHADOW_MAX_CARD: f32 = 300.0;
 /// Messages from the render thread back to the UI thread.
 #[derive(Clone, Copy, Debug)]
 pub enum FlightEvent {
+    /// The first frame is on screen, so whatever the flight took over from can
+    /// be hidden without a gap.
+    Started(u64),
     /// The card reached the line; the real card is opaque underneath it.
     Landed {
         token: u64,
@@ -82,6 +93,9 @@ enum FlightCommand {
         /// How far the row glides after landing, DIP (normally -87, or 0 for
         /// the first card). The flight window mirrors the same spring.
         slide_dip: f32,
+        /// Whether the clothespin is part of this flight: a new note flying to
+        /// the editor is not hanging on the line, so it has no pin.
+        pin: bool,
         origin: RectI,
         dpi: u32,
     },
@@ -91,6 +105,22 @@ enum FlightCommand {
         image: ImageData,
         rect: RectI,
         tilt: f32,
+        origin: RectI,
+        dpi: u32,
+    },
+    /// A discarded note: it shrinks, spins and falls off the screen
+    /// (NOTE-EDITOR.md §5.5).
+    Tumble {
+        token: u64,
+        generation: u64,
+        image: ImageData,
+        /// The paper rectangle it starts from, screen pixels.
+        from: RectI,
+        /// Angular velocity in degrees per second; the sign is the spin
+        /// direction.
+        spin: f32,
+        /// Initial velocity in DIP per second; gravity does the rest.
+        velocity: (f32, f32),
         origin: RectI,
         dpi: u32,
     },
@@ -207,8 +237,10 @@ impl Flight {
     ///
     /// `from` is the capture rectangle in screen pixels, `to` the landing
     /// rectangle, `tilt` the card's fixed tilt in degrees and `slide_dip` the
-    /// row glide after landing in DIP. Returns false when the animation could
-    /// not be started.
+    /// row glide after landing in DIP. `pin` says whether the clothespin is
+    /// drawn (false for a new note on its way to the editor, which is not
+    /// hanging on the line). Returns false when the animation could not be
+    /// started.
     #[allow(clippy::too_many_arguments)]
     pub fn fly(
         &mut self,
@@ -218,6 +250,7 @@ impl Flight {
         to: RectI,
         tilt: f32,
         slide_dip: f32,
+        pin: bool,
         dpi: u32,
     ) -> bool {
         let scale = dpi.max(96) as f32 / 96.0;
@@ -245,6 +278,7 @@ impl Flight {
             to,
             tilt,
             slide_dip,
+            pin,
             origin: RectI::new(bounds.left, bounds.top, bounds.right, bounds.bottom),
             dpi,
         });
@@ -283,6 +317,58 @@ impl Flight {
             image,
             rect,
             tilt,
+            origin: bounds,
+            dpi,
+        });
+        true
+    }
+
+    /// Throws a discarded note away: it shrinks, spins in `spin`'s direction
+    /// and falls with gravity until it leaves the screen.
+    ///
+    /// `from` is the paper rectangle in screen pixels, `spin` degrees per second
+    /// and `velocity` the initial velocity in DIP per second. Returns false when
+    /// the animation could not be started.
+    pub fn tumble(
+        &mut self,
+        token: u64,
+        image: ImageData,
+        from: RectI,
+        spin: f32,
+        velocity: (f32, f32),
+        dpi: u32,
+    ) -> bool {
+        let scale = dpi.max(96) as f32 / 96.0;
+        let pad = (PAD_DIP * scale) as i32;
+        // The window has to hold the whole fall: the horizontal reach of the
+        // throw on both sides, and the desktop bottom for the drop.
+        let reach = (velocity.0.abs() * TUMBLE_SECONDS * scale).ceil() as i32 + pad;
+        let desktop = win32::virtual_screen();
+        let bounds = clamp_to_desktop(RectI::new(
+            from.left - reach,
+            from.top - pad,
+            from.right + reach,
+            desktop.bottom,
+        ));
+        logging::trace(format!(
+            "tumble from={from:?} spin={spin:.0} velocity={velocity:?} bounds={bounds:?}"
+        ));
+        if bounds.is_empty() {
+            logging::error("tumble: empty bounds");
+            return false;
+        }
+        win32::place_window(self.hwnd, bounds, true);
+        win32::show_no_activate(self.hwnd);
+        self.visible = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.interrupt.store(self.generation, Ordering::Relaxed);
+        let _ = self.tx.send(FlightCommand::Tumble {
+            token,
+            generation: self.generation,
+            image,
+            from,
+            spin,
+            velocity,
             origin: bounds,
             dpi,
         });
@@ -409,6 +495,7 @@ fn flight_thread(
                 to,
                 tilt,
                 slide_dip,
+                pin,
                 origin,
                 dpi,
             } => {
@@ -423,6 +510,7 @@ fn flight_thread(
                     to,
                     tilt,
                     slide_dip,
+                    pin,
                     origin,
                     dpi,
                     &on_event,
@@ -455,6 +543,32 @@ fn flight_thread(
                     logging::error(format!("drop: {error}"));
                 }
             }
+            FlightCommand::Tumble {
+                token,
+                generation,
+                image,
+                from,
+                spin,
+                velocity,
+                origin,
+                dpi,
+            } => {
+                if let Err(error) = run_tumble(
+                    &mut renderer,
+                    token,
+                    generation,
+                    &interrupt,
+                    &image,
+                    from,
+                    spin,
+                    velocity,
+                    origin,
+                    dpi,
+                    &on_event,
+                ) {
+                    logging::error(format!("tumble: {error}"));
+                }
+            }
         }
     }
     logging::trace("flight render thread stopped");
@@ -472,6 +586,7 @@ fn run_flight(
     to: RectI,
     tilt: f32,
     slide_dip: f32,
+    pin: bool,
     origin: RectI,
     dpi: u32,
     on_event: &dyn Fn(FlightEvent),
@@ -569,7 +684,7 @@ fn run_flight(
         // Once landed, the real card underneath owns the shadow; drawing the
         // flight shadow too would double its alpha and make it pulse as the
         // flight fades.
-        draw_flight_card(renderer, &texture, card, chrome, alpha, !landed);
+        draw_flight_card(renderer, &texture, card, chrome, alpha, !landed, pin);
         renderer.reset_transform();
         renderer.end()?;
         let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
@@ -637,6 +752,7 @@ fn run_drop(
             1.0,
             1.0,
             true,
+            true,
         );
         if pushed {
             renderer.pop_opacity();
@@ -650,6 +766,110 @@ fn run_drop(
             logging::trace(format!("drop finished after {frames} frames"));
             on_event(FlightEvent::Finished(token));
             return Ok(());
+        }
+        frames += 1;
+    }
+}
+
+/// A discarded note: it shrinks, spins and falls under gravity until the whole
+/// paper is below the window, i.e. off the screen (NOTE-EDITOR.md §5.5).
+///
+/// The motion is integrated with the real frame `dt` rather than eased from a
+/// clock, so the note accelerates like a falling object: a short throw, a slow
+/// turn at the top, then a fast drop out of sight.
+#[allow(clippy::too_many_arguments)]
+fn run_tumble(
+    renderer: &mut Renderer,
+    token: u64,
+    generation: u64,
+    interrupt: &AtomicU64,
+    image: &ImageData,
+    from: RectI,
+    spin: f32,
+    velocity: (f32, f32),
+    origin: RectI,
+    dpi: u32,
+    on_event: &dyn Fn(FlightEvent),
+) -> Result<(), String> {
+    let width_px = origin.width().max(1) as u32;
+    let height_px = origin.height().max(1) as u32;
+    renderer.resize(width_px, height_px, dpi)?;
+    let scale = dpi.max(96) as f32 / 96.0;
+    let texture = renderer.upload(image)?;
+
+    let width = from.width() as f32 / scale;
+    let height = from.height() as f32 / scale;
+    let mut pos = (
+        (from.left + from.right) as f32 * 0.5 / scale - origin.left as f32 / scale,
+        (from.top + from.bottom) as f32 * 0.5 / scale - origin.top as f32 / scale,
+    );
+    let mut vel = velocity;
+    let mut angle = 0.0f32;
+    let mut shrink;
+    let window_height = (origin.bottom - origin.top) as f32 / scale;
+    logging::trace(format!(
+        "tumble render start size={width:.1}x{height:.1} origin={origin:?}"
+    ));
+
+    let start = win32::now_seconds();
+    let mut last = start;
+    let mut frames = 0u32;
+    loop {
+        if interrupt.load(Ordering::Relaxed) != generation {
+            logging::trace(format!("tumble interrupted after {frames} frames"));
+            return Ok(());
+        }
+        let now = win32::now_seconds();
+        let dt = ((now - last) as f32).clamp(0.0, 0.05);
+        last = now;
+        let elapsed = (now - start) as f32;
+
+        // Shrink first (the "grab and flick"), then keep that size.
+        let shrink_t = (elapsed / TUMBLE_SHRINK_SECONDS).clamp(0.0, 1.0);
+        shrink = 1.0 - (1.0 - TUMBLE_SHRINK) * ease::out_quad(shrink_t);
+        vel.1 += TUMBLE_GRAVITY * dt;
+        pos.0 += vel.0 * dt;
+        pos.1 += vel.1 * dt;
+        angle += spin * dt;
+
+        // Done once the whole (shrunk) paper is below the window.
+        let half_height = height * shrink * 0.5;
+        if pos.1 - half_height > window_height || elapsed >= TUMBLE_SECONDS {
+            logging::trace(format!(
+                "tumble finished after {frames} frames, {elapsed:.2}s, angle={angle:.0}"
+            ));
+            on_event(FlightEvent::Finished(token));
+            return Ok(());
+        }
+
+        // Rotate and scale about the paper's own centre, then place the centre
+        // at `pos`: the note turns in place while it travels.
+        let centre = Vector2 {
+            X: width * 0.5,
+            Y: height * 0.5,
+        };
+        let transform = Matrix3x2::rotation_around(angle, centre)
+            * Matrix3x2::scale_around(shrink, shrink, centre)
+            * Matrix3x2::translation(pos.0 - width * 0.5, pos.1 - height * 0.5);
+        renderer.begin()?;
+        renderer.set_transform(transform);
+        draw_flight_card(
+            renderer,
+            &texture,
+            RectF::from_xywh(0.0, 0.0, width, height),
+            1.0,
+            1.0,
+            true,
+            false,
+        );
+        renderer.reset_transform();
+        renderer.end()?;
+        if renderer.present(true) == Present::DeviceLost {
+            return Err("device lost during tumble".to_string());
+        }
+        if frames == 0 {
+            // The note is on screen now; the editor behind it can go.
+            on_event(FlightEvent::Started(token));
         }
         frames += 1;
     }
@@ -674,7 +894,8 @@ fn drop_pose(t: f32, left: f32, top: f32, width: f32, tilt: f32) -> (Matrix3x2, 
     (transform, 1.0 - e)
 }
 
-/// Draws the card: photo, then the glass frame and pin at `chrome` opacity.
+/// Draws the card: photo, then the glass frame and (when `pin` is set) the
+/// clothespin at `chrome` opacity.
 fn draw_flight_card(
     renderer: &mut Renderer,
     texture: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
@@ -682,6 +903,7 @@ fn draw_flight_card(
     chrome: f32,
     alpha: f32,
     shadow: bool,
+    pin: bool,
 ) {
     let width_dip = card.width();
     let inset = layout::PHOTO_INSET * chrome;
@@ -715,7 +937,7 @@ fn draw_flight_card(
         }
     }
     renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
-    if chrome > 0.01 {
+    if pin && chrome > 0.01 {
         // The card rotates about this point, exactly like the real card on the
         // line: the pin top, not the frame top (which is 14 DIP lower).
         let pin_left = card.left + width_dip * 0.5 - layout::PIN_WIDTH * 0.5;

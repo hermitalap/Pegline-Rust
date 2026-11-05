@@ -288,12 +288,29 @@ pub fn render(text: &str, color_index: usize) -> Option<ImageData> {
     render_checked(text, color_index)
 }
 
-fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
-    let palette = color(color_index);
-    let width = CARD_WIDTH as u32 * SCALE;
-    let height = CARD_HEIGHT as u32 * SCALE;
+/// Renders only the blank paper (gradient and dog-ear) at `width_dip` x
+/// `height_dip`.
+///
+/// The discard animation starts from the editor's paper, which is far larger
+/// than a card, so it needs a bitmap of its own: stretching the card bitmap
+/// would blow the dog-ear up by the size ratio.
+pub fn render_paper(width_dip: f32, height_dip: f32, color_index: usize) -> Option<ImageData> {
+    // Two pixels per DIP covers a 200% display without an upscale.
+    const PAPER_SCALE: u32 = 2;
+    let width = (width_dip * PAPER_SCALE as f32).round() as u32;
+    let height = (height_dip * PAPER_SCALE as f32).round() as u32;
+    if width < 2 || height < 2 {
+        return None;
+    }
     let mut pixels = vec![0u8; (width * height * 4) as usize];
+    paint_paper(&mut pixels, width, height, color_index, PAPER_SCALE as f32);
+    Some(ImageData::new(width, height, pixels))
+}
 
+/// Paints the paper gradient and the dog-eared corner into `pixels`, at
+/// `scale` pixels per DIP.
+fn paint_paper(pixels: &mut [u8], width: u32, height: u32, color_index: usize, scale: f32) {
+    let palette = color(color_index);
     // Paper: a vertical gradient from the paper colour to the midpoint between
     // paper and edge (the WPF LinearGradientBrush ran at 90°).
     let paper = rgb(palette.paper);
@@ -318,7 +335,10 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
 
     // The dog-eared corner: the lift (edge colour) above the diagonal and the
     // shade under it, as in the original two polygons.
-    let fold = (FOLD * SCALE as f32).round() as u32;
+    let fold = (FOLD * scale).round() as u32;
+    if fold < 2 || fold >= width || fold >= height {
+        return;
+    }
     let x0 = width - fold;
     let y0 = height - fold;
     for y in y0..height {
@@ -343,6 +363,15 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
             }
         }
     }
+}
+
+/// The card bitmap: the paper plus its text.
+fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
+    let palette = color(color_index);
+    let width = CARD_WIDTH as u32 * SCALE;
+    let height = CARD_HEIGHT as u32 * SCALE;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    paint_paper(&mut pixels, width, height, color_index, SCALE as f32);
 
     // Text: the card shows the rendered Markdown, not its source markers, and
     // the layout rules are the C# ones. Short text sits large in the middle;
@@ -557,6 +586,31 @@ mod tests {
         let image = render("", 0).expect("a blank note bitmap");
         assert_eq!((image.width, image.height), (408, 264));
         assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn the_discard_paper_matches_the_editor_size() {
+        // The editor's paper is 460x360 DIP; the throw-away bitmap is rendered
+        // at two pixels per DIP so a 200% display shows it 1:1.
+        let image = render_paper(460.0, 360.0, 0).expect("a paper bitmap");
+        assert_eq!((image.width, image.height), (920, 720));
+        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        // The dog-ear is 13 DIP whatever the paper size: the first pixel of the
+        // fold square is the lifted edge colour, not the paper.
+        let palette = color(0);
+        let edge = rgb(palette.edge);
+        let fold = (13.0 * 2.0) as u32;
+        let x = image.width - fold;
+        let y = image.height - fold;
+        let index = ((y * image.width + x) * 4) as usize;
+        assert_eq!(
+            (
+                image.bgra[index + 2],
+                image.bgra[index + 1],
+                image.bgra[index]
+            ),
+            (edge[0], edge[1], edge[2])
+        );
     }
 
     #[test]

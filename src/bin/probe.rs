@@ -353,25 +353,33 @@ fn run_flight(config: &Config) -> Result<String, String> {
             to,
             0.0,
             0.0,
+            true,
             monitor.dpi,
         ) {
             return Err("flight did not start".to_string());
         }
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(pegline::window::flight::FlightEvent::Landed {
-                frames,
-                elapsed,
-                draw_max_ms,
-                ..
-            }) => {
-                total_frames += frames;
-                flight_seconds += elapsed;
-                draw_max = draw_max.max(draw_max_ms);
+        let mut landed = false;
+        while !landed {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(pegline::window::flight::FlightEvent::Landed {
+                    frames,
+                    elapsed,
+                    draw_max_ms,
+                    ..
+                }) => {
+                    total_frames += frames;
+                    flight_seconds += elapsed;
+                    draw_max = draw_max.max(draw_max_ms);
+                    landed = true;
+                }
+                Ok(pegline::window::flight::FlightEvent::Finished(_)) => {
+                    return Err("flight finished before landing".to_string());
+                }
+                Ok(pegline::window::flight::FlightEvent::Started(_)) => {
+                    // The first frame; the landing report follows.
+                }
+                Err(error) => return Err(format!("flight timeout: {error}")),
             }
-            Ok(pegline::window::flight::FlightEvent::Finished(_)) => {
-                return Err("flight finished before landing".to_string());
-            }
-            Err(error) => return Err(format!("flight timeout: {error}")),
         }
         // Wait for the landing fade before the next take-off.
         let _ = rx.recv_timeout(Duration::from_secs(2));

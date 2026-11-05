@@ -107,6 +107,9 @@ pub enum Brush {
     Paper,
     /// The cross glyph.
     CrossInk,
+    /// The blank entry note's label: a grey that reads as a hint on the note
+    /// paper, #606060.
+    Placeholder,
 }
 
 /// Cached text layouts.
@@ -116,6 +119,8 @@ pub enum TextId {
     Copy,
     Open,
     Copied,
+    /// The blank entry note's centred label.
+    NewNote,
 }
 
 /// Where a card's button row goes, in DIP, derived from the text metrics.
@@ -172,6 +177,7 @@ impl Texts {
             add(TextId::Hint, strings.hint, &hint)?;
             add(TextId::Copy, strings.copy, &ui)?;
             add(TextId::Open, strings.open, &ui)?;
+            add(TextId::NewNote, strings.new_note, &ui)?;
             let copied = format!("\u{2713} {}", strings.copied);
             add(TextId::Copied, &copied, &ui)?;
         }
@@ -275,6 +281,7 @@ struct Palette {
     white: ID2D1SolidColorBrush,
     paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
+    placeholder: ID2D1SolidColorBrush,
     pin_slot: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
@@ -314,6 +321,7 @@ impl Palette {
             white: solid(context, [0xFF, 0xFF, 0xFF], 1.0)?,
             paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
+            placeholder: solid(context, [0x60, 0x60, 0x60], 1.0)?,
             pin_slot: solid(context, [0, 0, 0], 0x52 as f32 / 255.0)?,
             metal,
             metal_edge,
@@ -337,6 +345,7 @@ impl Palette {
             Brush::White => &self.white,
             Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
+            Brush::Placeholder => &self.placeholder,
         }
     }
 }

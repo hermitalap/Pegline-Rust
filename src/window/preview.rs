@@ -7,9 +7,16 @@
 //! and drawn while still hidden, then shown without activation. When the
 //! preview is dismissed the bitmap and the surface are released, which is what
 //! keeps `probe`'s private memory flat after a preview (BEHAVIOR §6.7).
+//!
+//! The blank entry note also leans towards the pointer (NOTE-EDITOR.md §4.5).
+//! A top-level window cannot rotate, so the UI thread keeps moving the window
+//! while the render thread repaints the paper at the latest lean; the requests
+//! are coalesced, and a paper that is standing still is not repainted at all.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -20,12 +27,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::layout;
 use crate::logging;
 use crate::notes;
 use crate::preview as geometry;
-use crate::render::{Brush, Present, Renderer};
+use crate::render::{Brush, Present, Renderer, TextId};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
@@ -34,6 +42,9 @@ const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
 /// Transparent margin around the hover note, DIP (the shadow lives here).
 pub const NOTE_PADDING_DIP: f32 = 24.0;
+/// Smallest lean change, in degrees, that is worth a repaint. Well below what
+/// the eye can see on a 5° tilt, and it lets a settled paper sleep.
+const NOTE_TILT_STEP_DEG: f32 = 0.05;
 
 /// True while the window shows a note rather than a photo: the note is a real
 /// hover target, so it stops being click-through and uses the hand cursor.
@@ -51,6 +62,8 @@ enum PreviewCommand {
         bounds: RectI,
         dpi: u32,
     },
+    /// Repaint the note at the latest lean; the window is already placed.
+    Turn,
     Hide,
     Stop,
 }
@@ -69,6 +82,15 @@ pub struct Preview {
     tx: Sender<PreviewCommand>,
     join: Option<JoinHandle<()>>,
     visible: bool,
+    /// Latest lean the UI thread asked for, degrees. The render thread always
+    /// reads this slot, so a request that lands while a repaint is queued is
+    /// merged into it instead of being dropped.
+    tilt: Arc<Mutex<f32>>,
+    /// True while the render thread still has to pick the lean up.
+    tilt_pending: Arc<AtomicBool>,
+    /// The lean last handed to the render thread, so a still paper does not
+    /// wake it every 15 ms.
+    sent_tilt: Cell<f32>,
 }
 
 impl Preview {
@@ -110,11 +132,15 @@ impl Preview {
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let send_hwnd = SendHwnd(hwnd);
+        let tilt = Arc::new(Mutex::new(0.0f32));
+        let tilt_pending = Arc::new(AtomicBool::new(false));
+        let thread_tilt = Arc::clone(&tilt);
+        let thread_pending = Arc::clone(&tilt_pending);
         let join = thread::Builder::new()
             .name("pegline-preview".to_string())
             .spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    preview_thread(send_hwnd, rx, ready_tx)
+                    preview_thread(send_hwnd, rx, ready_tx, thread_tilt, thread_pending)
                 }));
                 if outcome.is_err() {
                     logging::error("panic in the preview render thread");
@@ -146,6 +172,9 @@ impl Preview {
             tx,
             join: Some(join),
             visible: false,
+            tilt,
+            tilt_pending,
+            sent_tilt: Cell::new(0.0),
         })
     }
 
@@ -182,6 +211,10 @@ impl Preview {
         // The note is a hover target: the hand cursor and the click belong to
         // this window, not to whatever is underneath it.
         win32::set_click_through(self.hwnd, false);
+        self.sent_tilt.set(0.0);
+        if let Ok(mut slot) = self.tilt.lock() {
+            *slot = 0.0;
+        }
         let _ = self
             .tx
             .send(PreviewCommand::ShowNote { color, bounds, dpi });
@@ -197,6 +230,28 @@ impl Preview {
         win32::place_window(self.hwnd, bounds, true);
     }
 
+    /// Leans the visible note by `degrees` (positive = clockwise).
+    ///
+    /// The window cannot rotate, so the paper is repainted in place. Requests
+    /// are coalesced: at most one repaint is queued, the render thread always
+    /// picks up the newest angle, and a paper that is standing still is not
+    /// repainted at all.
+    pub fn tilt_note(&self, degrees: f32) {
+        if !self.visible || !degrees.is_finite() {
+            return;
+        }
+        if (degrees - self.sent_tilt.get()).abs() < NOTE_TILT_STEP_DEG {
+            return;
+        }
+        self.sent_tilt.set(degrees);
+        if let Ok(mut slot) = self.tilt.lock() {
+            *slot = degrees;
+        }
+        if !self.tilt_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.tx.send(PreviewCommand::Turn);
+        }
+    }
+
     /// Hides the preview and releases its surface.
     pub fn hide(&mut self) {
         if !self.visible {
@@ -204,6 +259,7 @@ impl Preview {
         }
         self.visible = false;
         NOTE_MODE.store(false, Ordering::Release);
+        self.sent_tilt.set(0.0);
         let _ = self.tx.send(PreviewCommand::Hide);
     }
 
@@ -225,7 +281,13 @@ impl Drop for Preview {
     }
 }
 
-fn preview_thread(hwnd: SendHwnd, rx: Receiver<PreviewCommand>, ready: Sender<Result<(), String>>) {
+fn preview_thread(
+    hwnd: SendHwnd,
+    rx: Receiver<PreviewCommand>,
+    ready: Sender<Result<(), String>>,
+    tilt: Arc<Mutex<f32>>,
+    tilt_pending: Arc<AtomicBool>,
+) {
     let _com = match window::ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED) {
         Ok(guard) => guard,
         Err(error) => {
@@ -246,6 +308,8 @@ fn preview_thread(hwnd: SendHwnd, rx: Receiver<PreviewCommand>, ready: Sender<Re
 
     let mut texture: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1> = None;
     let mut shown = false;
+    // The lean currently painted into the swap chain, degrees.
+    let mut drawn_tilt = 0.0f32;
     while let Ok(command) = rx.recv() {
         match command {
             PreviewCommand::Stop => break,
@@ -283,6 +347,7 @@ fn preview_thread(hwnd: SendHwnd, rx: Receiver<PreviewCommand>, ready: Sender<Re
                     show_note_frame(&mut renderer, hwnd.0, color, bounds, dpi, &mut texture);
                 match outcome {
                     Ok(()) => {
+                        drawn_tilt = 0.0;
                         if !shown {
                             win32::show_no_activate(hwnd.0);
                             shown = true;
@@ -295,6 +360,23 @@ fn preview_thread(hwnd: SendHwnd, rx: Receiver<PreviewCommand>, ready: Sender<Re
                             shown = false;
                         }
                     }
+                }
+            }
+            PreviewCommand::Turn => {
+                // Clear the flag before reading the slot: a lean that lands
+                // after this point either shows up here or queues a new Turn,
+                // so no request can be lost.
+                tilt_pending.store(false, Ordering::Release);
+                let degrees = tilt.lock().map(|slot| *slot).unwrap_or(0.0);
+                if (degrees - drawn_tilt).abs() < NOTE_TILT_STEP_DEG {
+                    continue;
+                }
+                let Some(bitmap) = texture.as_ref() else {
+                    continue;
+                };
+                drawn_tilt = degrees;
+                if let Err(error) = turn_note_frame(&mut renderer, bitmap, degrees) {
+                    logging::error(format!("note lean: {error}"));
                 }
             }
         }
@@ -339,7 +421,59 @@ fn show_frame(
     Ok(())
 }
 
-/// Draws the blank hover note: shadow, paper (with its dog-ear), glass border.
+/// The blank note's glass card inside its window, DIP: the paper plus
+/// [`layout::PHOTO_INSET`] on every side, exactly like a picture card. The
+/// padding around it holds the shadow, and the 5° lean never leaves it.
+fn note_card() -> RectF {
+    let (width, height) = layout::note_card_size();
+    RectF::from_xywh(NOTE_PADDING_DIP, NOTE_PADDING_DIP, width, height)
+}
+
+/// Paints the card (shadow, glass frame, the note paper inset like a photo and
+/// the hairline border), leaning by `degrees` (positive = clockwise) about the
+/// card's centre.
+///
+/// The lean stays inside [`NOTE_PADDING_DIP`], so the window keeps its size and
+/// the render thread can repaint without resizing or re-placing it.
+fn draw_note(
+    renderer: &mut Renderer,
+    bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
+    degrees: f32,
+) -> Result<(), String> {
+    let card = note_card();
+    let inset = layout::PHOTO_INSET;
+    let paper = RectF::new(
+        card.left + inset,
+        card.top + inset,
+        card.right - inset,
+        card.bottom - inset,
+    );
+    let (center_x, center_y) = card.center();
+    renderer.begin()?;
+    renderer.set_transform(Matrix3x2::rotation_around(
+        degrees,
+        Vector2 {
+            X: center_x,
+            Y: center_y,
+        },
+    ));
+    renderer.draw_shadow(card, 0.18, false);
+    renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
+    renderer.draw_photo(bitmap, paper, layout::PHOTO_RADIUS);
+    // The blank note says what it is, in the same light grey a placeholder
+    // would use, centred on the paper.
+    let (text_w, text_h) = renderer.text_size(TextId::NewNote);
+    renderer.draw_text(
+        TextId::NewNote,
+        (center_x - text_w * 0.5, center_y - text_h * 0.5),
+        Brush::Placeholder,
+    );
+    renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
+    renderer.reset_transform();
+    renderer.end()
+}
+
+/// Draws the blank hover note upright, once, when the note window appears.
 fn show_note_frame(
     renderer: &mut Renderer,
     hwnd: HWND,
@@ -355,25 +489,25 @@ fn show_note_frame(
     renderer.resize(width, height, dpi)?;
     let image = notes::render("", color).ok_or_else(|| "note render failed".to_string())?;
     let bitmap = renderer.upload(&image)?;
+    draw_note(renderer, &bitmap, 0.0)?;
     *texture = Some(bitmap);
-
-    let card = RectF::from_xywh(
-        NOTE_PADDING_DIP,
-        NOTE_PADDING_DIP,
-        notes::CARD_WIDTH,
-        notes::CARD_HEIGHT,
-    );
-    renderer.begin()?;
-    renderer.draw_shadow(card, 0.18, false);
-    if let Some(bitmap) = texture.as_ref() {
-        renderer.draw_photo(bitmap, card, layout::CARD_RADIUS);
-    }
-    renderer.stroke_card(card, layout::CARD_RADIUS, 1.0);
-    renderer.end()?;
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a note preview".to_string());
     }
     logging::trace("note preview frame presented");
+    Ok(())
+}
+
+/// Repaints the note at a new lean; the window is already placed and sized.
+fn turn_note_frame(
+    renderer: &mut Renderer,
+    bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
+    degrees: f32,
+) -> Result<(), String> {
+    draw_note(renderer, bitmap, degrees)?;
+    if renderer.present(true) == Present::DeviceLost {
+        return Err("device lost while leaning the note".to_string());
+    }
     Ok(())
 }
 

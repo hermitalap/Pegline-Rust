@@ -109,15 +109,32 @@ const HELPER_IDLE_SECONDS: f64 = 10.0;
 /// Flight token for the note editor's paper, so note flights never touch the
 /// card bookkeeping (`flying_card`).
 const NOTE_FLIGHT_TOKEN: u64 = u64::MAX;
-/// Hover-note physics: a soft, under-damped spring home with a pointer pull
-/// whose equilibrium offset is a fraction of the pointer distance.
+/// Flight token for the throw-away tumble of an empty new note.
+const TUMBLE_FLIGHT_TOKEN: u64 = u64::MAX - 1;
+/// Hover-note physics: a damped spring home with a pointer pull whose
+/// equilibrium offset is a fraction of the pointer distance.
+///
+/// The spring is only lightly under-damped (0.6) so the note still leans into
+/// the pointer with a little inertia but does not swing; the pull tops out at
+/// 30 DIP, which keeps the whole note near its slot instead of letting the
+/// pointer drag it around the strip.
 const NOTE_HOME_RESPONSE: f32 = 0.56;
-const NOTE_HOME_DAMPING: f32 = 0.27;
-const NOTE_PULL_RATIO: f32 = 0.28;
+const NOTE_HOME_DAMPING: f32 = 0.6;
+const NOTE_PULL_RATIO: f32 = 0.22;
 const NOTE_PULL_RANGE_DIP: f32 = 260.0;
-const NOTE_PULL_MAX_DIP: f32 = 42.0;
+const NOTE_PULL_MAX_DIP: f32 = 30.0;
 const NOTE_BOB_DIP: f32 = 3.0;
 const NOTE_BOB_HZ: f64 = 0.22;
+/// Hover-note lean, degrees. A crosshair runs through the paper's centre: the
+/// pointer leans the paper clockwise in the top-left and bottom-right
+/// quadrants, counter-clockwise in the other two, by nothing on either axis and
+/// by at most 5° on the diagonals once the pointer is 120 DIP from the centre.
+/// The angular spring copies the travel spring so the lean lags and settles
+/// with it.
+const NOTE_TILT_MAX_DEG: f32 = 5.0;
+const NOTE_TILT_RANGE_DIP: f32 = 120.0;
+const NOTE_TILT_RESPONSE: f32 = 0.56;
+const NOTE_TILT_DAMPING: f32 = 0.6;
 /// Hover note fly-in/out. Deliberately a touch slower than the card flight so
 /// the small paper reads as a light object instead of a flicker.
 const NOTE_FLY_IN_SECONDS: f64 = 0.48;
@@ -342,7 +359,9 @@ enum HoverPhase {
 /// would be clipped to the line (`home`), bobs up and down there, and the
 /// pointer pulls it with a force proportional to the distance and direction
 /// from the note centre. A damped spring pulls it home, so the note lags,
-/// overshoots and settles instead of following the mouse one to one.
+/// overshoots and settles instead of following the mouse one to one. The same
+/// pointer also leans the paper about its centre, with a second spring of its
+/// own, so the twist trails the travel instead of snapping to it.
 struct HoverNote {
     phase: HoverPhase,
     started: f64,
@@ -355,6 +374,9 @@ struct HoverNote {
     /// Physical position/velocity in screen pixels (per second).
     pos: (f32, f32),
     vel: (f32, f32),
+    /// Lean in degrees, positive clockwise, and its velocity per second.
+    angle: f32,
+    spin: f32,
     /// Start of the slow ±3 DIP bob.
     float_start: f64,
     color: usize,
@@ -458,6 +480,12 @@ struct App {
     /// True between a commit request and its worker result; the window stays
     /// open and disabled meanwhile.
     note_committing: bool,
+    /// True while an empty new note is tumbling off the screen; the editor is
+    /// hidden and no click may commit it again.
+    note_tumbling: bool,
+    /// Deadline for the tumble: the editor is released even if the flight was
+    /// interrupted and never reported back.
+    note_tumble_until: f64,
     /// Fallback deadline for showing a hidden note editor if its flight is
     /// interrupted by a screenshot.
     note_show_at: Option<f64>,
@@ -497,6 +525,10 @@ struct App {
     /// `--note-hover-demo`: keep the line down and park a synthetic pointer on
     /// the entry hotspot so the blank note can be captured deterministically.
     note_hover_demo: bool,
+    /// Where that synthetic pointer sits, DIP from the hotspot centre, from
+    /// `PEGLINE_NOTE_DEMO_POINTER` (`x,y`); the visual acceptance run uses it
+    /// to lean the paper in each quadrant.
+    note_demo_pointer: (f32, f32),
     /// Slow-motion factor for the hover fly-in/out, from
     /// `PEGLINE_NOTE_SLOW`; only used by the visual acceptance runs.
     note_slow: f32,
@@ -505,6 +537,11 @@ struct App {
     note_flow_demo: bool,
     note_flow_stage: u8,
     note_flow_at: f64,
+    /// `--note-discard-demo`: open an empty new note and discard it, so the
+    /// throw-away animation can be captured.
+    note_discard_demo: bool,
+    note_discard_stage: u8,
+    note_discard_at: f64,
     /// `--note-storage-demo`: create a temporary note, edit and save it through
     /// the real card editor path, then archive it through `discard`, and clean
     /// the test file up. No user note is touched.
@@ -574,6 +611,8 @@ impl App {
             note_editor: None,
             note_editing: None,
             note_committing: false,
+            note_tumbling: false,
+            note_tumble_until: 0.0,
             note_show_at: None,
             recently_saved: Vec::new(),
             last_reload: start,
@@ -591,6 +630,10 @@ impl App {
             note_demo: std::env::args().any(|arg| arg == "--note-editor-demo"),
             note_demo_opened: false,
             note_hover_demo: std::env::args().any(|arg| arg == "--note-hover-demo"),
+            note_demo_pointer: std::env::var("PEGLINE_NOTE_DEMO_POINTER")
+                .ok()
+                .and_then(|value| parse_demo_pointer(&value))
+                .unwrap_or((78.0, 80.0)),
             note_slow: std::env::var("PEGLINE_NOTE_SLOW")
                 .ok()
                 .and_then(|value| value.parse::<f32>().ok())
@@ -599,6 +642,9 @@ impl App {
             note_flow_demo: std::env::args().any(|arg| arg == "--note-flow-demo"),
             note_flow_stage: 0,
             note_flow_at: 0.0,
+            note_discard_demo: std::env::args().any(|arg| arg == "--note-discard-demo"),
+            note_discard_stage: 0,
+            note_discard_at: 0.0,
             note_storage_demo: std::env::args().any(|arg| arg == "--note-storage-demo"),
             note_storage_stage: 0,
             note_storage_at: 0.0,
@@ -1128,6 +1174,31 @@ impl App {
                 _ => {}
             }
         }
+        if self.note_discard_demo {
+            self.keep_open = true;
+            if !self.is_present {
+                self.present();
+            }
+            if !self.is_revealed {
+                self.reveal(false, 0.0);
+            }
+            match self.note_discard_stage {
+                0 if now - self.start_time > 1.0 => {
+                    self.open_new_note_editor();
+                    self.note_discard_stage = 1;
+                    self.note_discard_at = now;
+                }
+                1 if now - self.note_discard_at > 1.5 => {
+                    // An empty note: this is the discard path.
+                    if let Some(editor) = self.note_editor.as_mut() {
+                        editor.commit();
+                    }
+                    self.note_discard_stage = 2;
+                    self.note_discard_at = now;
+                }
+                _ => {}
+            }
+        }
         if self.note_storage_demo {
             self.keep_open = true;
             if !self.is_present {
@@ -1190,6 +1261,12 @@ impl App {
                 self.catch_offer_at = None;
                 self.offer_catching();
             }
+        }
+        if self.note_tumbling && now >= self.note_tumble_until {
+            // The flight never reported back (interrupted by a capture, or its
+            // thread died): release the hidden editor anyway.
+            logging::trace("note tumble deadline reached");
+            self.close_note_editor();
         }
         if let Some(at) = self.clipboard_at {
             if now >= at {
@@ -1334,6 +1411,15 @@ impl App {
                 Event::TrashDone { paths } => {
                     logging::trace(format!("recycled {} files", paths.len()));
                 }
+                Event::Flight(FlightEvent::Started(token)) => {
+                    if token == TUMBLE_FLIGHT_TOKEN {
+                        // The thrown-away paper is drawn: the editor behind it
+                        // can disappear without a flash.
+                        if let Some(editor) = self.note_editor.as_mut() {
+                            editor.hide();
+                        }
+                    }
+                }
                 Event::Flight(FlightEvent::Landed { token, .. }) => {
                     if token == NOTE_FLIGHT_TOKEN {
                         self.note_show_at = None;
@@ -1364,6 +1450,16 @@ impl App {
                             flight.hide();
                         }
                         self.flight_idle_at = Some(win32::now_seconds());
+                        continue;
+                    }
+                    if id == TUMBLE_FLIGHT_TOKEN {
+                        // The thrown-away note is off the screen: release the
+                        // hidden editor now.
+                        if let Some(flight) = self.flight.as_mut() {
+                            flight.hide();
+                        }
+                        self.flight_idle_at = Some(win32::now_seconds());
+                        self.close_note_editor();
                         continue;
                     }
                     self.flying_card = None;
@@ -1403,6 +1499,11 @@ impl App {
     }
 
     fn on_left_down(&mut self, x: i32, y: i32, now: f64) {
+        if self.note_tumbling {
+            // The discarded paper is already on its way off the screen; the
+            // editor behind it is hidden and must not be committed again.
+            return;
+        }
         if self.note_editor.is_some() {
             // The note editor owns this click. Only a click outside its paper
             // commits; the line never reacts while a note is being edited
@@ -1419,10 +1520,7 @@ impl App {
         if self.note_hover.is_some() {
             // Clicking the floating blank note opens it in the editor; a click
             // in the hotspot itself does nothing (NOTE-EDITOR.md §4.2).
-            if self
-                .note_hover_card_px()
-                .is_some_and(|card| card.contains(x, y))
-            {
+            if self.note_hover_hits(x, y) {
                 self.open_new_note_editor();
                 return;
             }
@@ -2281,7 +2379,7 @@ impl App {
                     } else {
                         -layout::SPACING * 0.5
                     };
-                    flying = flight.fly(id, image, area, end, tilt, slide_dip, dpi);
+                    flying = flight.fly(id, image, area, end, tilt, slide_dip, true, dpi);
                     if flying {
                         self.flight_idle_at = None;
                         self.flying_card = Some(id);
@@ -2671,8 +2769,12 @@ impl App {
         layout::note_hotspot(self.items.len(), width_dip, height, note)
     }
 
-    /// The hover note's card rectangle in screen pixels.
-    fn note_hover_card_px(&self) -> Option<RectI> {
+    /// The hover note's paper rectangle in screen pixels.
+    ///
+    /// The flight to the editor starts from the paper, not from the glass card:
+    /// the card's frame dissolves when the flight begins, and keeping the paper
+    /// the same size means only the thin frame goes away.
+    fn note_hover_paper_px(&self) -> Option<RectI> {
         let hover = self.note_hover.as_ref()?;
         let scale = hover.dpi.max(96) as f32 / 96.0;
         let width = notes::CARD_WIDTH * scale;
@@ -2685,10 +2787,32 @@ impl App {
         ))
     }
 
+    /// True when a screen pixel is on the leaning hover note's card.
+    ///
+    /// The preview window is axis-aligned and only its content rotates, so the
+    /// hit test undoes the lean about the card's centre instead of trusting
+    /// the upright rectangle (NOTE-EDITOR.md §4.5).
+    fn note_hover_hits(&self, x: i32, y: i32) -> bool {
+        let Some(hover) = self.note_hover.as_ref() else {
+            return false;
+        };
+        let scale = hover.dpi.max(96) as f32 / 96.0;
+        let (card_w, card_h) = layout::note_card_size();
+        tilted_card_hits(
+            hover.center,
+            card_w * 0.5 * scale,
+            card_h * 0.5 * scale,
+            hover.angle,
+            x as f32,
+            y as f32,
+        )
+    }
+
     fn note_preview_bounds(&self, center: (f32, f32), dpi: u32) -> RectI {
         let scale = dpi.max(96) as f32 / 96.0;
-        let width = (notes::CARD_WIDTH + NOTE_PADDING_DIP * 2.0) * scale;
-        let height = (notes::CARD_HEIGHT + NOTE_PADDING_DIP * 2.0) * scale;
+        let (card_w, card_h) = layout::note_card_size();
+        let width = (card_w + NOTE_PADDING_DIP * 2.0) * scale;
+        let height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         RectI::new(
             (center.0 - width * 0.5).round() as i32,
             (center.1 - height * 0.5).round() as i32,
@@ -2726,9 +2850,14 @@ impl App {
             };
             let scale = overlay.scale().max(0.1);
             let (cx, cy) = hotspot.center();
-            // Offset the synthetic pointer inside the hotspot so the demo
-            // shows the note leaning towards the mouse, not resting at home.
-            let cx = cx + 60.0;
+            // Park the synthetic pointer inside the hotspot: it must stay in
+            // (the 120 ms arm needs that) while the offset from the centre
+            // shows the pull and the lean. A narrow hotspot shrinks it.
+            let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
+            let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
+            let dx = self.note_demo_pointer.0.clamp(-limit_x, limit_x);
+            let dy = self.note_demo_pointer.1.clamp(-limit_y, limit_y);
+            let (cx, cy) = (cx + dx, cy + dy);
             (
                 rect.left + (cx * scale).round() as i32,
                 rect.top + (cy * scale).round() as i32,
@@ -2761,7 +2890,8 @@ impl App {
             .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
         self.note_hotspot_hovered = in_hotspot;
 
-        let window_height = (notes::CARD_HEIGHT + NOTE_PADDING_DIP * 2.0) * scale;
+        let (card_w, card_h) = layout::note_card_size();
+        let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         let work = screen.work;
         let mut bounds = None;
         let mut finished = false;
@@ -2802,6 +2932,7 @@ impl App {
                         logging::trace("note hover reverses during fly-in");
                         hover.phase = HoverPhase::Out;
                         hover.started = now;
+                        hover.last = now;
                         hover.from = center;
                         hover.to = (center.0, work.top as f32 - window_height * 0.7);
                     }
@@ -2825,6 +2956,13 @@ impl App {
                         hover.from.0 + (hover.to.0 - hover.from.0) * k,
                         hover.from.1 + (hover.to.1 - hover.from.1) * k,
                     );
+                    // The pointer no longer pulls: the paper straightens out
+                    // while it climbs away, on the same angular spring.
+                    let dt = ((now - hover.last) as f32).clamp(0.0, 0.05);
+                    hover.last = now;
+                    if dt > 0.0 {
+                        step_hover_spin(hover, 0.0, dt);
+                    }
                     if now >= hover.trace_at {
                         logging::trace(format!("hover fly-out t={t:.2} center={:?}", hover.center));
                         hover.trace_at = now + 0.1;
@@ -2836,8 +2974,8 @@ impl App {
             }
             if !finished {
                 let hover_scale = hover.dpi.max(96) as f32 / 96.0;
-                let width = (notes::CARD_WIDTH + NOTE_PADDING_DIP * 2.0) * hover_scale;
-                let height = (notes::CARD_HEIGHT + NOTE_PADDING_DIP * 2.0) * hover_scale;
+                let width = (card_w + NOTE_PADDING_DIP * 2.0) * hover_scale;
+                let height = (card_h + NOTE_PADDING_DIP * 2.0) * hover_scale;
                 bounds = Some(RectI::new(
                     (hover.center.0 - width * 0.5).round() as i32,
                     (hover.center.1 - height * 0.5).round() as i32,
@@ -2856,8 +2994,12 @@ impl App {
         }
 
         if let Some(bounds) = bounds {
-            if let Some(preview) = self.preview.as_ref() {
+            if let (Some(hover), Some(preview)) = (self.note_hover.as_ref(), self.preview.as_ref())
+            {
                 preview.move_to(bounds);
+                // A window cannot rotate, so the paper is redrawn whenever the
+                // lean changes; moving stays the cheap path in between.
+                preview.tilt_note(hover.angle);
             }
         }
         if finished {
@@ -2884,8 +3026,9 @@ impl App {
         let Some(home) = self.note_entry_home_px(scale) else {
             return;
         };
-        let window_height = (notes::CARD_HEIGHT + NOTE_PADDING_DIP * 2.0) * scale;
-        let window_width = (notes::CARD_WIDTH + NOTE_PADDING_DIP * 2.0) * scale;
+        let (card_w, card_h) = layout::note_card_size();
+        let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
+        let window_width = (card_w + NOTE_PADDING_DIP * 2.0) * scale;
         let home = clamp_center(home, window_width * 0.5, window_height * 0.5, screen.work);
         let from = (home.0, screen.work.top as f32 - window_height * 0.7);
         let color = 0;
@@ -2904,6 +3047,8 @@ impl App {
             home,
             pos: from,
             vel: (0.0, 0.0),
+            angle: 0.0,
+            spin: 0.0,
             float_start: now,
             color,
             dpi,
@@ -2926,8 +3071,11 @@ impl App {
         let hotspot = self.note_entry_hotspot_layout()?;
         let overlay = self.overlay.as_ref()?;
         let rect = win32::window_rect(overlay.hwnd())?;
+        let (_, card_h) = layout::note_card_size();
         let (center_x, _) = hotspot.center();
-        let center_y = hotspot.top + layout::NOTE_CARD_HEIGHT * 0.5;
+        // The card's top is the slot's top, so its glass frame lines up with
+        // the frames of the cards already hanging.
+        let center_y = hotspot.top + card_h * 0.5;
         Some((
             rect.left as f32 + center_x * scale,
             rect.top as f32 + center_y * scale,
@@ -2956,7 +3104,7 @@ impl App {
         let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
             return;
         };
-        let from = self.note_hover_card_px();
+        let from = self.note_hover_paper_px();
         let flight_image = notes::render("", 0);
         self.cancel_note_hover();
         let tx = self.events_tx.clone();
@@ -2979,8 +3127,10 @@ impl App {
                 let dpi = monitor.dpi;
                 let launched = match (from, to, flight_image) {
                     (Some(from), Some(to), Some(image)) => {
+                        // A brand-new note is not hanging yet, so its flight has
+                        // no clothespin.
                         self.ensure_flight().is_some_and(|flight| {
-                            flight.fly(NOTE_FLIGHT_TOKEN, image, from, to, 0.0, 0.0, dpi)
+                            flight.fly(NOTE_FLIGHT_TOKEN, image, from, to, 0.0, 0.0, false, dpi)
                         })
                     }
                     _ => false,
@@ -3304,7 +3454,16 @@ impl App {
                 let dpi = monitor.dpi;
                 let launched = match (from, to) {
                     (Some(from), Some(to)) => self.ensure_flight().is_some_and(|flight| {
-                        flight.fly(NOTE_FLIGHT_TOKEN, flight_image, from, to, 0.0, 0.0, dpi)
+                        flight.fly(
+                            NOTE_FLIGHT_TOKEN,
+                            flight_image,
+                            from,
+                            to,
+                            0.0,
+                            0.0,
+                            true,
+                            dpi,
+                        )
                     }),
                     _ => false,
                 };
@@ -3457,7 +3616,7 @@ impl App {
     /// Saves the note the editor asked to commit. The window stays open and
     /// disabled until the worker reports.
     fn commit_note(&mut self, text: String) {
-        if self.note_committing {
+        if self.note_committing || self.note_tumbling {
             return;
         }
         let Some(editing) = self.note_editing.as_ref() else {
@@ -3477,7 +3636,9 @@ impl App {
             if let Some(card) = card {
                 self.archive_note(card);
             } else {
-                self.close_note_editor();
+                // An empty new note was never written: throw the paper away
+                // instead of making the editor vanish like a crash.
+                self.discard_new_note();
             }
             return;
         }
@@ -3600,7 +3761,8 @@ impl App {
                         } else {
                             -layout::SPACING * 0.5
                         };
-                        flying = flight.fly(id, image.clone(), from, target, tilt, slide_dip, dpi);
+                        flying =
+                            flight.fly(id, image.clone(), from, target, tilt, slide_dip, true, dpi);
                         if flying {
                             self.flight_idle_at = None;
                             self.flying_card = Some(id);
@@ -3645,7 +3807,7 @@ impl App {
         }
         self.send_scene(Command::SetFlying { id, flying: true });
         if let Some(flight) = self.ensure_flight() {
-            if flight.fly(id, image, from, target, tilt, 0.0, dpi) {
+            if flight.fly(id, image, from, target, tilt, 0.0, true, dpi) {
                 self.flight_idle_at = None;
                 self.flying_card = Some(id);
                 return;
@@ -3699,12 +3861,81 @@ impl App {
     fn close_note_editor(&mut self) {
         logging::trace("note editor closed");
         self.note_committing = false;
+        self.note_tumbling = false;
         self.note_show_at = None;
         self.note_editing = None;
         if let Some(mut editor) = self.note_editor.take() {
             editor.shutdown();
         }
         self.pinned = false;
+    }
+
+    /// Throws an empty new note away: the paper shrinks, spins in a random
+    /// direction and falls off the screen (NOTE-EDITOR.md §5.5).
+    ///
+    /// The editor hides at once so the flight is the only thing on screen; the
+    /// editor is released when the flight reports it is done.
+    fn discard_new_note(&mut self) {
+        let Some(editor) = self.note_editor.as_ref() else {
+            return;
+        };
+        let Some(paper) = self.note_editor_paper_px() else {
+            self.close_note_editor();
+            return;
+        };
+        let dpi = win32::window_dpi(editor.hwnd()).max(96);
+        let color = self
+            .note_editing
+            .as_ref()
+            .map(|note| note.color)
+            .unwrap_or(0);
+        let image = notes::render_paper(
+            crate::note_editor::display::PAPER_WIDTH,
+            crate::note_editor::display::PAPER_HEIGHT,
+            color,
+        );
+        // Random throw: the spin direction and the sideways push are independent
+        // coin flips, the upward impulse is always small.
+        let seed = (win32::now_seconds() * 1000.0) as u64;
+        let spin = if pseudo_random(seed) < 0.5 { -1.0 } else { 1.0 }
+            * (140.0 + pseudo_random(seed ^ 0xA5A5_5A5A) * 120.0);
+        let sideways = if pseudo_random(seed ^ 0x1234_5678) < 0.5 {
+            -1.0
+        } else {
+            1.0
+        } * (60.0 + pseudo_random(seed ^ 0x9E37_79B9) * 120.0);
+        let lift = -(60.0 + pseudo_random(seed ^ 0x51ED_2701) * 140.0);
+        let scale = dpi as f32 / 96.0;
+        let inset = (layout::PHOTO_INSET * scale).round() as i32;
+        // The flight draws the paper inside its card frame, so the card starts
+        // one inset outside the editor's paper.
+        let from = paper.inflate(inset);
+        logging::trace(format!(
+            "discard new note: paper={paper:?} spin={spin:.0} velocity=({sideways:.0},{lift:.0})"
+        ));
+        // The editor stays visible until the flight reports its first frame, so
+        // the paper never blinks out between the two windows.
+        let launched = match image {
+            Some(image) => self.ensure_flight().is_some_and(|flight| {
+                flight.tumble(
+                    TUMBLE_FLIGHT_TOKEN,
+                    image,
+                    from,
+                    spin,
+                    (sideways, lift),
+                    dpi,
+                )
+            }),
+            None => false,
+        };
+        if launched {
+            self.flight_idle_at = None;
+            self.note_tumbling = true;
+            self.note_tumble_until = win32::now_seconds() + 2.5;
+            self.pinned = true;
+        } else {
+            self.close_note_editor();
+        }
     }
 
     fn on_thumbnail(&mut self, id: CardId, image: ImageData) {
@@ -4694,12 +4925,17 @@ fn step_hover_physics(
         hover.vel.1 += ay * h;
         hover.pos.0 += hover.vel.0 * h;
         hover.pos.1 += hover.vel.1 * h;
+        // The lean is driven by where the pointer is relative to the paper
+        // right now, so it relaxes as the paper drifts under the pointer.
+        let lean = hover_tilt_target(pointer, hover.pos, scale);
+        step_hover_spin(hover, lean, h);
     }
 
-    // Keep the whole preview window (paper + shadow padding) inside the work
+    // Keep the whole preview window (card + shadow padding) inside the work
     // area; stop outward velocity so it does not buzz against the edge.
-    let half_width = (notes::CARD_WIDTH * 0.5 + NOTE_PADDING_DIP) * scale;
-    let half_height = (notes::CARD_HEIGHT * 0.5 + NOTE_PADDING_DIP) * scale;
+    let (card_w, card_h) = layout::note_card_size();
+    let half_width = (card_w * 0.5 + NOTE_PADDING_DIP) * scale;
+    let half_height = (card_h * 0.5 + NOTE_PADDING_DIP) * scale;
     let min_x = work.left as f32 + half_width;
     let max_x = work.right as f32 - half_width;
     let min_y = work.top as f32 + half_height;
@@ -4719,6 +4955,76 @@ fn step_hover_physics(
         hover.vel.1 = hover.vel.1.min(0.0);
     }
     hover.center = hover.pos;
+    if now >= hover.trace_at {
+        logging::trace(format!(
+            "hover physics center={:?} lean={:.2}",
+            hover.center, hover.angle
+        ));
+        hover.trace_at = now + 0.1;
+    }
+}
+
+/// The lean the pointer asks for, in degrees (positive = clockwise).
+///
+/// The paper behaves as if a crosshair ran through its centre: no lean at the
+/// crossing point or on either axis, clockwise in the top-left and bottom-right
+/// quadrants, counter-clockwise in the other two. The direction term is
+/// `sin(2φ)` so the quadrants blend instead of snapping on the axes, and the
+/// distance ramp keeps the paper upright near the centre and saturates on the
+/// diagonals at `NOTE_TILT_RANGE_DIP`.
+fn hover_tilt_target(pointer: (f32, f32), center: (f32, f32), scale: f32) -> f32 {
+    let dx = pointer.0 - center.0;
+    let dy = pointer.1 - center.1;
+    let distance_sq = dx * dx + dy * dy;
+    if distance_sq < 0.25 {
+        return 0.0;
+    }
+    let diagonal = 2.0 * dx * dy / distance_sq;
+    let reach = (distance_sq.sqrt() / (NOTE_TILT_RANGE_DIP * scale)).min(1.0);
+    NOTE_TILT_MAX_DEG * diagonal * reach
+}
+
+/// One step of the lean's angular spring, degrees.
+///
+/// It deliberately uses the travel spring's response and damping: the paper
+/// lags behind the pointer and overshoots by the same amount as it travels, so
+/// the twist and the pull read as one object instead of two effects.
+fn step_hover_spin(hover: &mut HoverNote, target: f32, h: f32) {
+    let omega = std::f32::consts::TAU / NOTE_TILT_RESPONSE;
+    let accel =
+        -omega * omega * (hover.angle - target) - 2.0 * NOTE_TILT_DAMPING * omega * hover.spin;
+    hover.spin += accel * h;
+    hover.angle += hover.spin * h;
+}
+
+/// True when `point` is inside a `half_w` x `half_h` card centred on `center`
+/// and leaning by `degrees` (positive = clockwise).
+///
+/// The point is turned back by the lean instead of turning the card, so the
+/// test costs two multiplies and needs no geometry.
+fn tilted_card_hits(
+    center: (f32, f32),
+    half_w: f32,
+    half_h: f32,
+    degrees: f32,
+    x: f32,
+    y: f32,
+) -> bool {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let dx = x - center.0;
+    let dy = y - center.1;
+    let local_x = dx * cos + dy * sin;
+    let local_y = -dx * sin + dy * cos;
+    local_x.abs() <= half_w && local_y.abs() <= half_h
+}
+
+/// Parses `PEGLINE_NOTE_DEMO_POINTER` (`x,y`, DIP). A malformed value keeps the
+/// default pointer instead of failing the launch.
+fn parse_demo_pointer(text: &str) -> Option<(f32, f32)> {
+    let (x, y) = text.split_once(',')?;
+    let x = x.trim().parse::<f32>().ok()?;
+    let y = y.trim().parse::<f32>().ok()?;
+    (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
 /// Keeps a hover-note centre far enough inside the work area that the whole
@@ -4982,6 +5288,8 @@ mod tests {
             home,
             pos: home,
             vel: (0.0, 0.0),
+            angle: 0.0,
+            spin: 0.0,
             float_start: 0.0,
             color: 0,
             dpi: 96,
@@ -5043,5 +5351,90 @@ mod tests {
         );
         assert!(far.center.0 > 0.0 && far.center.1 > 0.0);
         assert!(far.center.0 < 2000.0 && far.center.1 < 1000.0);
+    }
+
+    #[test]
+    fn the_lean_follows_the_pointer_quadrants() {
+        let center = (500.0, 300.0);
+        // 150 px along each diagonal is past the 120 DIP saturation point.
+        let tl = hover_tilt_target((350.0, 150.0), center, 1.0);
+        let br = hover_tilt_target((650.0, 450.0), center, 1.0);
+        let tr = hover_tilt_target((650.0, 150.0), center, 1.0);
+        let bl = hover_tilt_target((350.0, 450.0), center, 1.0);
+        // Clockwise (positive) in the top-left and bottom-right quadrants, the
+        // other way round in the other two, at the full 5° on the diagonals.
+        assert!((tl - 5.0).abs() < 0.01, "tl={tl}");
+        assert!((br - 5.0).abs() < 0.01, "br={br}");
+        assert!((tr + 5.0).abs() < 0.01, "tr={tr}");
+        assert!((bl + 5.0).abs() < 0.01, "bl={bl}");
+        // The crosshair is a dead line: no lean at the crossing point or on
+        // either axis, so the quadrants blend instead of snapping.
+        assert_eq!(hover_tilt_target(center, center, 1.0), 0.0);
+        assert!(hover_tilt_target((800.0, 300.0), center, 1.0).abs() < 0.001);
+        assert!(hover_tilt_target((500.0, 0.0), center, 1.0).abs() < 0.001);
+        // The lean grows with the distance from the crossing point.
+        let near = hover_tilt_target((520.0, 320.0), center, 1.0);
+        let far = hover_tilt_target((560.0, 360.0), center, 1.0);
+        assert!(
+            near > 0.0 && near < far && far < tl,
+            "near={near} far={far}"
+        );
+        // The range is in DIP, so the same pointer on a 200% screen leans the
+        // same paper by the same amount.
+        let scaled = hover_tilt_target((800.0, 600.0), center, 2.0);
+        assert!((scaled - 5.0).abs() < 0.01, "scaled={scaled}");
+    }
+
+    #[test]
+    fn the_lean_lags_overshoots_and_settles() {
+        let mut note = hover_at((500.0, 300.0));
+        let h = 1.0 / 240.0;
+        let mut peak: f32 = 0.0;
+        for step in 0..480 {
+            step_hover_spin(&mut note, 4.0, h);
+            peak = peak.max(note.angle);
+            if step == 0 {
+                // The paper does not snap to the pointer in one tick.
+                assert!(note.angle > 0.0 && note.angle < 0.1, "angle={}", note.angle);
+            }
+        }
+        assert!(peak > 4.2, "peak={peak}");
+        assert!((note.angle - 4.0).abs() < 0.05, "angle={}", note.angle);
+    }
+
+    #[test]
+    fn the_physics_leans_the_paper_towards_the_pointer_diagonal() {
+        let work = RectI::new(0, 0, 2000, 1000);
+        let mut down = hover_at((500.0, 300.0));
+        for step in 1..=120 {
+            step_hover_physics(&mut down, 800, 600, step as f64 / 60.0, 1.0, work);
+        }
+        assert!(down.angle > 0.5, "angle={}", down.angle);
+        let mut up = hover_at((500.0, 300.0));
+        for step in 1..=120 {
+            step_hover_physics(&mut up, 800, 0, step as f64 / 60.0, 1.0, work);
+        }
+        assert!(up.angle < -0.5, "angle={}", up.angle);
+    }
+
+    #[test]
+    fn a_leaning_paper_is_hit_where_it_is_drawn() {
+        // A 136x88 DIP note, upright: the corners are the edges.
+        assert!(tilted_card_hits((0.0, 0.0), 68.0, 44.0, 0.0, 67.0, 43.0));
+        assert!(!tilted_card_hits((0.0, 0.0), 68.0, 44.0, 0.0, 69.0, 0.0));
+        // Leaning clockwise by 5° lifts the left end of the top edge, so the
+        // upright rectangle's top-left corner is no longer paper...
+        assert!(!tilted_card_hits((0.0, 0.0), 68.0, 44.0, 5.0, -67.0, -43.0));
+        // ...while the paper's own rotated corner is.
+        assert!(tilted_card_hits((0.0, 0.0), 68.0, 44.0, 5.0, -60.0, -46.0));
+    }
+
+    #[test]
+    fn the_demo_pointer_parses_only_two_finite_numbers() {
+        assert_eq!(parse_demo_pointer("78,80"), Some((78.0, 80.0)));
+        assert_eq!(parse_demo_pointer(" -78 , -80 "), Some((-78.0, -80.0)));
+        assert_eq!(parse_demo_pointer("78"), None);
+        assert_eq!(parse_demo_pointer("a,80"), None);
+        assert_eq!(parse_demo_pointer("78,NaN"), None);
     }
 }

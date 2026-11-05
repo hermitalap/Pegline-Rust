@@ -79,6 +79,8 @@ pub struct Strings {
     pub save_failed: &'static str,
     /// Note editor placeholder (NOTE-EDITOR.md §5.1).
     pub note_placeholder: &'static str,
+    /// The blank entry note's label (NOTE-EDITOR.md §4.4).
+    pub new_note: &'static str,
     /// Note archive failure balloon.
     pub archive_failed: &'static str,
     pub shortcut_hint: &'static str,
@@ -138,6 +140,7 @@ const EN: Strings = Strings {
     line_width: "Line width",
     save_failed: "Pegline could not save this screenshot.",
     note_placeholder: "Write something…",
+    new_note: "New note",
     archive_failed: "Pegline could not archive this note.",
     shortcut_hint: "Press the keys you want to use. Include Ctrl, Alt, Shift or Win, or use F1–F24 or PrtScn on their own.",
     no_shortcut: "No shortcut",
@@ -196,6 +199,7 @@ const ES: Strings = Strings {
     line_width: "Grosor",
     save_failed: "Pegline no pudo guardar esta captura.",
     note_placeholder: "Escribe algo…",
+    new_note: "Nueva nota",
     archive_failed: "Pegline no pudo archivar esta nota.",
     shortcut_hint: "Pulsa las teclas que quieras usar. Incluye Ctrl, Alt, Mayús o Win, o usa F1–F24 o ImprPant solas.",
     no_shortcut: "Sin atajo",
@@ -254,6 +258,7 @@ const ZH: Strings = Strings {
     line_width: "线宽",
     save_failed: "Pegline 无法保存这张截图。",
     note_placeholder: "写点什么…",
+    new_note: "新建便签",
     archive_failed: "Pegline 无法归档这张便签。",
     shortcut_hint: "直接按下想用的组合键。需要包含 Ctrl、Alt、Shift 或 Win；F1–F24、PrtScn 可以单独使用。",
     no_shortcut: "不使用快捷键",

@@ -60,6 +60,18 @@ pub const NOTE_HOTSPOT_MIN: f32 = 80.0;
 /// Height of a note card, DIP. Mirrors `notes::CARD_HEIGHT`; layout must stay
 /// free of Win32.
 pub const NOTE_CARD_HEIGHT: f32 = 88.0;
+/// Width of a note card, DIP. Mirrors `notes::CARD_WIDTH`; layout must stay
+/// free of Win32.
+pub const NOTE_CARD_WIDTH: f32 = 136.0;
+
+/// The glass card that holds a note: the paper plus [`PHOTO_INSET`] on every
+/// side, so a note card is built exactly like a picture card (144×96 DIP).
+pub fn note_card_size() -> (f32, f32) {
+    (
+        NOTE_CARD_WIDTH + PHOTO_INSET * 2.0,
+        NOTE_CARD_HEIGHT + PHOTO_INSET * 2.0,
+    )
+}
 
 /// The rope sags by at most 30 DIP, and by 1.8% of the width otherwise.
 pub fn sag(width: f32) -> f32 {

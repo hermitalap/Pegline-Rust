@@ -72,9 +72,26 @@ and keeps notes as `.txt` + BOM + CRLF. Verified by desktop screenshots for the
 hover/centre flight, the empty editor, the full Markdown projection (headings,
 lists, tasks, quote, inline code, link, code block, Chinese), scrolling, saving a
 new note and its card flight. The entry hover is a fixed home slot with a
-0.56 s/0.27 damped spring, a pointer-distance pull and a 15 ms physics timer
-(0.48 s fly-in, 0.42 s fly-out); the exit test is the fixed hotspot plus 24 DIP,
-never the moving note itself, so moving the mouse away always flies it out.
+0.56 s/0.6 damped spring (it overshoots about 7 % and settles, no swing), a
+pointer-distance pull capped at 30 DIP and a 15 ms physics timer (0.48 s fly-in,
+0.42 s fly-out); the blank note wears the same glass card as a hanging picture
+(144×96 DIP frame, the 136×88 paper inset by `PHOTO_INSET`) with a grey
+`new_note` label centred on the paper; a second spring of the same response and
+damping leans that card by up to 5° about its centre — clockwise in the
+top-left/bottom-right quadrants, counter-clockwise in the other two, zero on the
+crosshair through the centre — so the twist lags and settles with the travel
+(`PEGLINE_NOTE_DEMO_POINTER` parks the demo pointer in any quadrant). A window
+cannot rotate, so the UI thread keeps moving it with `SetWindowPos` while the
+render thread repaints the card only when the lean changes, coalescing the
+requests; the flight that carries a brand-new note to the editor passes
+`pin = false`, because the note is not hanging yet; the exit test is the fixed
+hotspot plus 24 DIP, never the moving note itself, so moving the mouse away
+always flies it out. Discarding an empty new note does not close the editor
+window in place (that read as a crash): `Flight::tumble` shrinks the paper to
+45 %, spins it in a random direction and drops it off the screen under gravity
+(2600 DIP/s², integrated by real frame `dt`), and the editor is hidden only
+after the flight's first frame (`FlightEvent::Started`); `--note-discard-demo`
+reproduces it.
 Memory was measured: +46.0 MB while the editor is
 open (release, 200 %), and the editor's device/resources are released on close;
 see `PLAN.md` §9. Chinese IME was verified with Microsoft Pinyin at 200 % DPI:
