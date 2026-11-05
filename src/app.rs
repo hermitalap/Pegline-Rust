@@ -965,7 +965,14 @@ impl App {
             self.toggle();
         } else if mouse == WM_RBUTTONUP {
             let state = self.menu_state();
+            self.menu_open = true;
             let command = self.tray.as_mut().and_then(|tray| tray.show_menu(&state));
+            // As with the card menu, a tray-menu click must not be replayed as
+            // a click on the line afterwards.
+            if let Ok(mut queue) = mouse_queue().lock() {
+                queue.clear();
+            }
+            self.menu_open = false;
             if let Some(command) = command {
                 self.apply(command);
             }
@@ -1370,6 +1377,12 @@ impl App {
     }
 
     fn drain_mouse(&mut self, _now: f64) {
+        // A popup menu pumps messages on this thread while it is open, so the
+        // low-level hook would otherwise replay the click that chose a menu
+        // item as a click on whatever card control sits underneath it.
+        if self.menu_open {
+            return;
+        }
         loop {
             let event = {
                 let Ok(mut queue) = mouse_queue().try_lock() else {
@@ -4240,6 +4253,11 @@ impl App {
             );
             let _ = DestroyMenu(menu);
             let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            // Discard the button events produced while the menu was modal; the
+            // chosen command already encodes the user's intent.
+            if let Ok(mut queue) = mouse_queue().lock() {
+                queue.clear();
+            }
             self.menu_open = false;
             match chosen.0 as usize {
                 1 => Some(CardAction::Copy),
