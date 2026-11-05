@@ -18,10 +18,11 @@ pub const PILL_RADIUS: f32 = PILL_HEIGHT * 0.5;
 pub const PILL_PAD: f32 = 6.0;
 pub const PILL_GAP: f32 = 10.0;
 
-/// Tool buttons: 34x34 inside the tools pill.
+/// Tool buttons: 34x34 circles inside the tools pill.
 pub const TOOL_SIZE: f32 = 34.0;
 pub const TOOL_GAP: f32 = 2.0;
-pub const TOOL_COUNT: usize = 4;
+/// Arrow, rectangle, text, eraser, mosaic.
+pub const TOOL_COUNT: usize = 5;
 /// Colour swatches: 22x22.
 pub const COLOUR_SIZE: f32 = 22.0;
 pub const COLOUR_GAP: f32 = 6.0;

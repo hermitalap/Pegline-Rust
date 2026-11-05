@@ -1,4 +1,4 @@
-The four SVG icons in this folder are from Lucide (https://lucide.dev).
+The five SVG icons in this folder are from Lucide (https://lucide.dev).
 
 ISC License
 
@@ -17,11 +17,13 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 The following icons are derived from the Feather project and are MIT
-licensed (Copyright (c) 2013-present Cole Bemis): arrow-up-right, type.
-The MIT text is reproduced at https://github.com/lucide-icons/lucide/blob/main/LICENSE.
+licensed (Copyright (c) 2013-present Cole Bemis): type, eye-off. The MIT
+text is reproduced at
+https://github.com/lucide-icons/lucide/blob/main/LICENSE.
 
 Used in Pegline (annotation editor toolbar):
-- move-up-right.svg      -> Tool::Arrow
-- rectangle-horizontal.svg -> Tool::Rectangle
-- type.svg               -> Tool::Text
-- grid-3x3.svg           -> Tool::Mosaic
+- move-up-right.svg         -> Tool::Arrow
+- rectangle-horizontal.svg  -> Tool::Rectangle
+- type.svg                  -> Tool::Text
+- eraser.svg                -> Tool::Eraser
+- eye-off.svg               -> Tool::Mosaic (redaction)

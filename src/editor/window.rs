@@ -21,22 +21,23 @@ use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
-    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE, D2D1_ALPHA_MODE_IGNORE,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE,
-    D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES,
+    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM,
+    D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
+    D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
+    ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
+    ID2D1Geometry, ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -124,6 +125,9 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const MOSAIC_BLOCK: u32 = 16;
 /// Text marks are 32 source pixels tall, SemiBold, like the WPF text box.
 const TEXT_SIZE: f32 = 32.0;
+/// Radius of the eraser disc, DIP. A mark touched by the disc is removed
+/// whole, so the eraser never leaves half a stroke behind.
+const ERASER_RADIUS_DIP: f32 = 14.0;
 /// Cached mosaic textures kept for undo/redo; the cache is cleared when full.
 const MOSAIC_CACHE: usize = 16;
 
@@ -147,8 +151,14 @@ const CHROME_ACCENT: u32 = 0x0E_63_9C;
 const CHROME_ACCENT_HOVER: u32 = 0x11_77_BB;
 const CHROME_ACCENT_BORDER: u32 = 0x82_C4_FF;
 
-/// The four tools in toolbar order.
-const TOOLS: [Tool; 4] = [Tool::Arrow, Tool::Rectangle, Tool::Text, Tool::Mosaic];
+/// The five tools in toolbar order.
+const TOOLS: [Tool; 5] = [
+    Tool::Arrow,
+    Tool::Rectangle,
+    Tool::Text,
+    Tool::Eraser,
+    Tool::Mosaic,
+];
 
 /// One open editor.
 pub struct Editor {
@@ -1098,6 +1108,9 @@ struct EditorState {
     color: u32,
     width: f32,
     drag: Option<Drag>,
+    /// Marks as they were when the current eraser gesture began; committed as
+    /// one undo step when the gesture ends.
+    erase_before: Option<Vec<Mark>>,
     /// The button under the pointer, for the hover state.
     hover: Option<Hit>,
     /// Card, photo, pin and every floating button, in DIP.
@@ -1156,6 +1169,7 @@ impl EditorState {
             color: COLORS[0].0,
             width: WIDTHS[1],
             drag: None,
+            erase_before: None,
             hover: None,
             layout,
             photo_mask: None,
@@ -1303,10 +1317,7 @@ impl EditorState {
             Command::PointerDown { x, y } => return self.pointer_down(x, y),
             Command::PointerMove { x, y } => self.pointer_move(x, y),
             Command::PointerUp { x, y } => self.pointer_up(x, y),
-            Command::PointerCancel => {
-                self.drag = None;
-                self.dirty = true;
-            }
+            Command::PointerCancel => self.cancel_gesture(),
             Command::HoverClear => {
                 if self.hover.take().is_some() {
                     self.dirty = true;
@@ -1334,6 +1345,12 @@ impl EditorState {
                 }
             }
             Command::Escape => {
+                // Esc during an eraser stroke puts the marks back instead of
+                // closing the editor.
+                if self.drag.is_some() {
+                    self.cancel_gesture();
+                    return Step::Continue;
+                }
                 if self.doc.as_ref().map(|doc| doc.is_typing()) == Some(true) {
                     if let Some(doc) = self.doc.as_mut() {
                         doc.finish_text();
@@ -1425,6 +1442,16 @@ impl EditorState {
                     self.texts_dirty = true;
                 }
             }
+            Tool::Eraser => {
+                // One drag is one undo step: keep the marks as they were and
+                // remove whole marks as the disc sweeps over them.
+                self.erase_before = self.doc.as_ref().map(|doc| doc.marks().to_vec());
+                self.drag = Some(Drag {
+                    start: source,
+                    current: source,
+                });
+                self.erase_stroke(source, source);
+            }
             _ => {
                 self.drag = Some(Drag {
                     start: source,
@@ -1447,8 +1474,16 @@ impl EditorState {
             return;
         }
         let source = self.source_clamped(x, y);
-        if let Some(drag) = self.drag.as_mut() {
-            drag.current = source;
+        let previous = match self.drag.as_mut() {
+            Some(drag) => {
+                let previous = drag.current;
+                drag.current = source;
+                previous
+            }
+            None => return,
+        };
+        if self.tool == Tool::Eraser {
+            self.erase_stroke(previous, source);
         }
         self.dirty = true;
     }
@@ -1459,6 +1494,16 @@ impl EditorState {
         };
         let (x, y) = self.to_dip(x_px, y_px);
         let end = self.source_clamped(x, y);
+        if self.tool == Tool::Eraser {
+            self.erase_stroke(drag.current, end);
+            if let Some(before) = self.erase_before.take() {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.record_erase(before);
+                }
+            }
+            self.dirty = true;
+            return;
+        }
         let (left, top, width, height) = drag_rect(drag.start, end);
         let mark = match self.tool {
             Tool::Arrow => {
@@ -1493,6 +1538,7 @@ impl EditorState {
                     Tool::Arrow => "arrow",
                     Tool::Rectangle => "rect",
                     Tool::Text => "text",
+                    Tool::Eraser => "eraser",
                     Tool::Mosaic => "mosaic",
                 },
                 drag.start,
@@ -1503,6 +1549,81 @@ impl EditorState {
             }
         }
         self.dirty = true;
+    }
+
+    /// Cancels the gesture in progress, restoring the marks an eraser had
+    /// already removed (so Esc or a lost capture never keeps a half erasure).
+    fn cancel_gesture(&mut self) {
+        self.drag = None;
+        if let Some(before) = self.erase_before.take() {
+            if let Some(doc) = self.doc.as_mut() {
+                doc.restore_marks(before);
+            }
+            self.texts_dirty = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Erases along a line in source pixels so a fast drag leaves no gaps.
+    fn erase_stroke(&mut self, from: (f32, f32), to: (f32, f32)) {
+        let radius = ERASER_RADIUS_DIP / self.canvas.scale.max(0.0001);
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let distance = (dx * dx + dy * dy).sqrt();
+        let steps = ((distance / (radius * 0.6)).ceil() as usize).clamp(1, 48);
+        for step in 1..=steps {
+            let t = step as f32 / steps as f32;
+            self.erase_at((from.0 + dx * t, from.1 + dy * t), radius);
+        }
+    }
+
+    /// Removes every mark the eraser disc touches at `point`.
+    fn erase_at(&mut self, point: (f32, f32), radius: f32) {
+        let Some(doc) = self.doc.as_ref() else {
+            return;
+        };
+        let hits: Vec<bool> = doc
+            .marks()
+            .iter()
+            .map(|mark| self.mark_hits_eraser(mark, point, radius))
+            .collect();
+        if !hits.iter().any(|hit| *hit) {
+            return;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return;
+        };
+        let mut index = 0;
+        doc.erase_marks(|_| {
+            let hit = hits[index];
+            index += 1;
+            hit
+        });
+        self.texts_dirty = true;
+        self.dirty = true;
+    }
+
+    /// Eraser hit test. Text uses its real layout box; the other marks use the
+    /// pure geometry test in the model.
+    fn mark_hits_eraser(&self, mark: &Mark, point: (f32, f32), radius: f32) -> bool {
+        if let Mark::Text {
+            origin, text, size, ..
+        } = mark
+        {
+            let (width, height) = self
+                .texts
+                .iter()
+                .find(|entry| entry.text == *text)
+                .map(|entry| {
+                    let metrics = text_metrics(&entry.layout);
+                    (metrics.width, metrics.height)
+                })
+                .unwrap_or((size * 0.62 * text.chars().count().max(1) as f32, *size));
+            return point.0 >= origin.0 - radius
+                && point.0 <= origin.0 + width + radius
+                && point.1 >= origin.1 - radius
+                && point.1 <= origin.1 + height + radius;
+        }
+        crate::editor::model::mark_hits_eraser(mark, point, radius)
     }
 
     /// The toolbar entry under a DIP point.
@@ -1834,43 +1955,46 @@ impl EditorState {
         for (index, rect) in self.layout.widths.iter().enumerate() {
             let selected = (WIDTHS[index] - self.width).abs() < 0.01;
             let hovered = self.hover == Some(Hit::Width(index));
-            self.paint_button(*rect, selected, hovered);
-            let center = rect.center();
-            let (y, half) = (center.1, 9.0);
+            // Keep the button unfilled when selected so the dot's real size
+            // stays readable; the accent ring marks the choice instead.
+            self.paint_button(*rect, false, hovered);
+            if selected {
+                let ring = D2D1_ELLIPSE {
+                    point: Vector2 {
+                        X: rect.center().0,
+                        Y: rect.center().1,
+                    },
+                    radiusX: rect.width() * 0.5 - 1.2,
+                    radiusY: rect.height() * 0.5 - 1.2,
+                };
+                // SAFETY: the brush and the render target are alive.
+                unsafe {
+                    self.assets
+                        .rt
+                        .DrawEllipse(&ring, &self.chrome.accent, 2.0, None);
+                }
+            }
+            // A dot whose diameter follows the stroke weight reads at a glance:
+            // 4/8/12 source pixels, scaled 1.25x so the 4 px dot stays visible.
+            let diameter = (WIDTHS[index] * 1.25).min(rect.height() - 10.0);
+            let disc = D2D1_ELLIPSE {
+                point: Vector2 {
+                    X: rect.center().0,
+                    Y: rect.center().1,
+                },
+                radiusX: diameter * 0.5,
+                radiusY: diameter * 0.5,
+            };
             let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.ink);
             let outline = if selected {
-                &self.chrome.white
+                &self.chrome.accent
             } else {
                 &self.chrome.ink_dim
             };
             // SAFETY: the render target is in a draw and the brushes are alive.
             unsafe {
-                self.assets.rt.DrawLine(
-                    Vector2 {
-                        X: center.0 - half,
-                        Y: y,
-                    },
-                    Vector2 {
-                        X: center.0 + half,
-                        Y: y,
-                    },
-                    outline,
-                    WIDTHS[index] + 2.0,
-                    Some(&self.surface.stroke_round),
-                );
-                self.assets.rt.DrawLine(
-                    Vector2 {
-                        X: center.0 - half,
-                        Y: y,
-                    },
-                    Vector2 {
-                        X: center.0 + half,
-                        Y: y,
-                    },
-                    brush,
-                    WIDTHS[index],
-                    Some(&self.surface.stroke_round),
-                );
+                self.assets.rt.FillEllipse(&disc, brush);
+                self.assets.rt.DrawEllipse(&disc, outline, 1.0, None);
             }
         }
     }
@@ -2066,8 +2190,13 @@ impl EditorState {
         let rt = &self.assets.rt;
         let stroke = &self.surface.stroke_round;
         // The arrow glyph sits in a 14x14 part of Lucide's 24x24 grid, so it is
-        // grown a little to share the optical size of the rectangle and grid.
-        let design_scale = if index == 0 { 1.12 } else { 1.0 };
+        // grown a little to share the optical size of the rectangle and grid;
+        // the filled eraser is compact, so it gets a slightly bigger box too.
+        let design_scale = match index {
+            0 => 1.12,
+            3 => 1.2,
+            _ => 1.0,
+        };
         let scale = ICON_BOX / ICON_DESIGN * design_scale;
         let width = ICON_STROKE * ICON_BOX / ICON_DESIGN;
         let point = |x: f32, y: f32| Vector2 {
@@ -2126,22 +2255,41 @@ impl EditorState {
                 line((19.0, 4.0), (20.0, 5.0));
                 line((20.0, 5.0), (20.0, 7.0));
             }
-            // Lucide `grid-3x3`: rect 3 3 18 18 rx2 with lines at 9 and 15.
-            3 => {
-                let frame = box_rect(3.0, 3.0, 18.0, 18.0);
+            // Lucide `eye-off` for the mosaic/redaction tool: an eye with a
+            // slash, drawn as an oval, a pupil and the slash.
+            4 => {
+                let eye = D2D1_ELLIPSE {
+                    point: point(12.0, 12.0),
+                    radiusX: 9.2 * scale,
+                    radiusY: 5.8 * scale,
+                };
+                let pupil = D2D1_ELLIPSE {
+                    point: point(12.0, 12.0),
+                    radiusX: 2.4 * scale,
+                    radiusY: 2.4 * scale,
+                };
                 // SAFETY: the render target is in a draw and the brush is alive.
                 unsafe {
-                    rt.DrawRoundedRectangle(
-                        &rounded(frame, 2.0 * scale),
+                    rt.DrawEllipse(&eye, brush, width, Some(stroke));
+                    rt.DrawEllipse(&pupil, brush, width, Some(stroke));
+                }
+                line((2.0, 2.0), (22.0, 22.0));
+            }
+            // Lucide `eraser`, drawn with the same outline and sleeve stroke.
+            3 => {
+                let transform = Matrix3x2::scale(scale, scale)
+                    * Matrix3x2::translation(cx - 12.0 * scale, cy - 12.0 * scale);
+                // SAFETY: the render target is in a draw and the brush is alive.
+                unsafe {
+                    rt.SetTransform(&transform);
+                    rt.DrawGeometry(
+                        &self.surface.eraser,
                         brush,
-                        width,
+                        width / scale.max(0.0001),
                         Some(stroke),
                     );
+                    rt.SetTransform(&Matrix3x2::identity());
                 }
-                line((3.0, 9.0), (21.0, 9.0));
-                line((3.0, 15.0), (21.0, 15.0));
-                line((9.0, 3.0), (9.0, 21.0));
-                line((15.0, 3.0), (15.0, 21.0));
             }
             _ => {}
         }
@@ -2669,6 +2817,29 @@ impl<'a> Painter<'a> {
                     self.rt.DrawRectangle(&d, brush, outline, Some(self.dash));
                 }
             }
+            Tool::Eraser => {
+                // A dashed eraser disc at the pointer. A dark ring under the
+                // white dashes keeps it visible on light and dark pictures.
+                let radius = ERASER_RADIUS_DIP / scale.max(0.0001);
+                let disc = D2D1_ELLIPSE {
+                    point: Vector2 {
+                        X: drag.current.0,
+                        Y: drag.current.1,
+                    },
+                    radiusX: radius,
+                    radiusY: radius,
+                };
+                let width = (1.5 / scale.max(0.0001)).max(0.8);
+                // SAFETY: the brushes and the target are alive.
+                unsafe {
+                    if let Some(dark) = self.assets.brush(0x00_00_00) {
+                        self.rt.DrawEllipse(&disc, dark, width * 2.0, None);
+                    }
+                    if let Some(white) = self.assets.brush(0xFF_FF_FF) {
+                        self.rt.DrawEllipse(&disc, white, width, Some(self.dash));
+                    }
+                }
+            }
             Tool::Text => {}
         }
     }
@@ -2827,6 +2998,8 @@ struct Surface {
     stroke_round: ID2D1StrokeStyle,
     stroke_dash: ID2D1StrokeStyle,
     triangle: ID2D1Geometry,
+    /// Solid eraser glyph (two slanted quads with a sleeve gap), in design units.
+    eraser: ID2D1Geometry,
     targets: [Option<ID2D1Bitmap1>; 2],
     target_props: D2D1_BITMAP_PROPERTIES1,
     /// The opaque photo-plus-marks target; the window itself is transparent.
@@ -2884,6 +3057,7 @@ impl Surface {
         let stroke_round = stroke_style(&factory, D2D1_DASH_STYLE_SOLID, None)?;
         let stroke_dash = stroke_style(&factory, D2D1_DASH_STYLE_CUSTOM, Some(&[4.0, 3.0]))?;
         let triangle = create_triangle(&factory)?;
+        let eraser = create_eraser(&factory)?;
         let dwrite = create_dwrite()?;
         let shadow = crate::render::bake_card_shadow(&context, dpi_f, 20.0, 5.0)
             .map_err(|error| format!("bake card shadow: {error}"))?;
@@ -2898,6 +3072,7 @@ impl Surface {
             stroke_round,
             stroke_dash,
             triangle,
+            eraser,
             targets: [None, None],
             target_props,
             card: None,
@@ -3286,6 +3461,51 @@ fn create_triangle(factory: &ID2D1Factory) -> Result<ID2D1Geometry, String> {
         sink.EndFigure(D2D1_FIGURE_END_CLOSED);
         sink.Close()
             .map_err(|error| format!("PathGeometry::Close: {error}"))?;
+    }
+    geometry
+        .cast()
+        .map_err(|error| format!("ID2D1PathGeometry -> ID2D1Geometry: {error}"))
+}
+
+/// Lucide `eraser` (ISC), traced with the same arcs as its SVG `d` attribute:
+/// a slanted rounded block with a flat bottom and a sleeve band.
+fn create_eraser(factory: &ID2D1Factory) -> Result<ID2D1Geometry, String> {
+    // SAFETY: the factory is alive; the sink is opened and closed before the
+    // geometry is used.
+    let geometry = unsafe { factory.CreatePathGeometry() }
+        .map_err(|error| format!("CreatePathGeometry(eraser): {error}"))?;
+    let arc = |x: f32, y: f32| D2D1_ARC_SEGMENT {
+        point: Vector2 { X: x, Y: y },
+        size: D2D_SIZE_F {
+            width: 2.0,
+            height: 2.0,
+        },
+        rotationAngle: 0.0,
+        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+        arcSize: D2D1_ARC_SIZE_SMALL,
+    };
+    // SAFETY: `geometry` and its sink are live for the calls.
+    unsafe {
+        let sink = geometry
+            .Open()
+            .map_err(|error| format!("PathGeometry::Open(eraser): {error}"))?;
+        sink.BeginFigure(Vector2 { X: 21.0, Y: 21.0 }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(Vector2 { X: 8.0, Y: 21.0 });
+        sink.AddArc(&arc(6.58, 20.41));
+        sink.AddLine(Vector2 { X: 2.59, Y: 16.41 });
+        sink.AddArc(&arc(2.59, 13.59));
+        sink.AddLine(Vector2 { X: 12.59, Y: 3.59 });
+        sink.AddArc(&arc(15.41, 3.59));
+        sink.AddLine(Vector2 { X: 21.41, Y: 9.59 });
+        sink.AddArc(&arc(21.41, 12.41));
+        sink.AddLine(Vector2 { X: 12.83, Y: 21.0 });
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        // The sleeve band is a second, open stroke.
+        sink.BeginFigure(Vector2 { X: 5.08, Y: 11.09 }, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(Vector2 { X: 13.91, Y: 19.92 });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close()
+            .map_err(|error| format!("PathGeometry::Close(eraser): {error}"))?;
     }
     geometry
         .cast()

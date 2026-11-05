@@ -119,8 +119,11 @@ no changed text plays the same flight instead of closing in place. See `PLAN.md`
 title bar or caption buttons, an enlarged white-glass card (4 DIP frame, 16 DIP
 radius, clothespin, baked nine-patch shadow) and five floating glass pills 18
 DIP outside the card, their controls concentric with the pill (circular tools,
-colour dots and widths; stadium action buttons), and the tool glyphs imported
-from Lucide (ISC/MIT, `assets/icons/`). The photo and marks render into an opaque card bitmap
+colour dots and widths; stadium action buttons), and five tool glyphs imported
+from Lucide (ISC/MIT, `assets/icons/`): arrow, rectangle, text, eraser and
+`eye-off` for the mosaic. The eraser removes whole marks under a 14 DIP disc
+(one undo step per drag, Esc cancels); line widths are 4/8/12 dots. The photo
+and marks render into an opaque card bitmap
 (ClearType) composited through a rounded mask; the window itself uses a
 premultiplied swap chain. Opening from a card grows the thumb out of its slot
 and shows the editor on landing; clicking outside the card, losing focus,

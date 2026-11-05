@@ -21,6 +21,12 @@
   preview (up to 720 px) back onto the line, while Esc cancels and flies the
   untouched picture home. The source card is hidden for the whole edit, so the
   line never shows a second copy. See `docs/BEHAVIOR.md` §11.
+- The annotation toolbar has a fifth tool: an **eraser** (fourth in the row)
+  removes whole marks under its 14 DIP disc, a drag counts as one undo step and
+  Esc cancels the stroke. The mosaic moved to fifth and now uses Lucide's
+  `eye-off` glyph. The three line widths are shown as 4/8/12 dots instead of
+   lines, and the selected width gets a ring rather than a fill so the dot's
+   size stays readable.
 - Restored cards now remember the picture's real pixel size instead of the
   thumbnail's, so their aspect ratio, the annotation flight and the editor
   layout are right after a restart.
