@@ -127,17 +127,15 @@ struct Item {
     captured_at: f64,
 }
 
-/// A capture that is being annotated before it hangs (`Ctrl+Alt+S`).
+/// A picture that is being annotated. `card` is set when the editor was opened
+/// from the card's Annotate command: the saved PNG then replaces that card's
+/// file and the card reloads in place. Without a card (the `--editor-demo`
+/// check) the saved picture hangs as a new capture.
 struct EditingCapture {
     path: PathBuf,
+    card: Option<CardId>,
     own: bool,
     area: Option<RectI>,
-    /// The Windows-saved copy of the same screenshot, when one appears while
-    /// the editor is open: the edit is written there instead (BEHAVIOR §9.5).
-    twin: Option<PathBuf>,
-    /// The thumbnail as it was before the edit, used to recognise a copy that
-    /// reached the line before the editor opened.
-    original: ImageData,
 }
 
 /// A capture seen in the last few seconds, kept for twin merging.
@@ -1188,6 +1186,7 @@ impl App {
         match next {
             CardAction::Copy => self.copy_item(id),
             CardAction::Open => self.open_item(id),
+            CardAction::Annotate => self.annotate_item(id),
             CardAction::Edit => self.edit_item(id),
             CardAction::Reveal => {
                 if let Some(item) = self.items.iter().find(|item| item.id == id) {
@@ -1872,17 +1871,6 @@ impl App {
             .find(|item| Self::is_twin_candidate(item, own, size_px, thumb_hash, now))
             .map(|item| item.path.clone());
         let twin = line_twin.or(twin);
-        // A Windows-saved copy of the picture being edited is the twin: the
-        // edit is written there instead of leaving a duplicate (BEHAVIOR §9.5).
-        if let Some(twin_path) = twin.as_ref() {
-            if let Some(editing) = self.editing.as_mut() {
-                if twin_path == &editing.path {
-                    logging::trace(format!("editor twin: {}", path.display()));
-                    editing.twin = Some(path);
-                    return;
-                }
-            }
-        }
         if let Some(twin) = twin {
             if self.resolve_twin(&path, own, &twin) {
                 return;
@@ -2564,17 +2552,34 @@ impl App {
 
     // ---- annotation editor ------------------------------------------------
 
-    /// Opens the annotation editor for a capture that must be marked up before
-    /// it hangs (`Ctrl+Alt+S`). Falls back to hanging the raw capture.
-    #[allow(clippy::too_many_arguments)]
-    fn open_editor_for(
-        &mut self,
-        path: PathBuf,
-        own: bool,
-        area: Option<RectI>,
-        size_px: (u32, u32),
-        thumb: ImageData,
-    ) {
+    /// Opens the annotation window for a picture that is already hanging. The
+    /// saved PNG replaces that card's file and the card reloads in place; a
+    /// cancel leaves the file untouched (BEHAVIOR §9.5, §11).
+    fn annotate_item(&mut self, id: CardId) {
+        if self.editor.is_some() {
+            logging::trace("annotate ignored: an editor is already open");
+            return;
+        }
+        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+            return;
+        };
+        // Notes keep the old "Edit" verb: they belong in Notepad, not in the
+        // picture annotation window.
+        if item.note {
+            self.edit_item(id);
+            return;
+        }
+        let path = item.path.clone();
+        self.open_editor(path, Some(id), false, None);
+    }
+
+    /// `--editor-demo`: opens the editor on a generated picture. Without a card
+    /// the saved picture hangs as a new capture.
+    fn open_editor_for(&mut self, path: PathBuf, own: bool, area: Option<RectI>) {
+        self.open_editor(path, None, own, area);
+    }
+
+    fn open_editor(&mut self, path: PathBuf, card: Option<CardId>, own: bool, area: Option<RectI>) {
         let dpi = self.screen_dpi().unwrap_or(96);
         let tx = self.events_tx.clone();
         let notify = Box::new(move |event: EditorEvent| {
@@ -2586,90 +2591,91 @@ impl App {
                 logging::trace(format!("editor opened for {}", path.display()));
                 self.editor = Some(editor);
                 self.editing = Some(EditingCapture {
-                    path: path.clone(),
+                    path,
+                    card,
                     own,
                     area,
-                    twin: None,
-                    original: thumb,
-                });
-                self.recent.retain(|recent| recent.path != path);
-                self.recent.push(Recent {
-                    at: win32::now_seconds(),
-                    path,
-                    own,
                 });
                 self.hide_preview();
             }
-            Err(error) => {
-                logging::error(format!("editor: {error}"));
-                // The capture must still hang: a broken editor may not eat it.
-                let id = self.alloc_id();
-                self.add_item(
-                    id, path, own, size_px, thumb, area, true, false, false, 0, None,
-                );
-                self.present();
-                self.reveal(false, PEEK_SECONDS);
-            }
+            Err(error) => logging::error(format!("editor: {error}")),
         }
     }
 
     fn on_editor_saved(&mut self, png: Vec<u8>, now: f64) {
         let Some(editing) = self.editing.take() else {
-            logging::error("editor saved without an open capture");
+            logging::error("editor saved without an open picture");
             return;
         };
-        let mut target = editing.twin.clone().unwrap_or_else(|| editing.path.clone());
-        let mut replaced_card = false;
-        if editing.twin.is_none() {
-            // A copy may have reached the line before the editor opened; write
-            // over that one instead of hanging a duplicate.
-            let original_hash = Self::image_hash(&editing.original);
-            if let Some(existing) = self.items.iter_mut().find(|item| {
-                !item.note
-                    && item.path != editing.path
-                    && Self::image_hash(&item.thumb) == original_hash
-            }) {
-                target = existing.path.clone();
-                // Force the one-second reload to pick the new pixels up.
-                existing.last_write = UNIX_EPOCH;
-                replaced_card = true;
-            }
-        }
+        let target = editing.path;
         if let Err(error) = wic::write_png_bytes(&target, &png) {
             logging::error(format!("editor save {}: {error}", target.display()));
             return;
         }
-        if target != editing.path {
-            if let Err(error) = std::fs::remove_file(&editing.path) {
-                logging::error(format!(
-                    "editor twin remove {}: {error}",
-                    editing.path.display()
-                ));
-            }
-        }
+        // The watcher may see the same file if the card lives in the screenshots
+        // folder; the edit must refresh the existing card, never hang a twin.
         self.recently_saved.push((target.clone(), now));
-        self.recent
-            .retain(|recent| recent.path != editing.path && recent.path != target);
-        if replaced_card {
-            logging::trace(format!("editor wrote over {}", target.display()));
+        if let Some(id) = editing.card {
+            self.reload_item_picture(id, &target);
             return;
         }
-        let own = target.starts_with(win32::inbox_dir());
+        self.recent.retain(|recent| recent.path != target);
+        let own = editing.own || target.starts_with(win32::inbox_dir());
         self.spawn_capture(target, own, editing.area);
+    }
+
+    /// Re-decodes one card's picture after the annotation editor wrote it.
+    fn reload_item_picture(&mut self, id: CardId, path: &Path) {
+        let thumb_max = self.thumb_max();
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            // The one-second disk poll must not decode the same file again.
+            item.last_write = std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(UNIX_EPOCH);
+        }
+        let tx = self.events_tx.clone();
+        let path = path.to_path_buf();
+        let _ = std::thread::Builder::new()
+            .name("pegline-editor-reload".to_string())
+            .spawn(move || {
+                let _com =
+                    match window::ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED)
+                    {
+                        Ok(guard) => guard,
+                        Err(error) => {
+                            logging::error(format!("editor reload COM: {error}"));
+                            return;
+                        }
+                    };
+                match wic::decode_scaled(&path, thumb_max) {
+                    Ok(image) => {
+                        let _ = tx.send(Event::ThumbnailReady {
+                            id,
+                            image,
+                            text: None,
+                        });
+                        window::wake(HWND::default());
+                    }
+                    Err(error) => logging::error(format!("reload {}: {error}", path.display())),
+                }
+            });
     }
 
     fn on_editor_cancelled(&mut self) {
         let Some(editing) = self.editing.take() else {
             return;
         };
+        // An existing card keeps its file: cancelling an annotation changes
+        // nothing. Only a demo capture may own a file to clean up.
+        if editing.card.is_some() || !editing.own {
+            return;
+        }
         self.recent.retain(|recent| recent.path != editing.path);
-        if editing.own {
-            if let Err(error) = std::fs::remove_file(&editing.path) {
-                logging::error(format!(
-                    "editor cancel remove {}: {error}",
-                    editing.path.display()
-                ));
-            }
+        if let Err(error) = std::fs::remove_file(&editing.path) {
+            logging::error(format!(
+                "editor cancel remove {}: {error}",
+                editing.path.display()
+            ));
         }
     }
 
@@ -2971,8 +2977,12 @@ impl App {
     }
 
     fn show_card_menu(&mut self, id: CardId, x: i32, y: i32) -> Option<CardAction> {
-        let own = self.items.iter().find(|item| item.id == id)?.own;
+        let item = self.items.iter().find(|item| item.id == id)?;
+        let (own, note) = (item.own, item.note);
         let strings = i18n::s();
+        // Notes keep "Edit" (Notepad); pictures get "Annotate", which opens the
+        // same window as the old Ctrl+Alt+S capture flow.
+        let middle = if note { strings.edit } else { strings.annotate };
         // SAFETY: menus are created and destroyed on this thread.
         unsafe {
             let menu = CreatePopupMenu().ok()?;
@@ -2982,7 +2992,7 @@ impl App {
             };
             add(strings.copy, 1);
             add(strings.open, 2);
-            add(strings.edit, 3);
+            add(middle, 3);
             add(strings.show_in_explorer, 4);
             if own {
                 add(strings.save_to_desktop, 5);
@@ -3011,7 +3021,11 @@ impl App {
             match chosen.0 as usize {
                 1 => Some(CardAction::Copy),
                 2 => Some(CardAction::Open),
-                3 => Some(CardAction::Edit),
+                3 => Some(if note {
+                    CardAction::Edit
+                } else {
+                    CardAction::Annotate
+                }),
                 4 => Some(CardAction::Reveal),
                 5 => Some(CardAction::SaveDesktop),
                 6 => Some(CardAction::Discard),
@@ -3138,7 +3152,8 @@ impl App {
     }
 
     /// `--editor-demo`: a generated picture in the real annotation editor, so
-    /// the window, the GPU stack and the toolbar can be checked without a snip.
+    /// the window, the GPU stack and the toolbar can be checked without a real
+    /// capture.
     /// `--editor-hold` keeps it open for interactive (manual or scripted)
     /// checks instead of the four-second smoke test.
     fn install_editor_demo(&mut self) {
@@ -3171,8 +3186,7 @@ impl App {
             logging::error(format!("editor demo write: {error}"));
             return;
         }
-        let thumb = image;
-        self.open_editor_for(path, false, None, (w, h), thumb);
+        self.open_editor_for(path, false, None);
         let hold = std::env::args().any(|arg| arg == "--editor-hold");
         self.editor_demo_at = if hold {
             None
@@ -3297,6 +3311,7 @@ impl App {
 enum CardAction {
     Copy,
     Open,
+    Annotate,
     Edit,
     Reveal,
     SaveDesktop,
@@ -3502,6 +3517,61 @@ mod tests {
             let value = pseudo_random(id);
             assert!((0.0..=1.0).contains(&value));
         }
+    }
+
+    #[test]
+    fn annotating_a_card_writes_in_place_and_reloads_it() {
+        let _com = window::ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED)
+            .expect("COM initialization for the WIC test");
+        let dir = std::env::temp_dir().join(format!(
+            "pegline-annotate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("card.png");
+        let before = ImageData::new(2, 2, vec![255u8; 2 * 2 * 4]);
+        let encoded = wic::encode_png_bytes(&before).expect("encode before");
+        wic::write_png_bytes(&path, &encoded).expect("write before");
+
+        let mut app = App::new();
+        let mut card = twin_card(false, 0.0, before);
+        card.path = path.clone();
+        app.items.push(card);
+        app.editing = Some(EditingCapture {
+            path: path.clone(),
+            card: Some(1),
+            own: false,
+            area: None,
+        });
+
+        let after = ImageData::new(3, 2, vec![255u8; 3 * 2 * 4]);
+        let marked = wic::encode_png_bytes(&after).expect("encode after");
+        app.on_editor_saved(marked, 1.0);
+
+        assert!(app.editing.is_none(), "the edit must finish");
+        assert_eq!(app.items.len(), 1, "an annotation must not hang a twin");
+        assert_eq!(
+            wic::pixel_size(&path).expect("saved file"),
+            (3, 2),
+            "the marked PNG must replace the file in place"
+        );
+        let event = app
+            .events_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reload event");
+        match event {
+            Event::ThumbnailReady { id, image, text } => {
+                assert_eq!(id, 1);
+                assert_eq!((image.width, image.height), (3, 2));
+                assert!(text.is_none());
+            }
+            _ => panic!("the editor save must reload the card thumbnail"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn twin_card(own: bool, captured_at: f64, thumb: ImageData) -> Item {

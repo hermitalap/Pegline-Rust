@@ -81,13 +81,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW, HTCLIENT, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW, MINMAXINFO,
-    PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_SETCURSOR, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetCursorPos, GetWindowLongPtrW, HICON, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_CROSS, IDC_HAND,
+    IDC_IBEAM, LoadCursorW, MINMAXINFO, PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
+    SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_SIZE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -124,8 +125,11 @@ const CLIENT_HEIGHT_DIP: f32 = 760.0;
 const MIN_WIDTH_DIP: f32 = 720.0;
 const MIN_HEIGHT_DIP: f32 = 520.0;
 /// Toolbar height and picture margin, DIP.
-const TOOLBAR_HEIGHT: f32 = 52.0;
-const CANVAS_MARGIN: f32 = 12.0;
+const TOOLBAR_HEIGHT: f32 = 58.0;
+const CANVAS_MARGIN: f32 = 16.0;
+/// Above this client width the toolbar uses the roomy metrics; below it the
+/// compact set keeps every group inside the 720 DIP minimum window.
+const WIDE_TOOLBAR: f32 = 960.0;
 /// Side of one mosaic block in source pixels (BEHAVIOR §11).
 const MOSAIC_BLOCK: u32 = 16;
 /// Text marks are 32 source pixels tall, SemiBold, like the WPF text box.
@@ -134,17 +138,8 @@ const TEXT_SIZE: f32 = 32.0;
 const MOSAIC_CACHE: usize = 16;
 
 // Toolbar geometry, DIP. Hit rectangles and drawing share `toolbar_layout`.
-const TOOL_SIZE: f32 = 34.0;
-const TOOL_GAP: f32 = 3.0;
-const SWATCH_SIZE: f32 = 22.0;
-const SWATCH_GAP: f32 = 4.0;
-const WIDTH_SIZE: f32 = 30.0;
-const WIDTH_GAP: f32 = 2.0;
-const DIVIDER: f32 = 13.0;
-const EDGE: f32 = 8.0;
-const ACTION_GAP: f32 = 4.0;
-const BUTTON_HEIGHT: f32 = 34.0;
-const BUTTON_RADIUS: f32 = 5.0;
+const BUTTON_RADIUS: f32 = 7.0;
+const ICON_STROKE: f32 = 2.2;
 
 /// Toolbar chrome colours.
 const CHROME_TOOLBAR: u32 = 0x25_25_26;
@@ -166,6 +161,8 @@ pub struct Editor {
     hwnd: HWND,
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
+    /// The icons installed with `WM_SETICON`; the window does not own them.
+    icons: Vec<HICON>,
 }
 
 impl Editor {
@@ -360,6 +357,28 @@ impl Editor {
             }
         }
 
+        // The title bar and Alt-Tab need an icon; the window class has none, so
+        // the embedded Pegline icon is installed on this window. The handles
+        // stay alive until `shutdown` destroys the window.
+        let mut icons = Vec::with_capacity(2);
+        for (kind, size) in [
+            (ICON_BIG, win32::large_icon_size()),
+            (ICON_SMALL, win32::small_icon_size()),
+        ] {
+            if let Some(icon) = win32::load_app_icon(size) {
+                // SAFETY: our own window and live icon handles.
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        WM_SETICON,
+                        Some(WPARAM(kind as usize)),
+                        Some(LPARAM(icon.0 as isize)),
+                    );
+                }
+                icons.push(icon);
+            }
+        }
+
         // SAFETY: the window was created on this thread and has finished setup;
         // taking focus is wanted here, unlike the overlay.
         unsafe {
@@ -382,6 +401,7 @@ impl Editor {
             hwnd,
             shared,
             join: Some(join),
+            icons,
         })
     }
 
@@ -408,6 +428,13 @@ impl Editor {
             // the window; destroying it releases the DirectComposition target.
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
+            }
+        }
+        for icon in self.icons.drain(..) {
+            // SAFETY: the window was destroyed above and the handle came from
+            // `LoadImageW` in `open`.
+            unsafe {
+                let _ = DestroyIcon(icon);
             }
         }
     }
@@ -626,32 +653,10 @@ unsafe extern "system" fn editor_wndproc(
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_xy(lparam);
-            // Remember whether the click selected the Text tool, so the canvas
-            // can show an I-beam instead of a cross. Tool buttons live at fixed
-            // positions, independent of the label widths.
-            // SAFETY: pure query on our own window.
-            let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
-            let (dx, dy) = (x as f32 / scale, y as f32 / scale);
-            let top = (TOOLBAR_HEIGHT - BUTTON_HEIGHT) * 0.5;
-            if dy >= top && dy < top + BUTTON_HEIGHT {
-                let step = TOOL_SIZE + TOOL_GAP;
-                for index in 0..4 {
-                    let left = EDGE + index as f32 * step;
-                    if dx >= left && dx < left + TOOL_SIZE {
-                        shared.text_tool.store(index == 2, Ordering::Release);
-                        break;
-                    }
-                }
-            }
-            // If the Text tool is armed, publish the caret in client pixels
-            // before the renderer has painted; IME composition can start on the
-            // next keystroke.
-            if shared.text_tool.load(Ordering::Acquire) && dy > TOOLBAR_HEIGHT {
-                shared.caret_x.store(x.max(0), Ordering::Relaxed);
-                shared
-                    .caret_y
-                    .store((y + (42.0 * scale) as i32).max(0), Ordering::Relaxed);
-            }
+            // The render thread owns the tool state and decides what the click
+            // hit; it publishes the Text-tool flag that drives the I-beam and
+            // the IME caret. Keeping the hit math in one place means the
+            // responsive toolbar geometry cannot drift from input.
             shared.captured.store(true, Ordering::Release);
             // SAFETY: capturing the mouse for our own window.
             unsafe { SetCapture(hwnd) };
@@ -1060,7 +1065,6 @@ struct LabelWidths {
 
 /// Every text layout the toolbar draws. Created once per surface.
 struct Labels {
-    tools: [Label; 4],
     undo: Label,
     redo: Label,
     cancel: Label,
@@ -1080,12 +1084,6 @@ impl Labels {
         )
         .or_else(|_| create_format(dwrite, font::UI_FAMILY, 17.0, DWRITE_FONT_WEIGHT_MEDIUM))?;
         Ok(Self {
-            tools: [
-                label(dwrite, &glyph, "\u{2197}")?,
-                label(dwrite, &glyph, "\u{25A1}")?,
-                label(dwrite, &glyph, "T")?,
-                label(dwrite, &glyph, "\u{25A6}")?,
-            ],
             undo: label(dwrite, &ui, strings.undo)?,
             redo: label(dwrite, &ui, strings.redo)?,
             cancel: label(dwrite, &ui, strings.cancel)?,
@@ -1115,8 +1113,61 @@ struct ToolbarLayout {
     redo: RectF,
     cancel: RectF,
     save: RectF,
+    /// Vertical group separators: after the tools, after the colours and
+    /// between undo/redo and Cancel/Save.
+    separators: [f32; 3],
     /// Undo/redo show glyphs instead of labels on a narrow window.
     compact: bool,
+}
+
+/// One density of the toolbar. The wide set is airy on the 1120 DIP default
+/// window; the compact set still fits the 720 DIP minimum with room to spare.
+#[derive(Clone, Copy, Debug)]
+struct ToolbarMetrics {
+    edge: f32,
+    tool_size: f32,
+    tool_gap: f32,
+    swatch_size: f32,
+    swatch_gap: f32,
+    width_size: f32,
+    width_gap: f32,
+    /// Space on each side of a group separator.
+    group_gap: f32,
+    action_gap: f32,
+    button_height: f32,
+    compact: bool,
+}
+
+fn toolbar_metrics(width_dip: f32) -> ToolbarMetrics {
+    if width_dip >= WIDE_TOOLBAR {
+        ToolbarMetrics {
+            edge: 16.0,
+            tool_size: 38.0,
+            tool_gap: 4.0,
+            swatch_size: 26.0,
+            swatch_gap: 6.0,
+            width_size: 34.0,
+            width_gap: 4.0,
+            group_gap: 14.0,
+            action_gap: 8.0,
+            button_height: 38.0,
+            compact: false,
+        }
+    } else {
+        ToolbarMetrics {
+            edge: 8.0,
+            tool_size: 34.0,
+            tool_gap: 3.0,
+            swatch_size: 22.0,
+            swatch_gap: 4.0,
+            width_size: 30.0,
+            width_gap: 2.0,
+            group_gap: 8.0,
+            action_gap: 6.0,
+            button_height: 34.0,
+            compact: true,
+        }
+    }
 }
 
 /// Where the picture goes, in DIP, and the source-pixel to DIP scale.
@@ -1556,6 +1607,12 @@ impl EditorState {
             Action::Tool(index) => {
                 if let Some(tool) = TOOLS.get(index) {
                     self.tool = *tool;
+                    // The UI thread reads this for the I-beam and the IME
+                    // caret; publishing it here keeps the toolbar geometry in
+                    // one place.
+                    self.shared
+                        .text_tool
+                        .store(*tool == Tool::Text, Ordering::Release);
                     self.dirty = true;
                 }
             }
@@ -1698,6 +1755,28 @@ impl EditorState {
                 None,
             );
         }
+        // Group separators are the quiet structure of the bar: 1 DIP lines with
+        // more air around them than the buttons have inside a group.
+        let separator_top = (TOOLBAR_HEIGHT - 22.0) * 0.5;
+        for x in self.layout.separators {
+            let x = x.floor() + 0.5;
+            // SAFETY: the render target is in a draw and the brush is ours.
+            unsafe {
+                rt.DrawLine(
+                    Vector2 {
+                        X: x,
+                        Y: separator_top,
+                    },
+                    Vector2 {
+                        X: x,
+                        Y: separator_top + 22.0,
+                    },
+                    &self.chrome.separator,
+                    1.0,
+                    None,
+                );
+            }
+        }
         for (index, rect) in self.layout.tools.iter().enumerate() {
             let selected = TOOLS[index] == self.tool;
             self.paint_button(
@@ -1711,11 +1790,11 @@ impl EditorState {
             } else {
                 &self.chrome.text
             };
-            self.paint_label(&self.labels.tools[index], *rect, brush);
+            self.paint_tool_icon(index, *rect, brush);
         }
         for (index, rect) in self.layout.colors.iter().enumerate() {
             let rgb = COLORS[index].0;
-            let rounded = rounded(*rect, 4.0);
+            let rounded = rounded(*rect, 5.0);
             if let Some(brush) = self.assets.brush(rgb) {
                 // SAFETY: the brush and the render target are alive.
                 unsafe {
@@ -1759,18 +1838,40 @@ impl EditorState {
                 false,
                 self.hover == Some(Action::Width(index)),
             );
-            let radius = (WIDTHS[index] * 0.5).min(6.0);
+            // A short line preview is clearer than a dot: it shows the actual
+            // stroke weight in the selected colour. The dim outline keeps a
+            // black or white line visible on the dark toolbar.
             let center = rect.center();
-            let dot = RectF::new(
-                center.0 - radius,
-                center.1 - radius,
-                center.0 + radius,
-                center.1 + radius,
-            );
+            let (y, half) = (center.1, 9.0);
             let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.white);
-            // SAFETY: a circle is a rounded rectangle with equal radii.
+            // SAFETY: the render target is in a draw and the brushes are alive.
             unsafe {
-                rt.FillRoundedRectangle(&rounded(dot, radius), brush);
+                rt.DrawLine(
+                    Vector2 {
+                        X: center.0 - half,
+                        Y: y,
+                    },
+                    Vector2 {
+                        X: center.0 + half,
+                        Y: y,
+                    },
+                    &self.chrome.text_dim,
+                    WIDTHS[index] + 2.0,
+                    Some(&self.surface.stroke_round),
+                );
+                rt.DrawLine(
+                    Vector2 {
+                        X: center.0 - half,
+                        Y: y,
+                    },
+                    Vector2 {
+                        X: center.0 + half,
+                        Y: y,
+                    },
+                    brush,
+                    WIDTHS[index],
+                    Some(&self.surface.stroke_round),
+                );
             }
         }
         let undo_enabled = self.doc.as_ref().map(|doc| doc.can_undo()) == Some(true);
@@ -1943,6 +2044,104 @@ impl EditorState {
             self.assets
                 .rt
                 .DrawRoundedRectangle(&rounded, border, 1.0, None);
+        }
+    }
+
+    /// Draws the four tool icons as stroked geometry instead of font glyphs, so
+    /// they share one stroke weight and optical size on every Windows version.
+    fn paint_tool_icon(&self, index: usize, rect: RectF, brush: &ID2D1SolidColorBrush) {
+        let (cx, cy) = rect.center();
+        let rt = &self.assets.rt;
+        let stroke = &self.surface.stroke_round;
+        // SAFETY: the render target is in a draw, the brush is alive and the
+        // stroke style belongs to the surface.
+        unsafe {
+            match index {
+                // Arrow: one diagonal shaft and two axis-aligned head wings.
+                0 => {
+                    let tip = Vector2 {
+                        X: cx + 7.0,
+                        Y: cy - 7.0,
+                    };
+                    rt.DrawLine(
+                        Vector2 {
+                            X: cx - 7.0,
+                            Y: cy + 7.0,
+                        },
+                        tip,
+                        brush,
+                        ICON_STROKE,
+                        Some(stroke),
+                    );
+                    rt.DrawLine(
+                        tip,
+                        Vector2 {
+                            X: tip.X - 6.0,
+                            Y: tip.Y,
+                        },
+                        brush,
+                        ICON_STROKE,
+                        Some(stroke),
+                    );
+                    rt.DrawLine(
+                        tip,
+                        Vector2 {
+                            X: tip.X,
+                            Y: tip.Y + 6.0,
+                        },
+                        brush,
+                        ICON_STROKE,
+                        Some(stroke),
+                    );
+                }
+                // Rectangle.
+                1 => {
+                    let frame = RectF::from_xywh(cx - 8.0, cy - 6.0, 16.0, 12.0);
+                    rt.DrawRoundedRectangle(&rounded(frame, 2.5), brush, 2.0, Some(stroke));
+                }
+                // Text: a capital T drawn from two round-capped strokes.
+                2 => {
+                    rt.DrawLine(
+                        Vector2 {
+                            X: cx - 7.0,
+                            Y: cy - 6.5,
+                        },
+                        Vector2 {
+                            X: cx + 7.0,
+                            Y: cy - 6.5,
+                        },
+                        brush,
+                        2.4,
+                        Some(stroke),
+                    );
+                    rt.DrawLine(
+                        Vector2 { X: cx, Y: cy - 6.5 },
+                        Vector2 { X: cx, Y: cy + 7.0 },
+                        brush,
+                        2.4,
+                        Some(stroke),
+                    );
+                }
+                // Mosaic: a 3x3 grid of filled blocks with a visible gap.
+                3 => {
+                    let (cell, gap) = (4.6, 1.4);
+                    let span = cell * 3.0 + gap * 2.0;
+                    let left = cx - span * 0.5;
+                    let top = cy - span * 0.5;
+                    for row in 0..3 {
+                        for column in 0..3 {
+                            let block = RectF::from_xywh(
+                                left + column as f32 * (cell + gap),
+                                top + row as f32 * (cell + gap),
+                                cell,
+                                cell,
+                            );
+                            rt.FillRoundedRectangle(&rounded(block, 1.2), brush);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -2123,54 +2322,67 @@ impl EditorState {
 // ---- toolbar and canvas layout --------------------------------------------
 
 /// Places the toolbar controls in DIP; the same math drives hit testing.
+///
+/// The groups read left to right as drawing tools, colour, line width, then the
+/// action cluster (undo/redo, Cancel, Save) pinned to the right edge. The gaps
+/// inside a group are tighter than the gaps around a separator, which is what
+/// makes the grouping legible without boxes around it.
 fn toolbar_layout(width_dip: f32, widths: LabelWidths) -> ToolbarLayout {
     let width_dip = width_dip.max(1.0);
-    let top = ((TOOLBAR_HEIGHT - BUTTON_HEIGHT) * 0.5).max(0.0);
-    let swatch_top = ((TOOLBAR_HEIGHT - SWATCH_SIZE) * 0.5).max(0.0);
-    let mut x = EDGE;
+    let m = toolbar_metrics(width_dip);
+    let top = ((TOOLBAR_HEIGHT - m.button_height) * 0.5).max(0.0);
+    let swatch_top = ((TOOLBAR_HEIGHT - m.swatch_size) * 0.5).max(0.0);
+    let mut separators = [0.0; 3];
+    let mut x = m.edge;
     let mut tools = [RectF::default(); 4];
     for slot in tools.iter_mut() {
-        *slot = RectF::from_xywh(x, top, TOOL_SIZE, BUTTON_HEIGHT);
-        x += TOOL_SIZE + TOOL_GAP;
+        *slot = RectF::from_xywh(x, top, m.tool_size, m.button_height);
+        x += m.tool_size + m.tool_gap;
     }
-    x += DIVIDER;
+    x += m.group_gap;
+    separators[0] = x;
+    x += 1.0 + m.group_gap;
     let mut colors = [RectF::default(); 6];
     for slot in colors.iter_mut() {
-        *slot = RectF::from_xywh(x, swatch_top, SWATCH_SIZE, SWATCH_SIZE);
-        x += SWATCH_SIZE + SWATCH_GAP;
+        *slot = RectF::from_xywh(x, swatch_top, m.swatch_size, m.swatch_size);
+        x += m.swatch_size + m.swatch_gap;
     }
-    x += DIVIDER;
+    x += m.group_gap;
+    separators[1] = x;
+    x += 1.0 + m.group_gap;
     let mut widths_rect = [RectF::default(); 3];
     for slot in widths_rect.iter_mut() {
-        *slot = RectF::from_xywh(x, top, WIDTH_SIZE, BUTTON_HEIGHT);
-        x += WIDTH_SIZE + WIDTH_GAP;
+        *slot = RectF::from_xywh(x, top, m.width_size, m.button_height);
+        x += m.width_size + m.width_gap;
     }
-    x += DIVIDER;
 
-    let undo_width = (widths.undo + 20.0).max(54.0);
-    let redo_width = (widths.redo + 20.0).max(54.0);
-    let save_width = (widths.save + 24.0).max(58.0);
-    let cancel_width = (widths.cancel + 20.0).max(54.0);
-    let right = width_dip - EDGE;
-    let save = RectF::from_xywh(right - save_width, top, save_width, BUTTON_HEIGHT);
+    let save_width = action_width(widths.save, m.compact, true);
+    let cancel_width = action_width(widths.cancel, m.compact, false);
+    let right = width_dip - m.edge;
+    let save = RectF::from_xywh(right - save_width, top, save_width, m.button_height);
     let cancel = RectF::from_xywh(
-        save.left - ACTION_GAP - cancel_width,
+        save.left - m.action_gap - cancel_width,
         top,
         cancel_width,
-        BUTTON_HEIGHT,
+        m.button_height,
     );
-    let compact = x + undo_width + ACTION_GAP + redo_width > cancel.left - 8.0;
-    let (undo, redo) = if compact {
-        (
-            RectF::from_xywh(x, top, TOOL_SIZE, BUTTON_HEIGHT),
-            RectF::from_xywh(x + TOOL_SIZE + ACTION_GAP, top, TOOL_SIZE, BUTTON_HEIGHT),
-        )
+    separators[2] = cancel.left - m.group_gap;
+    let actions_right = separators[2] - 1.0 - m.group_gap;
+    let (undo_width, redo_width) = if m.compact {
+        (m.button_height, m.button_height)
     } else {
         (
-            RectF::from_xywh(x, top, undo_width, BUTTON_HEIGHT),
-            RectF::from_xywh(x + undo_width + ACTION_GAP, top, redo_width, BUTTON_HEIGHT),
+            (widths.undo + 24.0).max(72.0),
+            (widths.redo + 24.0).max(72.0),
         )
     };
+    let redo = RectF::from_xywh(actions_right - redo_width, top, redo_width, m.button_height);
+    let undo = RectF::from_xywh(
+        redo.left - m.action_gap - undo_width,
+        top,
+        undo_width,
+        m.button_height,
+    );
     ToolbarLayout {
         tools,
         colors,
@@ -2179,7 +2391,18 @@ fn toolbar_layout(width_dip: f32, widths: LabelWidths) -> ToolbarLayout {
         redo,
         cancel,
         save,
-        compact,
+        separators,
+        compact: m.compact,
+    }
+}
+
+/// Width of a labelled action button. Compact buttons use less side padding so
+/// the whole bar still fits the 720 DIP minimum in every language.
+fn action_width(label: f32, compact: bool, primary: bool) -> f32 {
+    if compact {
+        (label + 18.0).max(if primary { 62.0 } else { 58.0 })
+    } else {
+        (label + 26.0).max(72.0)
     }
 }
 
@@ -3166,14 +3389,25 @@ mod tests {
             assert!(rect.left >= previous);
             previous = rect.right;
         }
+        // Three separators, in left-to-right order, each between its groups.
+        assert!(layout.separators[0] > layout.tools[3].right);
+        assert!(layout.separators[0] < layout.colors[0].left);
+        assert!(layout.separators[1] > layout.colors[5].right);
+        assert!(layout.separators[1] < layout.widths[0].left);
+        assert!(layout.separators[2] > layout.redo.right);
+        assert!(layout.separators[2] < layout.cancel.left);
+        // Nothing may spill into the action cluster at the minimum width.
+        assert!(layout.widths[2].right < layout.undo.left);
     }
 
     #[test]
     fn toolbar_uses_labels_on_a_wide_window() {
         let layout = toolbar_layout(CLIENT_WIDTH_DIP, widths());
         assert!(!layout.compact);
-        assert!(layout.undo.width() > TOOL_SIZE);
+        assert!(layout.undo.width() > 34.0);
         assert!(layout.save.right <= CLIENT_WIDTH_DIP);
+        // The action cluster is right-aligned instead of trailing the styles.
+        assert!(layout.undo.left > layout.widths[2].right + 100.0);
     }
 
     #[test]
@@ -3234,8 +3468,8 @@ mod tests {
         // DIPs below it (the four DIP box padding plus the two DIP gap).
         let (x96, y96) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 96.0);
         let (x192, y192) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 192.0);
-        assert_eq!((x96, y96), (409, 278));
-        assert_eq!((x192, y192), (817, 556));
+        assert_eq!((x96, y96), (409, 281));
+        assert_eq!((x192, y192), (817, 562));
         assert!(x96 < pixels(CLIENT_WIDTH_DIP, 96));
         assert!(y96 < pixels(CLIENT_HEIGHT_DIP, 96));
         let top_px = ((canvas.image.top + 120.0 * canvas.scale) * 2.0).round() as i32;

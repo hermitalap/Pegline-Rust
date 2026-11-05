@@ -24,7 +24,9 @@ pub struct Strings {
     pub copy: &'static str,
     pub open: &'static str,
     pub copied: &'static str,
-    /// Card context menu.
+    /// Card context menu. Pictures are annotated in the editor; notes still
+    /// open in Notepad, so both verbs exist.
+    pub annotate: &'static str,
     pub edit: &'static str,
     pub show_in_explorer: &'static str,
     pub save_to_desktop: &'static str,
@@ -87,6 +89,7 @@ const EN: Strings = Strings {
     copy: "Copy",
     open: "Open",
     copied: "Copied",
+    annotate: "Annotate",
     edit: "Edit",
     show_in_explorer: "Show in Explorer",
     save_to_desktop: "Save to Desktop",
@@ -141,6 +144,7 @@ const ES: Strings = Strings {
     copy: "Copiar",
     open: "Abrir",
     copied: "Copiado",
+    annotate: "Anotar",
     edit: "Editar",
     show_in_explorer: "Mostrar en el Explorador",
     save_to_desktop: "Guardar en el Escritorio",
@@ -195,6 +199,7 @@ const ZH: Strings = Strings {
     copy: "复制",
     open: "打开",
     copied: "已复制",
+    annotate: "标注",
     edit: "编辑",
     show_in_explorer: "在资源管理器中显示",
     save_to_desktop: "保存到桌面",
@@ -297,6 +302,8 @@ mod tests {
         for strings in [&EN, &ES, &ZH] {
             assert!(!strings.hint.is_empty());
             assert!(!strings.quit.is_empty());
+            assert!(!strings.annotate.is_empty());
+            assert!(!strings.edit.is_empty());
             assert_eq!(strings.delete_caught.matches("{}").count(), 1);
             assert_eq!(strings.delete_caught_body.matches("{}").count(), 2);
             assert_eq!(strings.recycle_failed.matches("{}").count(), 1);
