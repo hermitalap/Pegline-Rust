@@ -20,6 +20,9 @@ use windows::Win32::Graphics::Gdi::{
     FW_SEMIBOLD, GetDC, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT,
 };
+use windows::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 use windows::core::PCWSTR;
 
 use crate::font;
@@ -86,7 +89,13 @@ pub fn folder() -> PathBuf {
     win32::local_dir().join("Notes")
 }
 
-/// Whether `path` is a `.txt` file inside the notes folder.
+/// Where taken-down notes go (NOTE-EDITOR.md §8.3).
+pub fn archive_folder() -> PathBuf {
+    folder().join("Archive")
+}
+
+/// Whether `path` is a `.txt` file inside the active notes folder. Files in
+/// `Notes\Archive` are taken down and must not be treated as active notes.
 pub fn is_note(path: &Path) -> bool {
     let Ok(folder) = std::fs::canonicalize(folder()) else {
         return false;
@@ -94,14 +103,19 @@ pub fn is_note(path: &Path) -> bool {
     let Ok(candidate) = std::fs::canonicalize(path) else {
         return false;
     };
+    let archived = std::fs::canonicalize(archive_folder())
+        .map(|archive| candidate.starts_with(archive))
+        .unwrap_or(false);
     candidate.starts_with(&folder)
+        && !archived
         && path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
 }
 
 /// Writes a new note and returns its file. The text is stored with a UTF-8 BOM
-/// so Notepad (and every other editor) reads Chinese correctly.
+/// and CRLF line endings so Notepad (and every other editor) reads it exactly
+/// as the WPF app wrote it.
 pub fn create(text: &str) -> Result<PathBuf, String> {
     let folder = folder();
     std::fs::create_dir_all(&folder)
@@ -118,18 +132,131 @@ pub fn create(text: &str) -> Result<PathBuf, String> {
         second
     );
     let path = unique_path(&folder, &name);
-    let mut bytes = Vec::with_capacity(text.len() + 3);
-    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-    bytes.extend_from_slice(text.as_bytes());
-    std::fs::write(&path, bytes).map_err(|error| format!("write {}: {error}", path.display()))?;
+    write_atomic(&path, text)?;
     Ok(path)
 }
 
-/// Reads a note, tolerating a BOM and any line endings.
+/// Replaces `path` atomically: a temporary file in the same directory, then
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` so a crash never leaves half a note.
+/// The bytes are UTF-8 with a BOM and CRLF line endings (NOTE-EDITOR.md §8.1).
+pub fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("note has no folder: {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    let temp = temp_path(parent);
+    let mut bytes = Vec::with_capacity(text.len() + 16);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(crate::note_editor::model::to_crlf(text).as_bytes());
+    std::fs::write(&temp, bytes).map_err(|error| format!("write {}: {error}", temp.display()))?;
+
+    let from = win32::wide(&temp.to_string_lossy());
+    let to = win32::wide(&path.to_string_lossy());
+    // SAFETY: both strings are NUL-terminated and alive for the call; the flags
+    // are the documented replace-and-flush pair.
+    let moved = unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if let Err(error) = moved {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("replace {}: {error}", path.display()));
+    }
+    Ok(())
+}
+
+/// Moves a note into `Notes\Archive`, numbering a collision. The source file is
+/// left untouched when the move fails.
+pub fn archive(path: &Path) -> Result<PathBuf, String> {
+    archive_into(path, &archive_folder())
+}
+
+fn archive_into(path: &Path, folder: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(folder)
+        .map_err(|error| format!("create {}: {error}", folder.display()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("note has no file name: {}", path.display()))?;
+    let target = unique_path(folder, &name.to_string_lossy());
+    std::fs::rename(path, &target)
+        .map_err(|error| format!("archive {}: {error}", path.display()))?;
+    Ok(target)
+}
+
+/// The plain text a note card shows: Markdown markers removed, blocks kept
+/// recognisable (a bullet for lists, a box for tasks), fences and rules gone.
+/// The file itself is never changed (NOTE-EDITOR.md §6.8).
+pub fn summary(text: &str) -> String {
+    use crate::note_editor::display::{Block, DisplayDoc};
+    let normalized = crate::note_editor::model::normalize(text);
+    let normalized = normalized.replace('\t', " ");
+    let doc = DisplayDoc::parse(&normalized);
+    let mut lines: Vec<String> = Vec::new();
+    for line in &doc.lines {
+        if line.is_fence() || matches!(line.block, Block::Rule) {
+            continue;
+        }
+        let body = line.display_text(false);
+        if body.trim().is_empty() {
+            if !lines.is_empty() && lines.last().is_some_and(|line| !line.is_empty()) {
+                lines.push(String::new());
+            }
+            continue;
+        }
+        let body = body.trim_end().to_string();
+        lines.push(match line.block {
+            Block::List {
+                ordered: true,
+                number,
+                task: Some(checked),
+            } => format!("{number}. [{}] {body}", if checked { 'x' } else { ' ' }),
+            Block::List {
+                ordered: true,
+                number,
+                task: None,
+            } => format!("{number}. {body}"),
+            Block::List {
+                task: Some(checked),
+                ..
+            } => format!("[{}] {body}", if checked { 'x' } else { ' ' }),
+            Block::List { .. } => format!("• {body}"),
+            _ => body,
+        });
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// A temporary sibling for [`write_atomic`].
+fn temp_path(parent: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..1000 {
+        let candidate = parent.join(format!(
+            ".pegline-{}-{nanos}-{attempt}.tmp",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!(".pegline-{}-{nanos}.tmp", std::process::id()))
+}
+
+/// Reads a note, tolerating a BOM and any line endings. The in-memory text is
+/// always LF so it compares with a [`Doc`](crate::note_editor::model::Doc).
 pub fn read(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    Some(text.trim_start_matches('\u{feff}').to_string())
+    Some(crate::note_editor::model::normalize(&text))
 }
 
 /// `name` in `folder`, appending a number when the file already exists.
@@ -217,13 +344,12 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
         }
     }
 
-    // Text: the layout rules are the C# ones. Short text sits large in the
-    // middle; longer text wraps, and the last visible line ends in an ellipsis.
-    let text = raw
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\t', " ");
-    let text = text.trim();
+    // Text: the card shows the rendered Markdown, not its source markers, and
+    // the layout rules are the C# ones. Short text sits large in the middle;
+    // longer text wraps, and the last visible line ends in an ellipsis.
+    let summary = summary(raw);
+    let text: String = summary.chars().take(600).collect();
+    let text = text.trim().to_string();
     let brief = text.chars().count() <= 24 && !text.contains('\n');
     let (bold, font_height, margin) = if brief {
         if text.chars().count() <= 12 {
@@ -235,17 +361,19 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
         (false, 11.5, (9.0, 7.0, 11.0, 9.0))
     };
 
-    draw_text(
-        &mut pixels,
-        width,
-        height,
-        text,
-        brief,
-        bold,
-        font_height,
-        margin,
-        palette.ink,
-    );
+    if !text.is_empty() {
+        draw_text(
+            &mut pixels,
+            width,
+            height,
+            &text,
+            brief,
+            bold,
+            font_height,
+            margin,
+            palette.ink,
+        );
+    }
 
     // GDI leaves the alpha byte untouched (or zero) on antialiased text, so the
     // whole sheet is forced opaque: paper has no transparency anyway, and the
@@ -425,6 +553,13 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_note_renders_for_the_entry_hover() {
+        let image = render("", 0).expect("a blank note bitmap");
+        assert_eq!((image.width, image.height), (408, 264));
+        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
     fn long_text_renders_and_stays_opaque() {
         let text = "这是一段很长的便签文字，用来检查自动换行和末尾省略号。\nSecond line.";
         let image = render(text, 2).expect("a note bitmap");
@@ -450,5 +585,70 @@ mod tests {
         let second = unique_path(&directory, "Note.txt");
         assert_eq!(second.file_name().unwrap(), "Note 2.txt");
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn summary_strips_markdown_and_keeps_structure() {
+        let source =
+            "# Title\n\n**bold** and `code`\n- one\n- [x] two\n> quote\n---\n```\ncode\n```";
+        assert_eq!(
+            summary(source),
+            "Title\n\nbold and code\n• one\n[x] two\nquote\ncode"
+        );
+        assert_eq!(summary("**only markers**"), "only markers");
+        assert_eq!(summary("   "), "");
+    }
+
+    #[test]
+    fn atomic_write_uses_bom_and_crlf_and_replaces() {
+        let directory =
+            std::env::temp_dir().join(format!("pegline-notes-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let path = directory.join("note.txt");
+        write_atomic(&path, "a\n中").expect("write");
+        let bytes = std::fs::read(&path).expect("read back");
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF]);
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                assert!(index > 0 && bytes[index - 1] == b'\r', "bare LF at {index}");
+            }
+            if *byte == b'\r' {
+                assert_eq!(bytes.get(index + 1), Some(&b'\n'), "bare CR at {index}");
+            }
+        }
+        assert_eq!(read(&path).as_deref(), Some("a\n中"));
+
+        write_atomic(&path, "b").expect("replace");
+        assert_eq!(read(&path).as_deref(), Some("b"));
+        assert!(std::fs::read_dir(&directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp")
+        }));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn archive_moves_and_numbers_collisions() {
+        let root =
+            std::env::temp_dir().join(format!("pegline-notes-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let notes = root.join("Notes");
+        let archive = notes.join("Archive");
+        std::fs::create_dir_all(&notes).unwrap();
+        let first = notes.join("Note.txt");
+        std::fs::write(&first, b"one").unwrap();
+        let moved = archive_into(&first, &archive).expect("archive");
+        assert!(!first.exists());
+        assert!(moved.exists());
+        assert_eq!(moved.file_name().unwrap(), "Note.txt");
+
+        let second = notes.join("Note.txt");
+        std::fs::write(&second, b"two").unwrap();
+        let moved = archive_into(&second, &archive).expect("archive again");
+        assert_eq!(moved.file_name().unwrap(), "Note 2.txt");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

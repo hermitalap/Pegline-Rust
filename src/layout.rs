@@ -53,6 +53,13 @@ pub const PIN_WIDTH: f32 = 9.0;
 pub const PIN_HEIGHT: f32 = 26.0;
 /// Hit-test tolerance around a card, DIP.
 pub const HIT_TOLERANCE: f32 = 10.0;
+/// Gap between the last card and the invisible note entry (NOTE-EDITOR.md §4.1).
+pub const NOTE_HOTSPOT_GAP: f32 = 12.0;
+/// The entry hotspot is hidden on windows too narrow to hold it, DIP.
+pub const NOTE_HOTSPOT_MIN: f32 = 80.0;
+/// Height of a note card, DIP. Mirrors `notes::CARD_HEIGHT`; layout must stay
+/// free of Win32.
+pub const NOTE_CARD_HEIGHT: f32 = 88.0;
 
 /// The rope sags by at most 30 DIP, and by 1.8% of the width otherwise.
 pub fn sag(width: f32) -> f32 {
@@ -171,6 +178,36 @@ pub fn copied_top(card_height: f32, pill_height: f32) -> f32 {
     CARD_OFFSET_BELOW_TOP + card_height + 16.0 - pill_height / 2.0
 }
 
+/// The invisible note entry to the right of the last card, in window DIP
+/// (NOTE-EDITOR.md §4.1).
+///
+/// `card_height` and `note` describe the last card; an empty line uses a note
+/// slot. The rectangle is clamped to the work area and disappears when less
+/// than [`NOTE_HOTSPOT_MIN`] DIP remain.
+pub fn note_hotspot(count: usize, width: f32, card_height: f32, note: bool) -> Option<RectF> {
+    let slot_width = SPACING - NOTE_HOTSPOT_GAP;
+    let (left, top, height) = if count == 0 {
+        let center = width * 0.5 + SPACING * 0.5;
+        (
+            center - slot_width * 0.5,
+            card_top(center, width, 0.0),
+            slot_height(NOTE_CARD_HEIGHT, true),
+        )
+    } else {
+        let last = slot_x(count - 1, count, width);
+        (
+            last + CARD_WIDTH * 0.5 + NOTE_HOTSPOT_GAP,
+            card_top(last, width, 0.0),
+            slot_height(card_height, note),
+        )
+    };
+    let right = (left + slot_width).min(width);
+    if right - left < NOTE_HOTSPOT_MIN {
+        return None;
+    }
+    Some(RectF::from_xywh(left, top, right - left, height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +296,36 @@ mod tests {
         assert_eq!(below(false), 32.0);
         assert_eq!(below(true), 58.0);
         assert!(slot_height(112.0, false) > actions_top(112.0) + ACTIONS_HEIGHT);
+    }
+
+    #[test]
+    fn the_note_hotspot_sits_beside_the_last_card() {
+        let width = 1920.0;
+        let hotspot = note_hotspot(3, width, 112.0, false).expect("a hotspot");
+        let last = slot_x(2, 3, width);
+        assert!((hotspot.left - (last + CARD_WIDTH * 0.5 + NOTE_HOTSPOT_GAP)).abs() < 1e-4);
+        assert!((hotspot.width() - (SPACING - NOTE_HOTSPOT_GAP)).abs() < 1e-4);
+        assert!((hotspot.top - card_top(last, width, 0.0)).abs() < 1e-4);
+        assert!((hotspot.height() - slot_height(112.0, false)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn an_empty_line_puts_the_hotspot_past_the_middle() {
+        let width = 1920.0;
+        let hotspot = note_hotspot(0, width, 0.0, false).expect("a hotspot");
+        let center = hotspot.center().0;
+        assert!((center - (width * 0.5 + SPACING * 0.5)).abs() < 1e-4);
+        assert!((hotspot.height() - slot_height(NOTE_CARD_HEIGHT, true)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_hotspot_is_clamped_and_hidden_on_narrow_screens() {
+        // Twelve cards fill a 1920 DIP line; the hotspot falls past the edge.
+        assert!(note_hotspot(12, 1920.0, 112.0, false).is_none());
+        // A narrow window still hosts one when some room remains.
+        let narrow = note_hotspot(1, 700.0, 112.0, false).expect("a hotspot");
+        assert!(narrow.right <= 700.0);
+        assert!(narrow.width() >= NOTE_HOTSPOT_MIN);
+        assert!(note_hotspot(3, 400.0, 112.0, false).is_none());
     }
 }

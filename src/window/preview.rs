@@ -8,19 +8,22 @@
 //! preview is dismissed the bitmap and the surface are released, which is what
 //! keeps `probe`'s private memory flat after a preview (BEHAVIOR §6.7).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, IDC_HAND, LoadCursorW, MA_NOACTIVATE,
+    SW_HIDE, SetCursor, ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::layout;
 use crate::logging;
+use crate::notes;
 use crate::preview as geometry;
 use crate::render::{Brush, Present, Renderer};
 use crate::types::{ImageData, RectF, RectI};
@@ -29,10 +32,22 @@ use crate::window;
 
 const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
+/// Transparent margin around the hover note, DIP (the shadow lives here).
+pub const NOTE_PADDING_DIP: f32 = 24.0;
+
+/// True while the window shows a note rather than a photo: the note is a real
+/// hover target, so it stops being click-through and uses the hand cursor.
+static NOTE_MODE: AtomicBool = AtomicBool::new(false);
 
 enum PreviewCommand {
     Show {
         image: ImageData,
+        bounds: RectI,
+        dpi: u32,
+    },
+    /// A blank note for the invisible entry hotspot (NOTE-EDITOR.md §4.4).
+    ShowNote {
+        color: usize,
         bounds: RectI,
         dpi: u32,
     },
@@ -150,7 +165,36 @@ impl Preview {
             return;
         }
         self.visible = true;
+        NOTE_MODE.store(false, Ordering::Release);
+        win32::set_click_through(self.hwnd, true);
         let _ = self.tx.send(PreviewCommand::Show { image, bounds, dpi });
+    }
+
+    /// Shows a blank note in `bounds` (the card plus [`NOTE_PADDING_DIP`] on
+    /// every side), drawn like the real note card: shadow, paper, glass border.
+    pub fn show_note(&mut self, color: usize, bounds: RectI, dpi: u32) {
+        if bounds.is_empty() {
+            self.hide();
+            return;
+        }
+        self.visible = true;
+        NOTE_MODE.store(true, Ordering::Release);
+        // The note is a hover target: the hand cursor and the click belong to
+        // this window, not to whatever is underneath it.
+        win32::set_click_through(self.hwnd, false);
+        let _ = self
+            .tx
+            .send(PreviewCommand::ShowNote { color, bounds, dpi });
+    }
+
+    /// Moves the visible window without redrawing. Used while the hover note
+    /// follows the pointer (the content is static, so this is one SetWindowPos
+    /// per tick, not a frame).
+    pub fn move_to(&self, bounds: RectI) {
+        if !self.visible || bounds.is_empty() {
+            return;
+        }
+        win32::place_window(self.hwnd, bounds, true);
     }
 
     /// Hides the preview and releases its surface.
@@ -159,6 +203,7 @@ impl Preview {
             return;
         }
         self.visible = false;
+        NOTE_MODE.store(false, Ordering::Release);
         let _ = self.tx.send(PreviewCommand::Hide);
     }
 
@@ -233,6 +278,25 @@ fn preview_thread(hwnd: SendHwnd, rx: Receiver<PreviewCommand>, ready: Sender<Re
                     }
                 }
             }
+            PreviewCommand::ShowNote { color, bounds, dpi } => {
+                let outcome =
+                    show_note_frame(&mut renderer, hwnd.0, color, bounds, dpi, &mut texture);
+                match outcome {
+                    Ok(()) => {
+                        if !shown {
+                            win32::show_no_activate(hwnd.0);
+                            shown = true;
+                        }
+                    }
+                    Err(error) => {
+                        logging::error(format!("note preview: {error}"));
+                        if shown {
+                            win32::hide_window(hwnd.0);
+                            shown = false;
+                        }
+                    }
+                }
+            }
         }
     }
     logging::trace("preview render thread stopped");
@@ -275,6 +339,44 @@ fn show_frame(
     Ok(())
 }
 
+/// Draws the blank hover note: shadow, paper (with its dog-ear), glass border.
+fn show_note_frame(
+    renderer: &mut Renderer,
+    hwnd: HWND,
+    color: usize,
+    bounds: RectI,
+    dpi: u32,
+    texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+) -> Result<(), String> {
+    let width = bounds.width().max(1) as u32;
+    let height = bounds.height().max(1) as u32;
+    logging::trace(format!("note preview frame {width}x{height} at {bounds:?}"));
+    win32::place_window(hwnd, bounds, true);
+    renderer.resize(width, height, dpi)?;
+    let image = notes::render("", color).ok_or_else(|| "note render failed".to_string())?;
+    let bitmap = renderer.upload(&image)?;
+    *texture = Some(bitmap);
+
+    let card = RectF::from_xywh(
+        NOTE_PADDING_DIP,
+        NOTE_PADDING_DIP,
+        notes::CARD_WIDTH,
+        notes::CARD_HEIGHT,
+    );
+    renderer.begin()?;
+    renderer.draw_shadow(card, 0.18, false);
+    if let Some(bitmap) = texture.as_ref() {
+        renderer.draw_photo(bitmap, card, layout::CARD_RADIUS);
+    }
+    renderer.stroke_card(card, layout::CARD_RADIUS, 1.0);
+    renderer.end()?;
+    if renderer.present(true) == Present::DeviceLost {
+        return Err("device lost while showing a note preview".to_string());
+    }
+    logging::trace("note preview frame presented");
+    Ok(())
+}
+
 /// Window procedure: never take focus, never erase.
 ///
 /// SAFETY: this only reads message parameters; the window is destroyed on the
@@ -287,6 +389,18 @@ unsafe extern "system" fn preview_wndproc(
 ) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
+        WM_SETCURSOR => {
+            if (lparam.0 as u32 & 0xFFFF) == HTCLIENT && NOTE_MODE.load(Ordering::Acquire) {
+                // SAFETY: the hand cursor is a system resource owned by the
+                // process; SetCursor affects only this thread's cursor.
+                unsafe {
+                    if let Ok(cursor) = LoadCursorW(None, IDC_HAND) {
+                        let _ = SetCursor(Some(cursor));
+                    }
+                }
+                return LRESULT(1);
+            }
+        }
         WM_ERASEBKGND => return LRESULT(1),
         _ => {}
     }

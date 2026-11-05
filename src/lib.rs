@@ -17,6 +17,7 @@ pub mod font;
 pub mod i18n;
 pub mod layout;
 pub mod logging;
+pub mod note_editor;
 pub mod notes;
 pub mod preview;
 pub mod render;
