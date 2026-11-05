@@ -57,6 +57,10 @@ pub const HIT_TOLERANCE: f32 = 10.0;
 pub const NOTE_HOTSPOT_GAP: f32 = 12.0;
 /// The entry hotspot is hidden on windows too narrow to hold it, DIP.
 pub const NOTE_HOTSPOT_MIN: f32 = 80.0;
+/// How far the entry note is tilted while it peeks, degrees clockwise.
+pub const NOTE_PEEK_ANGLE_DEG: f32 = 18.0;
+/// How many DIP of that note's bottom-right corner show above the line, DIP.
+pub const NOTE_PEEK_VISIBLE_DIP: f32 = 12.0;
 /// Height of a note card, DIP. Mirrors `notes::CARD_HEIGHT`; layout must stay
 /// free of Win32.
 pub const NOTE_CARD_HEIGHT: f32 = 88.0;
@@ -220,6 +224,24 @@ pub fn note_hotspot(count: usize, width: f32, card_height: f32, note: bool) -> O
     Some(RectF::from_xywh(left, top, right - left, height))
 }
 
+/// Centre of the peeking note card, in window DIP, when its bottom-right corner
+/// is the only part visible above the top edge.
+///
+/// The card is tilted by [`NOTE_PEEK_ANGLE_DEG`] and sits almost entirely off
+/// screen: the corner at `entry_x` reaches [`NOTE_PEEK_VISIBLE_DIP`] below the
+/// top edge, while the other three corners stay above it. The returned `y` is
+/// negative; the caller clips at the window top (the line strip starts there).
+pub fn note_peek_center(entry_x: f32) -> (f32, f32) {
+    let (card_w, card_h) = note_card_size();
+    let angle = NOTE_PEEK_ANGLE_DEG.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    // Bottom-right corner relative to the card centre after the clockwise
+    // rotation; it is the lowest corner at this angle.
+    let corner_x = card_w * 0.5 * cos - card_h * 0.5 * sin;
+    let corner_y = card_w * 0.5 * sin + card_h * 0.5 * cos;
+    (entry_x - corner_x, NOTE_PEEK_VISIBLE_DIP - corner_y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +341,31 @@ mod tests {
         assert!((hotspot.width() - (SPACING - NOTE_HOTSPOT_GAP)).abs() < 1e-4);
         assert!((hotspot.top - card_top(last, width, 0.0)).abs() < 1e-4);
         assert!((hotspot.height() - slot_height(112.0, false)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_entry_peeks_only_its_bottom_right_corner() {
+        let entry_x = 1200.0;
+        let (cx, cy) = note_peek_center(entry_x);
+        let (card_w, card_h) = note_card_size();
+        let angle = NOTE_PEEK_ANGLE_DEG.to_radians();
+        let (sin, cos) = angle.sin_cos();
+        let corner = |x: f32, y: f32| (cx + x * cos - y * sin, cy + x * sin + y * cos);
+
+        // The bottom-right corner is the only one at/below the top edge.
+        let (bx, by) = corner(card_w * 0.5, card_h * 0.5);
+        assert!((bx - entry_x).abs() < 1e-3);
+        assert!((by - NOTE_PEEK_VISIBLE_DIP).abs() < 1e-3);
+        for (x, y) in [
+            (-card_w * 0.5, -card_h * 0.5),
+            (card_w * 0.5, -card_h * 0.5),
+            (-card_w * 0.5, card_h * 0.5),
+        ] {
+            let (_, corner_y) = corner(x, y);
+            assert!(corner_y < 0.0, "corner y={corner_y} is visible");
+        }
+        assert!(cy < 0.0, "most of the card must be above the top edge");
+        assert!(cx < entry_x);
     }
 
     #[test]

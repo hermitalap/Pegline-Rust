@@ -104,9 +104,11 @@ re-centre, three-language menu/balloon checks and the keyboard-to-pixel latency;
 do not mark those as passed without a measurement. The old note "Edit" path now
 opens this editor instead of Notepad; "Archive" replaces "Discard" for notes.
 On 2026-11-05 the entry gained a top-corner peek whenever the pointer is anywhere
-over the strip (16 DIP, scene-drawn, 0.22 s spring), the 120 ms dwell was removed
-so entering the hotspot drops the full note in 0.22 s from 16 DIP above, and the
-line stays pinned while the editor is open. An edited note now flies back through
+over the strip: a card tilted 18° and mostly above the screen, with only its
+bottom-right corner (12 DIP) showing. The 120 ms dwell was removed so entering
+the hotspot (including the corner column at the top edge) drops the full note in
+0.22 s from that off-screen pose and rotates it upright. The line stays pinned
+while the editor is open. An edited note now flies back through
 a `SetRehang` scene command that keeps the row from reflowing; an editor pass with
 no changed text plays the same flight instead of closing in place. See `PLAN.md`
 §9.2 and the `docs/visual/note-entry-*` / `note-rehang-*` screenshots.

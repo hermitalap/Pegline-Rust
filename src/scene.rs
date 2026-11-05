@@ -20,9 +20,6 @@ const COPIED_SECONDS: f64 = 1.2;
 const FADE_SECONDS: f32 = 0.16;
 /// Delay for the hide animation, seconds.
 const HIDE_SECONDS: f32 = 0.22;
-/// How much of the blank entry note peeks below the line when the pointer is
-/// anywhere over the strip, DIP.
-const NOTE_PEEK_DIP: f32 = 16.0;
 
 /// What the UI thread asks the line to do.
 #[derive(Debug)]
@@ -904,20 +901,27 @@ impl Scene {
         renderer.reset_transform();
     }
 
-    /// The entry note's peeking corner: the top [`NOTE_PEEK_DIP`] of a blank
-    /// note card, clipped so only that slice shows.
+    /// The entry note's peeking corner: a tilted card almost entirely above the
+    /// top edge, with only its bottom-right corner showing.
+    ///
+    /// The line strip's window starts at the top edge, so the target clips the
+    /// rest of the card without a bitmap mask. The spring slides the card down
+    /// from fully hidden to [`layout::NOTE_PEEK_VISIBLE_DIP`].
     fn draw_note_peek(&self, renderer: &mut Renderer, hotspot: RectF) {
         let reveal = self.note_peek.value.clamp(0.0, 1.0);
-        let (card_w, card_h) = layout::note_card_size();
-        let left =
-            (hotspot.center().0 - card_w * 0.5).clamp(0.0, (self.width_dip - card_w).max(0.0));
-        let top = hotspot.top;
-        let height = (NOTE_PEEK_DIP * reveal).min(card_h);
-        if height <= 0.01 {
+        if reveal <= 0.001 {
             return;
         }
-        renderer.push_clip(RectF::from_xywh(left, top, card_w, height));
-        let frame = RectF::from_xywh(left, top, card_w, card_h);
+        let (card_w, card_h) = layout::note_card_size();
+        let (cx, base_cy) = layout::note_peek_center(hotspot.center().0);
+        let cy = base_cy - (1.0 - reveal) * layout::NOTE_PEEK_VISIBLE_DIP;
+        // `Matrix3x2::rotation` takes degrees, like the rest of the scene.
+        let angle = layout::NOTE_PEEK_ANGLE_DEG;
+        renderer.set_transform(
+            windows_numerics::Matrix3x2::rotation(angle)
+                * windows_numerics::Matrix3x2::translation(cx, cy),
+        );
+        let frame = RectF::from_xywh(-card_w * 0.5, -card_h * 0.5, card_w, card_h);
         renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
         let paper = RectF::new(
             frame.left + layout::PHOTO_INSET,
@@ -927,7 +931,10 @@ impl Scene {
         );
         renderer.fill_round(paper, layout::PHOTO_RADIUS, crate::render::Brush::NotePaper);
         renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
-        renderer.pop_clip();
+        renderer.set_transform(windows_numerics::Matrix3x2::translation(
+            0.0,
+            self.slide.value,
+        ));
     }
 
     fn draw_card(&mut self, renderer: &mut Renderer, index: usize, slot_left: f32, hovered: bool) {
@@ -1147,6 +1154,41 @@ mod tests {
         );
         assert_eq!(scene.cards[0].opacity, 1.0);
         assert!(scene.cards[0].nudge_t >= 0.0);
+    }
+
+    #[test]
+    fn the_peek_card_only_shows_its_bottom_right_corner() {
+        let entry = 1933.0;
+        let (cx, cy) = layout::note_peek_center(entry);
+        let angle = layout::NOTE_PEEK_ANGLE_DEG;
+        let transform = windows_numerics::Matrix3x2::rotation(angle)
+            * windows_numerics::Matrix3x2::translation(cx, cy);
+        let apply = |x: f32, y: f32| {
+            (
+                x * transform.M11 + y * transform.M21 + transform.M31,
+                x * transform.M12 + y * transform.M22 + transform.M32,
+            )
+        };
+        let (card_w, card_h) = layout::note_card_size();
+        let corners = [
+            (-card_w * 0.5, -card_h * 0.5),
+            (card_w * 0.5, -card_h * 0.5),
+            (-card_w * 0.5, card_h * 0.5),
+            (card_w * 0.5, card_h * 0.5),
+        ];
+        let screen: Vec<(f32, f32)> = corners.iter().map(|&(x, y)| apply(x, y)).collect();
+        let bottom_right = screen[3];
+        assert!(
+            (bottom_right.0 - entry).abs() < 1e-3,
+            "br={bottom_right:?} screen={screen:?}"
+        );
+        assert!(
+            (bottom_right.1 - layout::NOTE_PEEK_VISIBLE_DIP).abs() < 1e-3,
+            "br={bottom_right:?} screen={screen:?}"
+        );
+        for corner in &screen[..3] {
+            assert!(corner.1 < 0.0, "corner {corner:?} is above the top edge");
+        }
     }
 
     #[test]

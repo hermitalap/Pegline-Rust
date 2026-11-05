@@ -24,9 +24,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
     D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
@@ -643,22 +642,6 @@ impl Renderer {
 
     pub fn reset_transform(&mut self) {
         self.set_transform(Matrix3x2::identity());
-    }
-
-    /// Clips subsequent drawing to an axis-aligned rectangle in the current
-    /// coordinate space. Used by the entry note's peeking corner, which is the
-    /// top slice of a full card.
-    pub fn push_clip(&mut self, rect: RectF) {
-        // SAFETY: the context is ours and BeginDraw has been called.
-        unsafe {
-            self.context
-                .PushAxisAlignedClip(&d2d_rect(rect), D2D1_ANTIALIAS_MODE_ALIASED);
-        }
-    }
-
-    pub fn pop_clip(&mut self) {
-        // SAFETY: balances a successful PushAxisAlignedClip.
-        unsafe { self.context.PopAxisAlignedClip() };
     }
 
     /// Fills a rounded rectangle in DIP.

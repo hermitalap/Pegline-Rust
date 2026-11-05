@@ -61,6 +61,9 @@ enum PreviewCommand {
         color: usize,
         bounds: RectI,
         dpi: u32,
+        /// Initial lean, degrees; the entry starts tilted with only one corner
+        /// above the screen and straightens as it falls.
+        tilt: f32,
     },
     /// Repaint the note at the latest lean; the window is already placed.
     Turn,
@@ -201,7 +204,8 @@ impl Preview {
 
     /// Shows a blank note in `bounds` (the card plus [`NOTE_PADDING_DIP`] on
     /// every side), drawn like the real note card: shadow, paper, glass border.
-    pub fn show_note(&mut self, color: usize, bounds: RectI, dpi: u32) {
+    /// `tilt` is the starting lean in degrees.
+    pub fn show_note(&mut self, color: usize, bounds: RectI, dpi: u32, tilt: f32) {
         if bounds.is_empty() {
             self.hide();
             return;
@@ -211,13 +215,16 @@ impl Preview {
         // The note is a hover target: the hand cursor and the click belong to
         // this window, not to whatever is underneath it.
         win32::set_click_through(self.hwnd, false);
-        self.sent_tilt.set(0.0);
+        self.sent_tilt.set(tilt);
         if let Ok(mut slot) = self.tilt.lock() {
-            *slot = 0.0;
+            *slot = tilt;
         }
-        let _ = self
-            .tx
-            .send(PreviewCommand::ShowNote { color, bounds, dpi });
+        let _ = self.tx.send(PreviewCommand::ShowNote {
+            color,
+            bounds,
+            dpi,
+            tilt,
+        });
     }
 
     /// Moves the visible window without redrawing. Used while the hover note
@@ -342,12 +349,24 @@ fn preview_thread(
                     }
                 }
             }
-            PreviewCommand::ShowNote { color, bounds, dpi } => {
-                let outcome =
-                    show_note_frame(&mut renderer, hwnd.0, color, bounds, dpi, &mut texture);
+            PreviewCommand::ShowNote {
+                color,
+                bounds,
+                dpi,
+                tilt,
+            } => {
+                let outcome = show_note_frame(
+                    &mut renderer,
+                    hwnd.0,
+                    color,
+                    bounds,
+                    dpi,
+                    tilt,
+                    &mut texture,
+                );
                 match outcome {
                     Ok(()) => {
-                        drawn_tilt = 0.0;
+                        drawn_tilt = tilt;
                         if !shown {
                             win32::show_no_activate(hwnd.0);
                             shown = true;
@@ -480,16 +499,19 @@ fn show_note_frame(
     color: usize,
     bounds: RectI,
     dpi: u32,
+    tilt: f32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
 ) -> Result<(), String> {
     let width = bounds.width().max(1) as u32;
     let height = bounds.height().max(1) as u32;
-    logging::trace(format!("note preview frame {width}x{height} at {bounds:?}"));
+    logging::trace(format!(
+        "note preview frame {width}x{height} at {bounds:?} tilt={tilt:.1}"
+    ));
     win32::place_window(hwnd, bounds, true);
     renderer.resize(width, height, dpi)?;
     let image = notes::render("", color).ok_or_else(|| "note render failed".to_string())?;
     let bitmap = renderer.upload(&image)?;
-    draw_note(renderer, &bitmap, 0.0)?;
+    draw_note(renderer, &bitmap, tilt)?;
     *texture = Some(bitmap);
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a note preview".to_string());

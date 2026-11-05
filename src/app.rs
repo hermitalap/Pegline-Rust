@@ -135,15 +135,11 @@ const NOTE_TILT_MAX_DEG: f32 = 5.0;
 const NOTE_TILT_RANGE_DIP: f32 = 120.0;
 const NOTE_TILT_RESPONSE: f32 = 0.56;
 const NOTE_TILT_DAMPING: f32 = 0.6;
-/// Hover note fly-in/out. The entry is advertised by its peeking corner, so
-/// moving onto it drops the rest of the note in quickly instead of the old
-/// slow fall from above the screen.
+/// Hover note fly-in/out. The entry is advertised by a corner above the screen,
+/// so moving onto it drops the rest of the note down quickly instead of the old
+/// slow fall from far above the screen.
 const NOTE_FLY_IN_SECONDS: f64 = 0.22;
 const NOTE_FLY_OUT_SECONDS: f64 = 0.42;
-/// How far above its slot the full entry note starts, DIP. Keeps the fast
-/// fly-in visible as a short drop from the peeking corner.
-const NOTE_ENTRY_DROP_DIP: f32 = 16.0;
-const NOTE_ARC_DIP: f32 = 4.0;
 
 /// One pegged item, as the UI thread knows it.
 struct Item {
@@ -536,6 +532,10 @@ struct App {
     /// `PEGLINE_NOTE_DEMO_POINTER` (`x,y`); the visual acceptance run uses it
     /// to lean the paper in each quadrant.
     note_demo_pointer: (f32, f32),
+    /// `PEGLINE_NOTE_PEEK_POINTER`: an absolute screen point for the hover demo
+    /// that is outside the hotspot, so the peeking corner can be captured
+    /// deterministically.
+    note_peek_pointer: Option<(i32, i32)>,
     /// Slow-motion factor for the hover fly-in/out, from
     /// `PEGLINE_NOTE_SLOW`; only used by the visual acceptance runs.
     note_slow: f32,
@@ -642,6 +642,10 @@ impl App {
                 .ok()
                 .and_then(|value| parse_demo_pointer(&value))
                 .unwrap_or((78.0, 80.0)),
+            note_peek_pointer: std::env::var("PEGLINE_NOTE_PEEK_POINTER")
+                .ok()
+                .and_then(|value| parse_demo_pointer(&value))
+                .map(|(x, y)| (x as i32, y as i32)),
             note_slow: std::env::var("PEGLINE_NOTE_SLOW")
                 .ok()
                 .and_then(|value| value.parse::<f32>().ok())
@@ -1133,6 +1137,10 @@ impl App {
         }
         if self.note_hover_demo {
             self.keep_open = true;
+            // The synthetic pointer, not the real one, decides whether the
+            // entry is hovered; keep the strip down even while the real mouse
+            // is elsewhere on the desktop.
+            self.pinned = true;
             if !self.is_present {
                 self.present();
             }
@@ -1997,6 +2005,7 @@ impl App {
         self.is_revealed = revealed;
         self.pinned = false;
         self.peek_until = 0.0;
+        self.note_peek_on = false;
         if !revealed {
             self.hover = None;
             self.hover_action = None;
@@ -2875,29 +2884,33 @@ impl App {
             return;
         }
         let pointer = if self.note_hover_demo {
-            let Some(hotspot) = self.note_entry_hotspot() else {
-                return;
-            };
-            let Some(overlay) = self.overlay.as_ref() else {
-                return;
-            };
-            let Some(rect) = win32::window_rect(overlay.hwnd()) else {
-                return;
-            };
-            let scale = overlay.scale().max(0.1);
-            let (cx, cy) = hotspot.center();
-            // Park the synthetic pointer inside the hotspot: it must stay in
-            // while the offset from the centre shows the pull and the lean. A
-            // narrow hotspot shrinks it.
-            let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
-            let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
-            let dx = self.note_demo_pointer.0.clamp(-limit_x, limit_x);
-            let dy = self.note_demo_pointer.1.clamp(-limit_y, limit_y);
-            let (cx, cy) = (cx + dx, cy + dy);
-            (
-                rect.left + (cx * scale).round() as i32,
-                rect.top + (cy * scale).round() as i32,
-            )
+            if let Some(pointer) = self.note_peek_pointer {
+                pointer
+            } else {
+                let Some(hotspot) = self.note_entry_hotspot() else {
+                    return;
+                };
+                let Some(overlay) = self.overlay.as_ref() else {
+                    return;
+                };
+                let Some(rect) = win32::window_rect(overlay.hwnd()) else {
+                    return;
+                };
+                let scale = overlay.scale().max(0.1);
+                let (cx, cy) = hotspot.center();
+                // Park the synthetic pointer inside the hotspot: it must stay in
+                // while the offset from the centre shows the pull and the lean.
+                // A narrow hotspot shrinks it.
+                let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
+                let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
+                let dx = self.note_demo_pointer.0.clamp(-limit_x, limit_x);
+                let dy = self.note_demo_pointer.1.clamp(-limit_y, limit_y);
+                let (cx, cy) = (cx + dx, cy + dy);
+                (
+                    rect.left + (cx * scale).round() as i32,
+                    rect.top + (cy * scale).round() as i32,
+                )
+            }
         } else {
             let Some(pointer) = win32::cursor_pos() else {
                 return;
@@ -2914,14 +2927,19 @@ impl App {
         let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
         let (dip_x, dip_y) = self.to_window_dip(pointer_x, pointer_y);
         let hotspot = self.note_entry_hotspot();
-        let in_hotspot = hotspot
+        // The visible corner sits at the top edge, above the slot itself. The
+        // entry therefore owns the whole column from the screen edge down to
+        // the slot: moving onto the corner (or anywhere below it) opens it.
+        let entry_hit =
+            hotspot.map(|rect| RectF::from_xywh(rect.left, 0.0, rect.width(), rect.bottom));
+        let in_hotspot = entry_hit
             .as_ref()
             .is_some_and(|rect| rect.contains(dip_x, dip_y));
-        // A fixed margin around the hotspot keeps the pulled note clickable at
+        // A fixed margin around the entry keeps the pulled note clickable at
         // its edge; once the pointer leaves this zone the note flies out. The
         // note must not be the exit test itself: the pointer pull would keep
         // bringing it back under the cursor and it would never disappear.
-        let keep_near_entry = hotspot
+        let keep_near_entry = entry_hit
             .as_ref()
             .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
         // The whole strip, and a little air around it, is the tool's range: as
@@ -2952,15 +2970,16 @@ impl App {
                     let t = ((now - hover.started) / (NOTE_FLY_IN_SECONDS * slow)).clamp(0.0, 1.0)
                         as f32;
                     let k = ease::in_out_cubic(t);
-                    // No work-area clamp here: the quick drop starts just above
-                    // the slot and must be allowed to enter; clamping would pin
-                    // it to the top edge.
+                    // No work-area clamp here: the fall starts above the screen
+                    // and must be allowed to enter; clamping would pin it to
+                    // the top edge. The card keeps its peek tilt for the first
+                    // part of the fall and straightens as it lands.
                     let center = (
                         hover.from.0 + (hover.to.0 - hover.from.0) * k,
-                        hover.from.1 + (hover.to.1 - hover.from.1) * k
-                            - (std::f32::consts::PI * k).sin() * NOTE_ARC_DIP * scale,
+                        hover.from.1 + (hover.to.1 - hover.from.1) * k,
                     );
                     hover.center = center;
+                    hover.angle = layout::NOTE_PEEK_ANGLE_DEG * (1.0 - k);
                     if now >= hover.trace_at {
                         logging::trace(format!("hover fly-in t={t:.2} center={:?}", hover.center));
                         hover.trace_at = now + 0.1;
@@ -2971,6 +2990,8 @@ impl App {
                         hover.float_start = now;
                         hover.pos = center;
                         hover.vel = (0.0, 0.0);
+                        hover.angle = 0.0;
+                        hover.spin = 0.0;
                         logging::trace(format!(
                             "note hover at home {:?} (hotspot={in_hotspot})",
                             hover.home
@@ -3076,15 +3097,17 @@ impl App {
         let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         let window_width = (card_w + NOTE_PADDING_DIP * 2.0) * scale;
         let home = clamp_center(home, window_width * 0.5, window_height * 0.5, screen.work);
-        // The entry has already advertised itself with its peeking corner, so
-        // the rest of the note drops in from just above the slot instead of
-        // falling from above the screen.
-        let from = (home.0, home.1 - NOTE_ENTRY_DROP_DIP * scale);
+        // The entry advertises only its bottom-right corner above the screen;
+        // the full note falls from that same off-screen position and rotates
+        // upright as it lands.
+        let Some(from) = self.note_entry_peek_center_px(scale) else {
+            return;
+        };
         let color = 0;
         let dpi = screen.dpi;
         let bounds = self.note_preview_bounds(from, dpi);
         if let Some(preview) = self.preview.as_mut() {
-            preview.show_note(color, bounds, dpi);
+            preview.show_note(color, bounds, dpi, layout::NOTE_PEEK_ANGLE_DEG);
         }
         self.preview_idle_at = None;
         self.note_hover = Some(HoverNote {
@@ -3096,7 +3119,7 @@ impl App {
             home,
             pos: from,
             vel: (0.0, 0.0),
-            angle: 0.0,
+            angle: layout::NOTE_PEEK_ANGLE_DEG,
             spin: 0.0,
             float_start: now,
             color,
@@ -3131,6 +3154,20 @@ impl App {
         ))
     }
 
+    /// Where the peeking corner starts, in screen pixels: the tilted card's
+    /// centre, almost entirely above the line strip. The visible corner is at
+    /// the entry's x, [`layout::NOTE_PEEK_VISIBLE_DIP`] below the top edge.
+    fn note_entry_peek_center_px(&self, scale: f32) -> Option<(f32, f32)> {
+        let hotspot = self.note_entry_hotspot_layout()?;
+        let overlay = self.overlay.as_ref()?;
+        let rect = win32::window_rect(overlay.hwnd())?;
+        let (center_x, center_y) = layout::note_peek_center(hotspot.center().0);
+        Some((
+            rect.left as f32 + center_x * scale,
+            rect.top as f32 + center_y * scale,
+        ))
+    }
+
     fn cancel_note_hover(&mut self) {
         if self.note_hover.take().is_some() {
             // SAFETY: killing a timer we set on our own message window.
@@ -3147,9 +3184,18 @@ impl App {
     /// Shows or hides the entry's peeking corner. The scene animates it, so the
     /// command is only sent when the state actually changes.
     fn set_note_peek(&mut self, on: bool) {
-        if self.note_peek_on != on {
+        let changed = self.note_peek_on != on;
+        if changed {
             self.note_peek_on = on;
-            self.send_scene(Command::NotePeek(on));
+            logging::trace(format!("note peek {on}"));
+        }
+        // Keep asserting `true`: the scene snaps the peek away when the strip
+        // retracts, and the next tick must restore it even if the app's flag
+        // never observed the retract. The scene ignores a repeated target.
+        if on {
+            self.send_scene(Command::NotePeek(true));
+        } else if changed {
+            self.send_scene(Command::NotePeek(false));
         }
     }
 
