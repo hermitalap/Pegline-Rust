@@ -253,12 +253,12 @@ fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
 }
 
 /// One baked nine-patch shadow.
-struct ShadowBake {
-    bitmap: ID2D1Bitmap1,
-    total_dip: f32,
-    pad_dip: f32,
-    corner_dip: f32,
-    offset_dip: f32,
+pub(crate) struct ShadowBake {
+    pub(crate) bitmap: ID2D1Bitmap1,
+    pub(crate) total_dip: f32,
+    pub(crate) pad_dip: f32,
+    pub(crate) corner_dip: f32,
+    pub(crate) offset_dip: f32,
 }
 
 /// Idle and hovered card shadows. They are baked once at startup; changing the
@@ -798,61 +798,12 @@ impl Renderer {
     /// `opacity` is the shadow's alpha (0.18 idle, 0.26 hovered); the texture
     /// itself is baked once, so this is nine `DrawBitmap` calls and no blur.
     pub fn draw_shadow(&self, rect: RectF, opacity: f32, hovered: bool) {
-        if opacity <= 0.0 {
-            return;
-        }
         let shadow = if hovered {
             &self.shadow.hover
         } else {
             &self.shadow.idle
         };
-        let pad = shadow.pad_dip;
-        let corner = shadow.corner_dip;
-        let total = shadow.total_dip;
-        let x0 = rect.left - pad;
-        let y0 = rect.top - pad + shadow.offset_dip;
-        let x1 = rect.right + pad;
-        let y1 = rect.bottom + pad + shadow.offset_dip;
-        let inner_w = (x1 - x0) - 2.0 * corner;
-        let inner_h = (y1 - y0) - 2.0 * corner;
-        if inner_w <= 0.0 || inner_h <= 0.0 || total - 2.0 * corner <= 0.0 {
-            return;
-        }
-        let src_x = [0.0, corner, total - corner];
-        let src_w = [corner, total - 2.0 * corner, corner];
-        let dst_x = [x0, x0 + corner, x1 - corner];
-        let dst_w = [corner, inner_w, corner];
-        let src_y = [0.0, corner, total - corner];
-        let src_h = [corner, total - 2.0 * corner, corner];
-        let dst_y = [y0, y0 + corner, y1 - corner];
-        let dst_h = [corner, inner_h, corner];
-        // SAFETY: the baked bitmap is alive and owned by the renderer.
-        unsafe {
-            for row in 0..3 {
-                for column in 0..3 {
-                    let src = D2D_RECT_F {
-                        left: src_x[column],
-                        top: src_y[row],
-                        right: src_x[column] + src_w[column],
-                        bottom: src_y[row] + src_h[row],
-                    };
-                    let dst = D2D_RECT_F {
-                        left: dst_x[column],
-                        top: dst_y[row],
-                        right: dst_x[column] + dst_w[column],
-                        bottom: dst_y[row] + dst_h[row],
-                    };
-                    self.context.DrawBitmap(
-                        &shadow.bitmap,
-                        Some(&dst),
-                        opacity,
-                        D2D1_INTERPOLATION_MODE_LINEAR,
-                        Some(&src),
-                        None,
-                    );
-                }
-            }
-        }
+        draw_shadow(&self.context, shadow, rect, opacity);
     }
 
     /// Draws the clothespin at `top` in the current transform's coordinates.
@@ -1451,7 +1402,10 @@ fn create_blurred_rect(
 
 /// Bakes one of the two card shadows (idle or hovered) with its nine-slice
 /// margins. The texture is 112 DIP of card plus 3σ of blur on each side.
-fn bake_card_shadow(
+///
+/// Shared with the annotation editor, whose enlarged card must wear the same
+/// shadow as the cards on the line.
+pub(crate) fn bake_card_shadow(
     context: &ID2D1DeviceContext,
     dpi: f32,
     blur_dip: f32,
@@ -1476,6 +1430,65 @@ fn bake_card_shadow(
         corner_dip: pad + 32.0,
         offset_dip,
     })
+}
+
+/// Nine blits of a baked shadow around `rect`; no blur per frame.
+pub(crate) fn draw_shadow(
+    context: &ID2D1DeviceContext,
+    shadow: &ShadowBake,
+    rect: RectF,
+    opacity: f32,
+) {
+    if opacity <= 0.0 {
+        return;
+    }
+    let pad = shadow.pad_dip;
+    let corner = shadow.corner_dip;
+    let total = shadow.total_dip;
+    let x0 = rect.left - pad;
+    let y0 = rect.top - pad + shadow.offset_dip;
+    let x1 = rect.right + pad;
+    let y1 = rect.bottom + pad + shadow.offset_dip;
+    let inner_w = (x1 - x0) - 2.0 * corner;
+    let inner_h = (y1 - y0) - 2.0 * corner;
+    if inner_w <= 0.0 || inner_h <= 0.0 || total - 2.0 * corner <= 0.0 {
+        return;
+    }
+    let src_x = [0.0, corner, total - corner];
+    let src_w = [corner, total - 2.0 * corner, corner];
+    let dst_x = [x0, x0 + corner, x1 - corner];
+    let dst_w = [corner, inner_w, corner];
+    let src_y = [0.0, corner, total - corner];
+    let src_h = [corner, total - 2.0 * corner, corner];
+    let dst_y = [y0, y0 + corner, y1 - corner];
+    let dst_h = [corner, inner_h, corner];
+    // SAFETY: the baked bitmap is alive and owned by the caller.
+    unsafe {
+        for row in 0..3 {
+            for column in 0..3 {
+                let src = D2D_RECT_F {
+                    left: src_x[column],
+                    top: src_y[row],
+                    right: src_x[column] + src_w[column],
+                    bottom: src_y[row] + src_h[row],
+                };
+                let dst = D2D_RECT_F {
+                    left: dst_x[column],
+                    top: dst_y[row],
+                    right: dst_x[column] + dst_w[column],
+                    bottom: dst_y[row] + dst_h[row],
+                };
+                context.DrawBitmap(
+                    &shadow.bitmap,
+                    Some(&dst),
+                    opacity,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    Some(&src),
+                    None,
+                );
+            }
+        }
+    }
 }
 
 fn bitmap_width(_context: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> u32 {

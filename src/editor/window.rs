@@ -30,9 +30,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
     D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LAYER_OPTIONS_NONE,
+    D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device,
     ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image, ID2D1RenderTarget,
     ID2D1SolidColorBrush, ID2D1StrokeStyle,
@@ -52,9 +53,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
@@ -70,43 +70,45 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, ImmAssociateContext,
     ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
     ImmSetCompositionWindow, ImmSetOpenStatus,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetCursorPos, GetWindowLongPtrW, HICON, HTCLIENT, ICON_BIG, ICON_SMALL, IDC_CROSS, IDC_HAND,
-    IDC_IBEAM, LoadCursorW, MINMAXINFO, PostMessageW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER,
-    SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETICON, WM_SIZE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, HTCLIENT, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW,
+    PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::wic;
+use crate::editor::layout::{self, Hit, Layout};
 use crate::editor::model::{COLORS, Doc, Mark, Tool, WIDTHS};
 use crate::font;
 use crate::i18n;
 use crate::logging;
-use crate::types::{ImageData, RectF};
+use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
 
 /// The result of one edit, delivered on the UI thread.
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
-    /// The marked-up picture as PNG bytes, at the source resolution.
-    Saved(Vec<u8>),
+    /// The marked-up picture as PNG bytes, at the source resolution, plus a
+    /// card-sized preview so the flight back to the line carries the marks.
+    Saved { png: Vec<u8>, preview: ImageData },
     /// The user cancelled; the file is untouched.
     Cancelled,
 }
@@ -118,18 +120,6 @@ const WM_APP_EDITOR_DONE: u32 = WM_APP + 10;
 /// otherwise need.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-/// Client size at 100 % scale, DIP.
-const CLIENT_WIDTH_DIP: f32 = 1120.0;
-const CLIENT_HEIGHT_DIP: f32 = 760.0;
-/// Smallest client size, DIP.
-const MIN_WIDTH_DIP: f32 = 720.0;
-const MIN_HEIGHT_DIP: f32 = 520.0;
-/// Toolbar height and picture margin, DIP.
-const TOOLBAR_HEIGHT: f32 = 58.0;
-const CANVAS_MARGIN: f32 = 16.0;
-/// Above this client width the toolbar uses the roomy metrics; below it the
-/// compact set keeps every group inside the 720 DIP minimum window.
-const WIDE_TOOLBAR: f32 = 960.0;
 /// Side of one mosaic block in source pixels (BEHAVIOR §11).
 const MOSAIC_BLOCK: u32 = 16;
 /// Text marks are 32 source pixels tall, SemiBold, like the WPF text box.
@@ -137,21 +127,22 @@ const TEXT_SIZE: f32 = 32.0;
 /// Cached mosaic textures kept for undo/redo; the cache is cleared when full.
 const MOSAIC_CACHE: usize = 16;
 
-// Toolbar geometry, DIP. Hit rectangles and drawing share `toolbar_layout`.
-const BUTTON_RADIUS: f32 = 7.0;
+/// Button and icon geometry, DIP. The pills themselves are pure layout.
+const BUTTON_RADIUS: f32 = 8.0;
 const ICON_STROKE: f32 = 2.2;
 
-/// Toolbar chrome colours.
-const CHROME_TOOLBAR: u32 = 0x25_25_26;
-const CHROME_SEPARATOR: u32 = 0x3E_3E_42;
-const CHROME_BUTTON: u32 = 0x2D_2D_30;
-const CHROME_BUTTON_HOVER: u32 = 0x3E_3E_42;
-const CHROME_BUTTON_BORDER: u32 = 0x50_50_54;
+/// The floating chrome: white glass like the cards on the line, dark ink and
+/// the one blue accent the buttons already used.
+const CHROME_GLASS: u32 = 0xF7_F7_F7;
+const CHROME_GLASS_ALPHA: f32 = 0xB8 as f32 / 255.0;
+const CHROME_GLASS_LIT: u32 = 0xFF_FF_FF;
+const CHROME_GLASS_LIT_ALPHA: f32 = 0xF2 as f32 / 255.0;
+const CHROME_BORDER_ALPHA: f32 = 0x70 as f32 / 255.0;
+const CHROME_INK: u32 = 0x1E_1E_1E;
+const CHROME_INK_DIM: u32 = 0x9A_9A_9A;
 const CHROME_ACCENT: u32 = 0x0E_63_9C;
 const CHROME_ACCENT_HOVER: u32 = 0x11_77_BB;
 const CHROME_ACCENT_BORDER: u32 = 0x82_C4_FF;
-const CHROME_TEXT: u32 = 0xF0_F0_F0;
-const CHROME_TEXT_DIM: u32 = 0x7F_7F_7F;
 
 /// The four tools in toolbar order.
 const TOOLS: [Tool; 4] = [Tool::Arrow, Tool::Rectangle, Tool::Text, Tool::Mosaic];
@@ -161,68 +152,56 @@ pub struct Editor {
     hwnd: HWND,
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
-    /// The icons installed with `WM_SETICON`; the window does not own them.
-    icons: Vec<HICON>,
+    /// Source pixels; `card_px` needs them to rebuild the same layout.
+    source_size: (u32, u32),
 }
 
 impl Editor {
-    /// Opens `path` in a new editor window. `notify` is called on the UI thread
-    /// when the edit is saved or cancelled.
+    /// Opens the annotation window for `path` on `monitor`, centred on it.
     ///
-    /// The call creates the window and waits for the GPU stack (not for the
-    /// picture, which is decoded on the render thread), so a 6K PNG never blocks
-    /// the UI thread here.
+    /// `source_size` is the picture's pixel size. The app knows it before the
+    /// render thread decodes, so the window's card can be laid out — and the
+    /// opening flight can aim at it — immediately.
+    ///
+    /// `visible` false creates the window hidden; the app shows it when the
+    /// card-to-editor flight lands.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         path: &Path,
+        source_size: (u32, u32),
         dpi: u32,
+        monitor: win32::Monitor,
+        visible: bool,
         notify: Box<dyn Fn(EditorEvent) + Send>,
     ) -> Result<Self, String> {
         window::register_class(CLASS_NAME, Some(editor_wndproc))?;
-        // The window lands on the monitor under the cursor, so its DPI wins.
-        let monitor = win32::cursor_pos().and_then(|(x, y)| win32::monitor_at(x, y));
-        let dpi = monitor.map(|monitor| monitor.dpi).unwrap_or(dpi).max(96);
+        let dpi = monitor.dpi.max(dpi).max(96);
+        let scale = dpi as f32 / 96.0;
+        let work = monitor.work;
+        let (width_dip, height_dip) = layout::window_size(
+            source_size,
+            (work.width() as f32 / scale, work.height() as f32 / scale),
+        );
+        let width = (width_dip * scale).round().max(320.0) as i32;
+        let height = (height_dip * scale).round().max(240.0) as i32;
+        let left = work.left + (work.width() - width).max(0) / 2;
+        let top = work.top + (work.height() - height).max(0) / 2;
         // SAFETY: the module handle is this process and the class is registered
         // above; the call has no other preconditions.
         let instance = unsafe { GetModuleHandleW(None) }
             .map_err(|error| format!("GetModuleHandleW: {error}"))?;
-
-        let style = WS_OVERLAPPEDWINDOW;
-        let ex_style = WS_EX_NOREDIRECTIONBITMAP;
-        let client_width = pixels(CLIENT_WIDTH_DIP, dpi);
-        let client_height = pixels(CLIENT_HEIGHT_DIP, dpi);
-        let mut frame = RECT {
-            left: 0,
-            top: 0,
-            right: client_width,
-            bottom: client_height,
-        };
-        // SAFETY: `frame` is a live RECT and the styles are the ones the window
-        // is created with below.
-        unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, ex_style, dpi) }
-            .map_err(|error| format!("AdjustWindowRectExForDpi: {error}"))?;
-        let mut width = frame.right - frame.left;
-        let mut height = frame.bottom - frame.top;
-        let mut left = 0;
-        let mut top = 0;
-        if let Some(monitor) = monitor {
-            let work = monitor.work;
-            // A 1120x760 window does not fit every laptop panel; clamp it so the
-            // title bar and the toolbar stay reachable.
-            width = width.min(work.width()).max(320);
-            height = height.min(work.height()).max(320);
-            left = work.left + (work.width() - width).max(0) / 2;
-            top = work.top + (work.height() - height).max(0) / 2;
-        }
-
         let title = win32::wide(i18n::s().editor_title);
+        // A frameless, topmost popup: the editor is a floating hanging picture,
+        // not a document window. It has no caption buttons and no border; the
+        // card, the pin and the floating pills are the whole image.
         // SAFETY: the class is registered, `title` is NUL-terminated and alive
         // for the call, and no parent or menu is requested.
         let hwnd = unsafe {
             CreateWindowExW(
-                ex_style,
+                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 CLASS_NAME,
                 PCWSTR(title.as_ptr()),
-                style,
+                WS_POPUP,
                 left,
                 top,
                 width,
@@ -235,31 +214,21 @@ impl Editor {
         }
         .map_err(|error| format!("CreateWindowExW(editor): {error}"))?;
 
-        // The canvas and toolbar are dark, so ask DWM for a dark title bar too.
-        // This is a no-op on Windows versions before 10 1809; the window is
-        // still usable with the normal light caption.
-        let dark = 1i32;
-        // SAFETY: our own window; the attribute expects a DWORD-sized pointer.
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                &dark as *const i32 as *const c_void,
-                std::mem::size_of::<i32>() as u32,
-            );
-        }
-
         let (tx, rx) = mpsc::channel();
+        let initial = layout::fit(width as f32 / scale, height as f32 / scale, source_size);
         let shared = Arc::new(Shared {
             tx: Mutex::new(tx),
             notify: Mutex::new(Some(notify)),
             event: Mutex::new(None),
+            layout: Mutex::new(initial),
             pending_high: AtomicU32::new(0),
             captured: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             reported: AtomicBool::new(false),
             delivered: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            focus_ready: AtomicBool::new(false),
+            commit_requested: AtomicBool::new(false),
             text_tool: AtomicBool::new(false),
             ime: AtomicIsize::new(0),
             caret_x: AtomicI32::new(-1),
@@ -290,13 +259,14 @@ impl Editor {
         }
 
         let (client_width, client_height) = client_size(hwnd).unwrap_or((1, 1));
-        let render_dpi = win32::window_dpi(hwnd);
+        let render_dpi = win32::window_dpi(hwnd).max(96);
         let start = Start {
             hwnd: SendHwnd(hwnd),
             path: path.to_path_buf(),
             width_px: client_width,
             height_px: client_height,
             dpi: render_dpi,
+            source_size,
         };
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
@@ -357,52 +327,67 @@ impl Editor {
             }
         }
 
-        // The title bar and Alt-Tab need an icon; the window class has none, so
-        // the embedded Pegline icon is installed on this window. The handles
-        // stay alive until `shutdown` destroys the window.
-        let mut icons = Vec::with_capacity(2);
-        for (kind, size) in [
-            (ICON_BIG, win32::large_icon_size()),
-            (ICON_SMALL, win32::small_icon_size()),
-        ] {
-            if let Some(icon) = win32::load_app_icon(size) {
-                // SAFETY: our own window and live icon handles.
-                unsafe {
-                    SendMessageW(
-                        hwnd,
-                        WM_SETICON,
-                        Some(WPARAM(kind as usize)),
-                        Some(LPARAM(icon.0 as isize)),
-                    );
-                }
-                icons.push(icon);
-            }
-        }
-
-        // SAFETY: the window was created on this thread and has finished setup;
-        // taking focus is wanted here, unlike the overlay.
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(hwnd);
-        }
-        shared.send(Command::Resize {
-            width_px: client_width,
-            height_px: client_height,
-            dpi: render_dpi,
-        });
         logging::trace(format!(
-            "editor open: {} {}x{} px dpi {}",
+            "editor open: {} {}x{} px dpi {} source {}x{}",
             path.display(),
-            client_width,
-            client_height,
-            render_dpi
+            width,
+            height,
+            render_dpi,
+            source_size.0,
+            source_size.1
         ));
-        Ok(Self {
+        let mut editor = Self {
             hwnd,
             shared,
             join: Some(join),
-            icons,
-        })
+            source_size,
+        };
+        if visible {
+            editor.show();
+        }
+        Ok(editor)
+    }
+
+    /// Shows the window and takes focus. Called when the card-to-editor flight
+    /// lands, or directly when no flight can run.
+    pub fn show(&mut self) {
+        self.shared.commit_requested.store(false, Ordering::Release);
+        // SAFETY: our own window; taking focus is the point of this window.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        logging::trace("editor shown");
+    }
+
+    /// Hides the window so a flight can carry the picture away before the
+    /// editor is released.
+    pub fn hide(&mut self) {
+        // SAFETY: our own window, alive while `self` owns it.
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    /// The glass card in screen pixels; the app flies the picture to and from
+    /// exactly this rectangle.
+    pub fn card_px(&self) -> Option<RectI> {
+        let rect = win32::window_rect(self.hwnd)?;
+        let (width_px, height_px) = client_size(self.hwnd)?;
+        let dpi = win32::window_dpi(self.hwnd).max(96);
+        let scale = dpi as f32 / 96.0;
+        let layout = layout::fit(
+            width_px as f32 / scale,
+            height_px as f32 / scale,
+            self.source_size,
+        );
+        Some(RectI::new(
+            rect.left + (layout.card.left * scale).round() as i32,
+            rect.top + (layout.card.top * scale).round() as i32,
+            rect.left + (layout.card.right * scale).round() as i32,
+            rect.top + (layout.card.bottom * scale).round() as i32,
+        ))
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -430,13 +415,6 @@ impl Editor {
                 let _ = DestroyWindow(self.hwnd);
             }
         }
-        for icon in self.icons.drain(..) {
-            // SAFETY: the window was destroyed above and the handle came from
-            // `LoadImageW` in `open`.
-            unsafe {
-                let _ = DestroyIcon(icon);
-            }
-        }
     }
 }
 
@@ -454,6 +432,9 @@ struct Shared {
     tx: Mutex<Sender<Command>>,
     notify: Mutex<Option<Notify>>,
     event: Mutex<Option<EditorEvent>>,
+    /// Where the card and the pills are, for the cursor and the window proc.
+    /// The render thread updates it on a resize or a DPI change.
+    layout: Mutex<Layout>,
     /// Pending high surrogate of a `WM_CHAR` pair.
     pending_high: AtomicU32,
     captured: AtomicBool,
@@ -461,6 +442,12 @@ struct Shared {
     reported: AtomicBool,
     delivered: AtomicBool,
     stopping: AtomicBool,
+    /// The window has taken focus once. Only then does losing focus finish the
+    /// edit; otherwise the initial activation churn would save immediately.
+    focus_ready: AtomicBool,
+    /// A save has already been requested, so focus loss and an outside click
+    /// cannot ask twice.
+    commit_requested: AtomicBool,
     /// The Text tool was the last tool button pressed; drives the I-beam
     /// cursor over the canvas. The render thread owns the real tool state.
     text_tool: AtomicBool,
@@ -544,6 +531,7 @@ struct Start {
     width_px: u32,
     height_px: u32,
     dpi: u32,
+    source_size: (u32, u32),
 }
 
 /// Window procedure: forwards input, delivers the result, closes the window.
@@ -567,19 +555,6 @@ unsafe extern "system" fn editor_wndproc(
             }
             return LRESULT(0);
         }
-        WM_GETMINMAXINFO => {
-            // SAFETY: the system passes a live MINMAXINFO for this message.
-            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-            // SAFETY: pure query; valid during creation as well.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-            if let Some((width, height)) = min_window_size(dpi) {
-                info.ptMinTrackSize = POINT {
-                    x: width,
-                    y: height,
-                };
-            }
-            return LRESULT(0);
-        }
         _ => {}
     }
 
@@ -594,14 +569,33 @@ unsafe extern "system" fn editor_wndproc(
     let shared = unsafe { &*raw };
 
     match message {
-        WM_CLOSE => {
-            // The render thread decides; the window closes when it reports.
-            if !shared.delivered.load(Ordering::Acquire)
-                && !shared.send(Command::Cancel)
-                && !shared.reported.load(Ordering::Acquire)
-            {
-                deliver(shared, hwnd, EditorEvent::Cancelled);
+        WM_ACTIVATE => {
+            // Clicking anywhere outside the editor — another app, the desktop,
+            // the line — finishes the edit exactly like clicking the empty part
+            // of this window. Not before the window has had focus once: the
+            // activation churn while the opening flight lands would otherwise
+            // save the picture before anyone could draw on it.
+            let active = (wparam.0 as u32) & 0xFFFF;
+            logging::trace(format!("editor activate {active}"));
+            if active == 0 && shared.focus_ready.load(Ordering::Acquire) {
+                request_save(shared);
             }
+            return LRESULT(0);
+        }
+        WM_SETFOCUS => {
+            logging::trace("editor focus");
+            shared.focus_ready.store(true, Ordering::Release);
+            return LRESULT(0);
+        }
+        WM_KILLFOCUS => {
+            logging::trace("editor focus lost");
+            if shared.focus_ready.load(Ordering::Acquire) {
+                request_save(shared);
+            }
+            return LRESULT(0);
+        }
+        WM_CLOSE => {
+            request_save(shared);
             return LRESULT(0);
         }
         WM_APP_EDITOR_DONE => {
@@ -664,9 +658,8 @@ unsafe extern "system" fn editor_wndproc(
             return LRESULT(0);
         }
         WM_SETCURSOR => {
-            // Hand over the toolbar, cross/I-beam over the canvas. Without this
-            // the whole editor kept the default arrow (the WPF editor set
-            // Cursors.Hand on buttons and Cross/IBeam on the drawing surface).
+            // Hand over the floating pills, cross/I-beam over the photo and a
+            // plain arrow in the transparent gaps around the card.
             if (lparam.0 as u32 & 0xFFFF) == HTCLIENT {
                 let mut point = POINT::default();
                 // SAFETY: pure queries on our own window and the thread cursor.
@@ -675,13 +668,19 @@ unsafe extern "system" fn editor_wndproc(
                     let _ = ScreenToClient(hwnd, &mut point);
                 }
                 let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
-                let dy = point.y as f32 / (dpi / 96.0);
-                let cursor = if dy <= TOOLBAR_HEIGHT {
-                    IDC_HAND
-                } else if shared.text_tool.load(Ordering::Acquire) {
-                    IDC_IBEAM
-                } else {
-                    IDC_CROSS
+                let x = point.x as f32 / (dpi / 96.0);
+                let y = point.y as f32 / (dpi / 96.0);
+                let layout = shared.layout.lock().map(|layout| *layout).ok();
+                let cursor = match layout {
+                    Some(layout) if layout.hit(x, y).is_some() => IDC_HAND,
+                    Some(layout) if layout.on_photo(x, y) => {
+                        if shared.text_tool.load(Ordering::Acquire) {
+                            IDC_IBEAM
+                        } else {
+                            IDC_CROSS
+                        }
+                    }
+                    _ => IDC_ARROW,
                 };
                 // SAFETY: system cursors are process-wide and never freed.
                 unsafe {
@@ -764,7 +763,7 @@ unsafe extern "system" fn editor_wndproc(
                 return LRESULT(0);
             }
             if control && key == VK_S.0 as u32 {
-                shared.send(Command::Save);
+                request_save(shared);
                 return LRESULT(0);
             }
         }
@@ -772,6 +771,20 @@ unsafe extern "system" fn editor_wndproc(
     }
     // SAFETY: default processing for messages the editor does not handle.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Asks the render thread for one save.
+///
+/// Losing focus, clicking outside the card and Ctrl+S all funnel through here,
+/// so a single gesture cannot queue two saves; a failed save clears the flag at
+/// the other end so the user may try again.
+fn request_save(shared: &Shared) {
+    if shared.commit_requested.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if !shared.send(Command::Save) {
+        shared.commit_requested.store(false, Ordering::Release);
+    }
 }
 
 /// Hands the queued result to the app, then destroys the window.
@@ -788,8 +801,12 @@ fn deliver_pending(shared: &Shared, hwnd: HWND) {
     }
 }
 
-/// Calls `notify` exactly once on the UI thread and closes the window.
-fn deliver(shared: &Shared, hwnd: HWND, event: EditorEvent) {
+/// Calls `notify` exactly once on the UI thread. The window is deliberately
+/// left standing: the app starts the flight back to the line, hides this window
+/// when the flight's first frame is up, and destroys it when the flight ends.
+/// Destroying it here would leave one frame with neither the editor nor the
+/// flight on screen.
+fn deliver(shared: &Shared, _hwnd: HWND, event: EditorEvent) {
     if shared.delivered.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -802,13 +819,6 @@ fn deliver(shared: &Shared, hwnd: HWND, event: EditorEvent) {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify(event)));
         if outcome.is_err() {
             logging::error("panic in the editor notify callback");
-        }
-    }
-    if !shared.closed.load(Ordering::Acquire) {
-        // SAFETY: destroying the editor window from its own procedure;
-        // `DestroyWindow` is synchronous and sends `WM_DESTROY` before returning.
-        unsafe {
-            let _ = DestroyWindow(hwnd);
         }
     }
 }
@@ -916,29 +926,6 @@ fn pixels(dip: f32, dpi: u32) -> i32 {
     ((dip * dpi.max(96) as f32 / 96.0).round() as i32).max(1)
 }
 
-/// The smallest window size for a client of 720x520 DIP, in window pixels.
-fn min_window_size(dpi: u32) -> Option<(i32, i32)> {
-    let dpi = dpi.max(96);
-    let mut frame = RECT {
-        left: 0,
-        top: 0,
-        right: pixels(MIN_WIDTH_DIP, dpi),
-        bottom: pixels(MIN_HEIGHT_DIP, dpi),
-    };
-    // SAFETY: `frame` is a live RECT; the styles match the editor window.
-    unsafe {
-        AdjustWindowRectExForDpi(
-            &mut frame,
-            WS_OVERLAPPEDWINDOW,
-            false,
-            WS_EX_NOREDIRECTIONBITMAP,
-            dpi,
-        )
-    }
-    .ok()?;
-    Some((frame.right - frame.left, frame.bottom - frame.top))
-}
-
 // ---- the render thread ----------------------------------------------------
 
 fn render_thread(
@@ -965,6 +952,7 @@ fn render_thread(
         start.width_px,
         start.height_px,
         start.dpi,
+        start.source_size,
         surface,
         Arc::clone(&shared),
     ) {
@@ -1054,119 +1042,23 @@ struct Label {
     height: f32,
 }
 
-/// The measured widths the toolbar layout needs.
-#[derive(Clone, Copy, Debug, Default)]
-struct LabelWidths {
-    undo: f32,
-    redo: f32,
-    cancel: f32,
-    save: f32,
-}
-
-/// Every text layout the toolbar draws. Created once per surface.
+/// Every text layout the floating action pills draw. Created once per surface.
 struct Labels {
     undo: Label,
     redo: Label,
     cancel: Label,
     save: Label,
-    undo_glyph: Label,
-    redo_glyph: Label,
 }
 
 impl Labels {
     fn build(dwrite: &IDWriteFactory, strings: &crate::i18n::Strings) -> Result<Self, String> {
         let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
-        let glyph = create_format(
-            dwrite,
-            font::SYMBOL_FAMILY,
-            17.0,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
-        )
-        .or_else(|_| create_format(dwrite, font::UI_FAMILY, 17.0, DWRITE_FONT_WEIGHT_MEDIUM))?;
         Ok(Self {
             undo: label(dwrite, &ui, strings.undo)?,
             redo: label(dwrite, &ui, strings.redo)?,
             cancel: label(dwrite, &ui, strings.cancel)?,
             save: label(dwrite, &ui, strings.save)?,
-            undo_glyph: label(dwrite, &glyph, "\u{21B6}")?,
-            redo_glyph: label(dwrite, &glyph, "\u{21B7}")?,
         })
-    }
-
-    fn widths(&self) -> LabelWidths {
-        LabelWidths {
-            undo: self.undo.width,
-            redo: self.redo.width,
-            cancel: self.cancel.width,
-            save: self.save.width,
-        }
-    }
-}
-
-/// Hit rectangles for one toolbar width, in DIP.
-#[derive(Default)]
-struct ToolbarLayout {
-    tools: [RectF; 4],
-    colors: [RectF; 6],
-    widths: [RectF; 3],
-    undo: RectF,
-    redo: RectF,
-    cancel: RectF,
-    save: RectF,
-    /// Vertical group separators: after the tools, after the colours and
-    /// between undo/redo and Cancel/Save.
-    separators: [f32; 3],
-    /// Undo/redo show glyphs instead of labels on a narrow window.
-    compact: bool,
-}
-
-/// One density of the toolbar. The wide set is airy on the 1120 DIP default
-/// window; the compact set still fits the 720 DIP minimum with room to spare.
-#[derive(Clone, Copy, Debug)]
-struct ToolbarMetrics {
-    edge: f32,
-    tool_size: f32,
-    tool_gap: f32,
-    swatch_size: f32,
-    swatch_gap: f32,
-    width_size: f32,
-    width_gap: f32,
-    /// Space on each side of a group separator.
-    group_gap: f32,
-    action_gap: f32,
-    button_height: f32,
-    compact: bool,
-}
-
-fn toolbar_metrics(width_dip: f32) -> ToolbarMetrics {
-    if width_dip >= WIDE_TOOLBAR {
-        ToolbarMetrics {
-            edge: 16.0,
-            tool_size: 38.0,
-            tool_gap: 4.0,
-            swatch_size: 26.0,
-            swatch_gap: 6.0,
-            width_size: 34.0,
-            width_gap: 4.0,
-            group_gap: 14.0,
-            action_gap: 8.0,
-            button_height: 38.0,
-            compact: false,
-        }
-    } else {
-        ToolbarMetrics {
-            edge: 8.0,
-            tool_size: 34.0,
-            tool_gap: 3.0,
-            swatch_size: 22.0,
-            swatch_gap: 4.0,
-            width_size: 30.0,
-            width_gap: 2.0,
-            group_gap: 8.0,
-            action_gap: 6.0,
-            button_height: 34.0,
-            compact: true,
-        }
     }
 }
 
@@ -1190,18 +1082,6 @@ struct Drag {
     current: (f32, f32),
 }
 
-/// One toolbar hit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Action {
-    Tool(usize),
-    Color(usize),
-    Width(usize),
-    Undo,
-    Redo,
-    Cancel,
-    Save,
-}
-
 /// Everything on the render thread's side of the editor.
 struct EditorState {
     surface: Surface,
@@ -1215,9 +1095,12 @@ struct EditorState {
     color: u32,
     width: f32,
     drag: Option<Drag>,
-    /// The toolbar entry under the pointer, for the WPF-style hover state.
-    hover: Option<Action>,
-    layout: ToolbarLayout,
+    /// The button under the pointer, for the hover state.
+    hover: Option<Hit>,
+    /// Card, photo, pin and every floating button, in DIP.
+    layout: Layout,
+    /// Rounded mask for the photo's corners, rebuilt with the layout.
+    photo_mask: Option<ID2D1Geometry>,
     canvas: CanvasLayout,
     width_px: u32,
     height_px: u32,
@@ -1235,6 +1118,7 @@ impl EditorState {
         width_px: u32,
         height_px: u32,
         dpi: u32,
+        source_size: (u32, u32),
         surface: Surface,
         shared: Arc<Shared>,
     ) -> Result<Self, String> {
@@ -1252,9 +1136,12 @@ impl EditorState {
         let dpi = dpi.max(96) as f32;
         let width_dip = width_px as f32 * 96.0 / dpi;
         let height_dip = height_px as f32 * 96.0 / dpi;
-        let layout = toolbar_layout(width_dip, labels.widths());
-        let canvas = canvas_layout(width_dip, height_dip, (0, 0));
-        Ok(Self {
+        let layout = layout::fit(width_dip, height_dip, source_size);
+        let canvas = CanvasLayout {
+            image: layout.photo,
+            scale: layout.scale,
+        };
+        let mut state = Self {
             surface,
             chrome,
             assets,
@@ -1268,16 +1155,37 @@ impl EditorState {
             drag: None,
             hover: None,
             layout,
+            photo_mask: None,
             canvas,
             width_px,
             height_px,
             dpi,
-            source_size: (0, 0),
+            source_size,
             texts_dirty: false,
             dirty: true,
             lost: 0,
             shared,
-        })
+        };
+        state.rebuild_photo_mask();
+        Ok(state)
+    }
+
+    /// Rebuilds the rounded mask the photo is clipped with.
+    fn rebuild_photo_mask(&mut self) {
+        let radius = layout::CARD_RADIUS - layout::CARD_INSET;
+        let rounded = D2D1_ROUNDED_RECT {
+            rect: d2d_rect(self.layout.photo),
+            radiusX: radius,
+            radiusY: radius,
+        };
+        // SAFETY: the factory and the struct are alive for the call.
+        self.photo_mask = unsafe {
+            self.surface
+                .factory
+                .CreateRoundedRectangleGeometry(&rounded)
+        }
+        .ok()
+        .and_then(|geometry| geometry.cast().ok());
     }
 
     fn width_dip(&self) -> f32 {
@@ -1286,6 +1194,21 @@ impl EditorState {
 
     fn height_dip(&self) -> f32 {
         self.height_px as f32 * 96.0 / self.dpi
+    }
+
+    /// Rebuilds the card and pill geometry after a resize, a DPI change or the
+    /// decoded picture's real size, and publishes it for the cursor and the
+    /// window procedure.
+    fn relayout(&mut self) {
+        self.layout = layout::fit(self.width_dip(), self.height_dip(), self.source_size);
+        self.canvas = CanvasLayout {
+            image: self.layout.photo,
+            scale: self.layout.scale,
+        };
+        self.rebuild_photo_mask();
+        if let Ok(mut shared) = self.shared.layout.lock() {
+            *shared = self.layout;
+        }
     }
 
     /// Decodes the picture at full resolution and uploads it for the preview.
@@ -1302,7 +1225,7 @@ impl EditorState {
         self.source_size = (image.width, image.height);
         self.assets.set_source(&image)?;
         self.doc = Some(Doc::new(image));
-        self.canvas = canvas_layout(self.width_dip(), self.height_dip(), self.source_size);
+        self.relayout();
         self.texts.clear();
         self.texts_dirty = true;
         self.dirty = true;
@@ -1324,8 +1247,7 @@ impl EditorState {
         self.width_px = width_px;
         self.height_px = height_px;
         self.dpi = dpi as f32;
-        self.layout = toolbar_layout(self.width_dip(), self.labels.widths());
-        self.canvas = canvas_layout(self.width_dip(), self.height_dip(), self.source_size);
+        self.relayout();
         self.dirty = true;
         Ok(())
     }
@@ -1357,8 +1279,7 @@ impl EditorState {
         self.assets = assets;
         self.texts.clear();
         self.texts_dirty = true;
-        self.layout = toolbar_layout(self.width_dip(), self.labels.widths());
-        self.canvas = canvas_layout(self.width_dip(), self.height_dip(), self.source_size);
+        self.relayout();
         self.dirty = true;
         self.lost = 0;
         logging::error("editor surface rebuilt");
@@ -1469,11 +1390,18 @@ impl EditorState {
 
     fn pointer_down(&mut self, x_px: i32, y_px: i32) -> Step {
         let (x, y) = self.to_dip(x_px, y_px);
-        if y <= TOOLBAR_HEIGHT {
-            if let Some(action) = self.hit_action(x, y) {
-                return self.activate(action);
-            }
+        if let Some(hit) = self.layout.hit(x, y) {
+            return self.activate(hit);
+        }
+        if self.layout.on_pill(x, y) {
+            // A press between two buttons belongs to the floating toolbar, not
+            // to the desktop behind it.
             return Step::Continue;
+        }
+        if !self.layout.on_card(x, y) {
+            // Anywhere else in the window finishes the edit, exactly like a
+            // click outside it (which arrives as focus loss).
+            return self.save_step();
         }
         // Any click on the picture ends the text that was being typed.
         if self.doc.as_ref().map(|doc| doc.is_typing()) == Some(true) {
@@ -1482,6 +1410,8 @@ impl EditorState {
             }
             self.texts_dirty = true;
         }
+        // The glass frame is part of the card but not part of the picture: a
+        // press there does nothing instead of marking the border.
         let Some(source) = self.source_at(x, y) else {
             return Step::Continue;
         };
@@ -1506,13 +1436,7 @@ impl EditorState {
     fn pointer_move(&mut self, x_px: i32, y_px: i32) {
         let (x, y) = self.to_dip(x_px, y_px);
         if self.drag.is_none() {
-            // Hover only exists on the toolbar. WPF lit every button under the
-            // pointer; the same state drives the hand cursor and the paint.
-            let hover = if y <= TOOLBAR_HEIGHT {
-                self.hit_action(x, y)
-            } else {
-                None
-            };
+            let hover = self.layout.hit(x, y);
             if self.hover != hover {
                 self.hover = hover;
                 self.dirty = true;
@@ -1560,6 +1484,17 @@ impl EditorState {
             _ => None,
         };
         if let Some(mark) = mark {
+            logging::trace(format!(
+                "editor mark {:?} drag {:?}->{:?}",
+                match self.tool {
+                    Tool::Arrow => "arrow",
+                    Tool::Rectangle => "rect",
+                    Tool::Text => "text",
+                    Tool::Mosaic => "mosaic",
+                },
+                drag.start,
+                end
+            ));
             if let Some(doc) = self.doc.as_mut() {
                 doc.push(mark);
             }
@@ -1568,43 +1503,13 @@ impl EditorState {
     }
 
     /// The toolbar entry under a DIP point.
-    fn hit_action(&self, x: f32, y: f32) -> Option<Action> {
-        if y > TOOLBAR_HEIGHT {
-            return None;
-        }
-        for (index, rect) in self.layout.tools.iter().enumerate() {
-            if rect.contains(x, y) {
-                return Some(Action::Tool(index));
-            }
-        }
-        for (index, rect) in self.layout.colors.iter().enumerate() {
-            if rect.contains(x, y) {
-                return Some(Action::Color(index));
-            }
-        }
-        for (index, rect) in self.layout.widths.iter().enumerate() {
-            if rect.contains(x, y) {
-                return Some(Action::Width(index));
-            }
-        }
-        if self.layout.undo.contains(x, y) {
-            return Some(Action::Undo);
-        }
-        if self.layout.redo.contains(x, y) {
-            return Some(Action::Redo);
-        }
-        if self.layout.cancel.contains(x, y) {
-            return Some(Action::Cancel);
-        }
-        if self.layout.save.contains(x, y) {
-            return Some(Action::Save);
-        }
-        None
+    fn hit_action(&self, x: f32, y: f32) -> Option<Hit> {
+        self.layout.hit(x, y)
     }
 
-    fn activate(&mut self, action: Action) -> Step {
-        match action {
-            Action::Tool(index) => {
+    fn activate(&mut self, hit: Hit) -> Step {
+        match hit {
+            Hit::Tool(index) => {
                 if let Some(tool) = TOOLS.get(index) {
                     self.tool = *tool;
                     // The UI thread reads this for the I-beam and the IME
@@ -1616,32 +1521,32 @@ impl EditorState {
                     self.dirty = true;
                 }
             }
-            Action::Color(index) => {
+            Hit::Colour(index) => {
                 if let Some(entry) = COLORS.get(index) {
                     self.color = entry.0;
                     self.dirty = true;
                 }
             }
-            Action::Width(index) => {
+            Hit::Width(index) => {
                 if let Some(width) = WIDTHS.get(index) {
                     self.width = *width;
                     self.dirty = true;
                 }
             }
-            Action::Undo => {
+            Hit::Undo => {
                 if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
                     self.texts_dirty = true;
                     self.dirty = true;
                 }
             }
-            Action::Redo => {
+            Hit::Redo => {
                 if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
                     self.texts_dirty = true;
                     self.dirty = true;
                 }
             }
-            Action::Cancel => return Step::Done(EditorEvent::Cancelled),
-            Action::Save => return self.save_step(),
+            Hit::Cancel => return Step::Done(EditorEvent::Cancelled),
+            Hit::Save => return self.save_step(),
         }
         Step::Continue
     }
@@ -1650,10 +1555,16 @@ impl EditorState {
         if let Some(doc) = self.doc.as_mut() {
             doc.finish_text();
         }
+        if self.doc.as_ref().map(|doc| doc.marks().is_empty()) == Some(true) {
+            // Nothing was drawn: do not re-encode and rewrite the same picture.
+            return Step::Done(EditorEvent::Cancelled);
+        }
         match self.save() {
-            Ok(bytes) => Step::Done(EditorEvent::Saved(bytes)),
+            Ok((png, preview)) => Step::Done(EditorEvent::Saved { png, preview }),
             Err(error) => {
-                // The window stays open: the marks are the user's work.
+                // The window stays open: the marks are the user's work, and
+                // the next outside click may try again.
+                self.shared.commit_requested.store(false, Ordering::Release);
                 logging::error(format!("editor save: {error}"));
                 Step::Continue
             }
@@ -1668,9 +1579,14 @@ impl EditorState {
             self.texts_dirty = false;
         }
         self.prepare_mosaics();
-        self.surface.begin()?;
-        self.paint_toolbar();
-        self.paint_canvas();
+        // The photo and the marks are painted into an opaque card bitmap so
+        // text can keep ClearType; the window itself stays transparent around
+        // the card and the floating pills.
+        self.surface.begin_card(self.layout.photo, self.dpi)?;
+        self.paint_photo();
+        self.surface.end_card()?;
+        self.surface.begin_window()?;
+        self.paint_chrome();
         self.surface.end()?;
         match self.surface.present(true) {
             crate::render::Present::Ok => {
@@ -1730,93 +1646,161 @@ impl EditorState {
             if let Some(image) = build_mosaic(source, key) {
                 if let Err(error) = self.assets.upload_mosaic(key, &image) {
                     logging::error(format!("editor mosaic: {error}"));
+                } else {
+                    logging::trace(format!("editor mosaic texture {key:?}"));
                 }
             }
         }
     }
 
-    fn paint_toolbar(&self) {
+    /// Paints the floating window: the card's baked shadow, the glass frame and
+    /// its picture, the clothespin and the five toolbar pills.
+    fn paint_chrome(&self) {
         let rt = &self.assets.rt;
-        let width = self.width_dip();
-        let bar = d2d_rect(RectF::from_xywh(0.0, 0.0, width, TOOLBAR_HEIGHT));
-        let line_y = TOOLBAR_HEIGHT - 0.5;
-        // SAFETY: the render target is in a draw and the brushes are ours.
+        // SAFETY: the window target is in a draw and every brush is ours.
         unsafe {
             rt.SetTransform(&Matrix3x2::identity());
-            rt.FillRectangle(&bar, &self.chrome.toolbar);
-            rt.DrawLine(
-                Vector2 { X: 0.0, Y: line_y },
-                Vector2 {
-                    X: width,
-                    Y: line_y,
-                },
-                &self.chrome.separator,
+        }
+        if let Some(shadow) = self.surface.shadow.as_ref() {
+            crate::render::draw_shadow(&self.surface.context, shadow, self.layout.card, 0.18);
+        }
+        let card = self.layout.card;
+        let frame = rounded(card, layout::CARD_RADIUS);
+        // SAFETY: the brushes and the render target are alive.
+        unsafe {
+            rt.FillRoundedRectangle(&frame, &self.chrome.glass);
+        }
+        if let Some(bitmap) = self.surface.card.as_ref() {
+            self.paint_card_bitmap(bitmap);
+        }
+        // SAFETY: as above.
+        unsafe {
+            rt.DrawRoundedRectangle(&frame, &self.chrome.border, 0.75, None);
+        }
+        self.paint_pin();
+        for pill in self.layout.top_pills {
+            self.paint_pill(pill);
+        }
+        for pill in self.layout.bottom_pills {
+            self.paint_pill(pill);
+        }
+        self.paint_tools();
+        self.paint_colours();
+        self.paint_widths();
+        self.paint_actions();
+    }
+
+    /// Draws the opaque photo bitmap inside the rounded photo corners.
+    fn paint_card_bitmap(&self, bitmap: &ID2D1Bitmap1) {
+        let Some(mask) = self.photo_mask.as_ref() else {
+            return;
+        };
+        let photo = self.layout.photo;
+        let parameters = D2D1_LAYER_PARAMETERS {
+            contentBounds: d2d_rect(photo),
+            geometricMask: ManuallyDrop::new(Some(mask.clone())),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            opacityBrush: ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS_NONE,
+        };
+        let destination = d2d_rect(photo);
+        let source = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: self.layout.photo.width(),
+            bottom: self.layout.photo.height(),
+        };
+        // SAFETY: the layer parameters and the rounded mask are alive for the
+        // calls; an internal layer is used because none is passed.
+        unsafe {
+            self.assets.rt.PushLayer(&parameters, None);
+            self.assets.rt.DrawBitmap(
+                bitmap,
+                Some(&destination),
                 1.0,
-                None,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                Some(&source),
             );
+            self.assets.rt.PopLayer();
         }
-        // Group separators are the quiet structure of the bar: 1 DIP lines with
-        // more air around them than the buttons have inside a group.
-        let separator_top = (TOOLBAR_HEIGHT - 22.0) * 0.5;
-        for x in self.layout.separators {
-            let x = x.floor() + 0.5;
-            // SAFETY: the render target is in a draw and the brush is ours.
-            unsafe {
-                rt.DrawLine(
-                    Vector2 {
-                        X: x,
-                        Y: separator_top,
-                    },
-                    Vector2 {
-                        X: x,
-                        Y: separator_top + 22.0,
-                    },
-                    &self.chrome.separator,
-                    1.0,
-                    None,
-                );
-            }
+    }
+
+    fn paint_pill(&self, pill: RectF) {
+        let rounded = rounded(pill, layout::PILL_RADIUS);
+        // SAFETY: the brushes and the render target are alive.
+        unsafe {
+            self.assets
+                .rt
+                .FillRoundedRectangle(&rounded, &self.chrome.glass);
+            self.assets
+                .rt
+                .DrawRoundedRectangle(&rounded, &self.chrome.border, 0.75, None);
         }
+    }
+
+    fn paint_pin(&self) {
+        let pin = self.layout.pin;
+        let body = rounded(pin, 3.5);
+        // SAFETY: the brushes and the render target are alive.
+        unsafe {
+            self.assets
+                .rt
+                .FillRoundedRectangle(&body, &self.chrome.metal);
+            self.assets
+                .rt
+                .DrawRoundedRectangle(&body, &self.chrome.metal_edge, 0.6, None);
+        }
+        let slot = RectF::from_xywh(pin.left + 2.0, pin.top + 8.0, pin.width() - 4.0, 1.4);
+        self.fill_round(slot, 0.7, &self.chrome.pin_slot);
+    }
+
+    fn fill_round(&self, rect: RectF, radius: f32, brush: &ID2D1SolidColorBrush) {
+        // SAFETY: the brush and the render target are alive.
+        unsafe {
+            self.assets
+                .rt
+                .FillRoundedRectangle(&rounded(rect, radius), brush);
+        }
+    }
+
+    fn paint_tools(&self) {
         for (index, rect) in self.layout.tools.iter().enumerate() {
             let selected = TOOLS[index] == self.tool;
-            self.paint_button(
-                *rect,
-                selected,
-                false,
-                self.hover == Some(Action::Tool(index)),
-            );
+            let hovered = self.hover == Some(Hit::Tool(index));
+            self.paint_button(*rect, selected, hovered);
             let brush = if selected {
                 &self.chrome.white
             } else {
-                &self.chrome.text
+                &self.chrome.ink
             };
             self.paint_tool_icon(index, *rect, brush);
         }
-        for (index, rect) in self.layout.colors.iter().enumerate() {
+    }
+
+    fn paint_colours(&self) {
+        for (index, rect) in self.layout.colours.iter().enumerate() {
             let rgb = COLORS[index].0;
             let rounded = rounded(*rect, 5.0);
             if let Some(brush) = self.assets.brush(rgb) {
                 // SAFETY: the brush and the render target are alive.
                 unsafe {
-                    rt.FillRoundedRectangle(&rounded, brush);
+                    self.assets.rt.FillRoundedRectangle(&rounded, brush);
                 }
             }
             let selected = rgb == self.color;
-            let hovered = self.hover == Some(Action::Color(index));
-            let border = if selected {
-                if rgb == 0xFF_FF_FF {
-                    &self.chrome.accent_border
-                } else {
-                    &self.chrome.white
-                }
-            } else if hovered {
-                &self.chrome.white
+            let hovered = self.hover == Some(Hit::Colour(index));
+            // A white swatch needs a dark ring to stay visible on the glass;
+            // every other colour takes the same quiet hairline.
+            let border = if selected || hovered {
+                &self.chrome.accent
             } else {
-                &self.chrome.button_border
+                &self.chrome.ink_dim
             };
             // SAFETY: the brush and the render target are alive.
             unsafe {
-                rt.DrawRoundedRectangle(
+                self.assets.rt.DrawRoundedRectangle(
                     &rounded,
                     border,
                     if selected {
@@ -1830,23 +1814,24 @@ impl EditorState {
                 );
             }
         }
+    }
+
+    fn paint_widths(&self) {
         for (index, rect) in self.layout.widths.iter().enumerate() {
             let selected = (WIDTHS[index] - self.width).abs() < 0.01;
-            self.paint_button(
-                *rect,
-                selected,
-                false,
-                self.hover == Some(Action::Width(index)),
-            );
-            // A short line preview is clearer than a dot: it shows the actual
-            // stroke weight in the selected colour. The dim outline keeps a
-            // black or white line visible on the dark toolbar.
+            let hovered = self.hover == Some(Hit::Width(index));
+            self.paint_button(*rect, selected, hovered);
             let center = rect.center();
             let (y, half) = (center.1, 9.0);
-            let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.white);
+            let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.ink);
+            let outline = if selected {
+                &self.chrome.white
+            } else {
+                &self.chrome.ink_dim
+            };
             // SAFETY: the render target is in a draw and the brushes are alive.
             unsafe {
-                rt.DrawLine(
+                self.assets.rt.DrawLine(
                     Vector2 {
                         X: center.0 - half,
                         Y: y,
@@ -1855,11 +1840,11 @@ impl EditorState {
                         X: center.0 + half,
                         Y: y,
                     },
-                    &self.chrome.text_dim,
+                    outline,
                     WIDTHS[index] + 2.0,
                     Some(&self.surface.stroke_round),
                 );
-                rt.DrawLine(
+                self.assets.rt.DrawLine(
                     Vector2 {
                         X: center.0 - half,
                         Y: y,
@@ -1874,73 +1859,74 @@ impl EditorState {
                 );
             }
         }
+    }
+
+    fn paint_actions(&self) {
         let undo_enabled = self.doc.as_ref().map(|doc| doc.can_undo()) == Some(true);
         let redo_enabled = self.doc.as_ref().map(|doc| doc.can_redo()) == Some(true);
         self.paint_action(
             self.layout.undo,
-            if self.layout.compact {
-                &self.labels.undo_glyph
-            } else {
-                &self.labels.undo
-            },
+            &self.labels.undo,
             undo_enabled,
             false,
-            self.hover == Some(Action::Undo),
+            self.hover == Some(Hit::Undo),
         );
         self.paint_action(
             self.layout.redo,
-            if self.layout.compact {
-                &self.labels.redo_glyph
-            } else {
-                &self.labels.redo
-            },
+            &self.labels.redo,
             redo_enabled,
             false,
-            self.hover == Some(Action::Redo),
+            self.hover == Some(Hit::Redo),
         );
         self.paint_action(
             self.layout.cancel,
             &self.labels.cancel,
             true,
             false,
-            self.hover == Some(Action::Cancel),
+            self.hover == Some(Hit::Cancel),
         );
         self.paint_action(
             self.layout.save,
             &self.labels.save,
             true,
             true,
-            self.hover == Some(Action::Save),
+            self.hover == Some(Hit::Save),
         );
     }
 
-    fn paint_canvas(&self) {
+    /// Paints the picture and its marks into the opaque card bitmap. The
+    /// transform maps source pixels to the bitmap's DIP space, whose origin is
+    /// the photo's top-left corner.
+    fn paint_photo(&self) {
         let rt = &self.assets.rt;
-        let image = self.canvas.image;
-        let Some(bitmap) = self.assets.source.as_ref() else {
-            return;
-        };
-        let clip = d2d_rect(image);
-        let source = D2D_RECT_F {
-            left: 0.0,
-            top: 0.0,
-            right: self.source_size.0 as f32,
-            bottom: self.source_size.1 as f32,
-        };
-        let base = Matrix3x2::scale(self.canvas.scale, self.canvas.scale)
-            * Matrix3x2::translation(image.left, image.top);
-        // SAFETY: the render target is in a draw and the bitmap is alive; the
-        // clip keeps marks from spilling over the dark window.
+        let base = Matrix3x2::scale(self.canvas.scale, self.canvas.scale);
+        // SAFETY: the card target is in a draw and the bitmap is alive.
         unsafe {
-            rt.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            rt.DrawBitmap(
-                bitmap,
-                Some(&clip),
-                1.0,
-                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                Some(&source),
-            );
             rt.SetTransform(&base);
+        }
+        if let Some(bitmap) = self.assets.source.as_ref() {
+            let full = d2d_rect(RectF::from_xywh(
+                0.0,
+                0.0,
+                self.source_size.0 as f32,
+                self.source_size.1 as f32,
+            ));
+            let source = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: self.source_size.0 as f32,
+                bottom: self.source_size.1 as f32,
+            };
+            // SAFETY: the bitmap covers the whole destination.
+            unsafe {
+                rt.DrawBitmap(
+                    bitmap,
+                    Some(&full),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    Some(&source),
+                );
+            }
         }
         let painter = Painter {
             rt,
@@ -2015,35 +2001,38 @@ impl EditorState {
         if let Some(drag) = self.drag.as_ref() {
             painter.drag(self.tool, self.color, self.width, self.canvas.scale, drag);
         }
-        // SAFETY: restores the identity transform and pops the matching clip.
+        // SAFETY: restores the identity transform for the next target.
         unsafe {
             rt.SetTransform(&Matrix3x2::identity());
-            rt.PopAxisAlignedClip();
-            let frame = d2d_rect(image);
-            rt.DrawRectangle(&frame, &self.chrome.separator, 1.0, None);
         }
     }
 
-    fn paint_button(&self, rect: RectF, selected: bool, primary: bool, hovered: bool) {
+    fn paint_button(&self, rect: RectF, selected: bool, hovered: bool) {
         let rounded = rounded(rect, BUTTON_RADIUS);
-        let (fill, border) = if primary || selected {
-            let fill = if hovered {
+        let fill = if selected {
+            Some(if hovered {
                 &self.chrome.accent_hover
             } else {
                 &self.chrome.accent
-            };
-            (fill, &self.chrome.accent_border)
+            })
         } else if hovered {
-            (&self.chrome.button_hover, &self.chrome.button_border)
+            Some(&self.chrome.glass_lit)
         } else {
-            (&self.chrome.button, &self.chrome.button_border)
+            None
         };
         // SAFETY: the brushes and the render target are alive.
         unsafe {
-            self.assets.rt.FillRoundedRectangle(&rounded, fill);
-            self.assets
-                .rt
-                .DrawRoundedRectangle(&rounded, border, 1.0, None);
+            if let Some(fill) = fill {
+                self.assets.rt.FillRoundedRectangle(&rounded, fill);
+            }
+            if selected {
+                self.assets.rt.DrawRoundedRectangle(
+                    &rounded,
+                    &self.chrome.accent_border,
+                    1.0,
+                    None,
+                );
+            }
         }
     }
 
@@ -2153,11 +2142,13 @@ impl EditorState {
         primary: bool,
         hovered: bool,
     ) {
-        self.paint_button(rect, primary, primary, hovered);
-        let brush = if enabled {
+        self.paint_button(rect, primary, hovered);
+        let brush = if primary {
             &self.chrome.white
+        } else if enabled {
+            &self.chrome.ink
         } else {
-            &self.chrome.text_dim
+            &self.chrome.ink_dim
         };
         self.paint_label(label, rect, brush);
     }
@@ -2178,13 +2169,17 @@ impl EditorState {
 
     // ---- saving -----------------------------------------------------------
 
-    /// Renders the source resolution plus marks into a WIC bitmap and encodes
-    /// it. Runs on the render thread, never on the UI thread.
-    fn save(&mut self) -> Result<Vec<u8>, String> {
-        if self.texts_dirty {
-            self.rebuild_texts();
-            self.texts_dirty = false;
-        }
+    /// Renders the source picture plus marks into an image of `width` x
+    /// `height` pixels. `scale` maps source pixels to those pixels: 1.0 for the
+    /// saved file, a fraction for the flight preview. Runs on the render
+    /// thread, never on the UI thread.
+    fn render_document(
+        &mut self,
+        width: u32,
+        height: u32,
+        scale: f32,
+        smooth: bool,
+    ) -> Result<ImageData, String> {
         let Some(doc) = self.doc.as_ref() else {
             return Err("there is no picture to save".to_string());
         };
@@ -2199,10 +2194,10 @@ impl EditorState {
                 source.bgra.len()
             ));
         }
-        let (width, height) = (source.width, source.height);
+        let (source_width, source_height) = (source.width, source.height);
         let factory = wic_factory()?;
-        // SAFETY: the factory is live, the size comes from a validated image and
-        // the pixel format is a static WIC GUID.
+        // SAFETY: the factory is live, the size is at least one pixel and the
+        // pixel format is a static WIC GUID.
         let target = unsafe {
             factory.CreateBitmap(
                 width,
@@ -2235,7 +2230,7 @@ impl EditorState {
             let Mark::Mosaic { rect, block } = mark else {
                 continue;
             };
-            let Some(key) = mosaic_key(*rect, *block, (width, height)) else {
+            let Some(key) = mosaic_key(*rect, *block, (source_width, source_height)) else {
                 continue;
             };
             if assets.has_mosaic(key) {
@@ -2246,13 +2241,19 @@ impl EditorState {
             }
         }
 
-        let full = d2d_rect(RectF::from_xywh(0.0, 0.0, width as f32, height as f32));
+        let transform = Matrix3x2::scale(scale, scale);
+        let full = d2d_rect(RectF::from_xywh(
+            0.0,
+            0.0,
+            source_width as f32,
+            source_height as f32,
+        ));
         // SAFETY: the target is a fresh WIC render target on this thread.
         unsafe {
             rt.SetDpi(96.0, 96.0);
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            // The saved PNG has an alpha channel; subpixel ClearType would both
-            // be unsupported and leave coloured fringes in the file.
+            // The file has an alpha channel; subpixel ClearType would both be
+            // unsupported and leave coloured fringes in it.
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             rt.SetTransform(&Matrix3x2::identity());
             rt.BeginDraw();
@@ -2262,16 +2263,21 @@ impl EditorState {
                 b: 0.0,
                 a: 0.0,
             }));
+            rt.SetTransform(&transform);
         }
         if let Some(bitmap) = assets.source.as_ref() {
-            // SAFETY: `bitmap` is alive and covers the full target.
+            // SAFETY: `bitmap` is alive and covers the full destination.
             unsafe {
                 rt.DrawBitmap(
                     bitmap,
-                    None,
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                     Some(&full),
+                    1.0,
+                    if smooth {
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
+                    } else {
+                        D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                    },
+                    None,
                 );
             }
         }
@@ -2281,7 +2287,7 @@ impl EditorState {
             stroke: &self.surface.stroke_round,
             dash: &self.surface.stroke_dash,
             triangle: &self.surface.triangle,
-            base: Matrix3x2::identity(),
+            base: transform,
         };
         painter.marks(doc.marks(), &self.texts);
         // SAFETY: `BeginDraw` was called above on this thread.
@@ -2315,127 +2321,27 @@ impl EditorState {
         // SAFETY: `bgra` is exactly `stride * height` bytes for the size above.
         unsafe { converter.CopyPixels(&rect, stride, &mut bgra) }
             .map_err(|error| format!("CopyPixels({width}x{height}): {error}"))?;
-        wic::encode_png_bytes(&ImageData::new(width, height, bgra))
-    }
-}
-
-// ---- toolbar and canvas layout --------------------------------------------
-
-/// Places the toolbar controls in DIP; the same math drives hit testing.
-///
-/// The groups read left to right as drawing tools, colour, line width, then the
-/// action cluster (undo/redo, Cancel, Save) pinned to the right edge. The gaps
-/// inside a group are tighter than the gaps around a separator, which is what
-/// makes the grouping legible without boxes around it.
-fn toolbar_layout(width_dip: f32, widths: LabelWidths) -> ToolbarLayout {
-    let width_dip = width_dip.max(1.0);
-    let m = toolbar_metrics(width_dip);
-    let top = ((TOOLBAR_HEIGHT - m.button_height) * 0.5).max(0.0);
-    let swatch_top = ((TOOLBAR_HEIGHT - m.swatch_size) * 0.5).max(0.0);
-    let mut separators = [0.0; 3];
-    let mut x = m.edge;
-    let mut tools = [RectF::default(); 4];
-    for slot in tools.iter_mut() {
-        *slot = RectF::from_xywh(x, top, m.tool_size, m.button_height);
-        x += m.tool_size + m.tool_gap;
-    }
-    x += m.group_gap;
-    separators[0] = x;
-    x += 1.0 + m.group_gap;
-    let mut colors = [RectF::default(); 6];
-    for slot in colors.iter_mut() {
-        *slot = RectF::from_xywh(x, swatch_top, m.swatch_size, m.swatch_size);
-        x += m.swatch_size + m.swatch_gap;
-    }
-    x += m.group_gap;
-    separators[1] = x;
-    x += 1.0 + m.group_gap;
-    let mut widths_rect = [RectF::default(); 3];
-    for slot in widths_rect.iter_mut() {
-        *slot = RectF::from_xywh(x, top, m.width_size, m.button_height);
-        x += m.width_size + m.width_gap;
+        Ok(ImageData::new(width, height, bgra))
     }
 
-    let save_width = action_width(widths.save, m.compact, true);
-    let cancel_width = action_width(widths.cancel, m.compact, false);
-    let right = width_dip - m.edge;
-    let save = RectF::from_xywh(right - save_width, top, save_width, m.button_height);
-    let cancel = RectF::from_xywh(
-        save.left - m.action_gap - cancel_width,
-        top,
-        cancel_width,
-        m.button_height,
-    );
-    separators[2] = cancel.left - m.group_gap;
-    let actions_right = separators[2] - 1.0 - m.group_gap;
-    let (undo_width, redo_width) = if m.compact {
-        (m.button_height, m.button_height)
-    } else {
-        (
-            (widths.undo + 24.0).max(72.0),
-            (widths.redo + 24.0).max(72.0),
-        )
-    };
-    let redo = RectF::from_xywh(actions_right - redo_width, top, redo_width, m.button_height);
-    let undo = RectF::from_xywh(
-        redo.left - m.action_gap - undo_width,
-        top,
-        undo_width,
-        m.button_height,
-    );
-    ToolbarLayout {
-        tools,
-        colors,
-        widths: widths_rect,
-        undo,
-        redo,
-        cancel,
-        save,
-        separators,
-        compact: m.compact,
-    }
-}
-
-/// Width of a labelled action button. Compact buttons use less side padding so
-/// the whole bar still fits the 720 DIP minimum in every language.
-fn action_width(label: f32, compact: bool, primary: bool) -> f32 {
-    if compact {
-        (label + 18.0).max(if primary { 62.0 } else { 58.0 })
-    } else {
-        (label + 26.0).max(72.0)
-    }
-}
-
-/// Fits the picture under the toolbar, centred, never above 1:1.
-fn canvas_layout(width_dip: f32, height_dip: f32, source: (u32, u32)) -> CanvasLayout {
-    let width_dip = width_dip.max(1.0);
-    let height_dip = height_dip.max(1.0);
-    let available_width = (width_dip - 2.0 * CANVAS_MARGIN).max(1.0);
-    let available_height = (height_dip - TOOLBAR_HEIGHT - 2.0 * CANVAS_MARGIN).max(1.0);
-    if source.0 == 0 || source.1 == 0 {
-        return CanvasLayout {
-            image: RectF::from_xywh(
-                width_dip * 0.5,
-                TOOLBAR_HEIGHT + available_height * 0.5,
-                0.0,
-                0.0,
-            ),
-            scale: 1.0,
-        };
-    }
-    let scale = (available_width / source.0 as f32)
-        .min(available_height / source.1 as f32)
-        .min(1.0);
-    let image_width = source.0 as f32 * scale;
-    let image_height = source.1 as f32 * scale;
-    CanvasLayout {
-        image: RectF::from_xywh(
-            (width_dip - image_width) * 0.5,
-            TOOLBAR_HEIGHT + (height_dip - TOOLBAR_HEIGHT - image_height) * 0.5,
-            image_width,
-            image_height,
-        ),
-        scale,
+    /// Encodes the source-resolution PNG and renders the card-sized preview
+    /// the flight back to the line carries.
+    fn save(&mut self) -> Result<(Vec<u8>, ImageData), String> {
+        if self.texts_dirty {
+            self.rebuild_texts();
+            self.texts_dirty = false;
+        }
+        let (source_width, source_height) = self.source_size;
+        let width = source_width.max(1);
+        let height = source_height.max(1);
+        let full = self.render_document(width, height, 1.0, false)?;
+        let png = wic::encode_png_bytes(&full)?;
+        let longest = width.max(height) as f32;
+        let scale = (layout::PREVIEW_MAX as f32 / longest).min(1.0);
+        let preview_width = ((width as f32 * scale).round() as u32).max(1);
+        let preview_height = ((height as f32 * scale).round() as u32).max(1);
+        let preview = self.render_document(preview_width, preview_height, scale, true)?;
+        Ok((png, preview))
     }
 }
 
@@ -2757,36 +2663,42 @@ impl<'a> Painter<'a> {
 
 /// Solid brushes for the toolbar chrome, created once per surface.
 struct Chrome {
-    toolbar: ID2D1SolidColorBrush,
-    separator: ID2D1SolidColorBrush,
-    button: ID2D1SolidColorBrush,
-    button_hover: ID2D1SolidColorBrush,
-    button_border: ID2D1SolidColorBrush,
+    /// The same white glass a hanging card wears.
+    glass: ID2D1SolidColorBrush,
+    /// Hover fill inside a pill.
+    glass_lit: ID2D1SolidColorBrush,
+    /// Hairline around a pill or the card.
+    border: ID2D1SolidColorBrush,
+    ink: ID2D1SolidColorBrush,
+    ink_dim: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
     accent_hover: ID2D1SolidColorBrush,
     accent_border: ID2D1SolidColorBrush,
-    text: ID2D1SolidColorBrush,
-    text_dim: ID2D1SolidColorBrush,
     white: ID2D1SolidColorBrush,
     /// The translucent sheet behind the text being typed (WPF's TextBox).
     text_box: ID2D1SolidColorBrush,
+    /// The clothespin.
+    metal: ID2D1SolidColorBrush,
+    metal_edge: ID2D1SolidColorBrush,
+    pin_slot: ID2D1SolidColorBrush,
 }
 
 impl Chrome {
     fn new(rt: &ID2D1RenderTarget) -> Result<Self, String> {
         Ok(Self {
-            toolbar: solid(rt, CHROME_TOOLBAR, 1.0)?,
-            separator: solid(rt, CHROME_SEPARATOR, 1.0)?,
-            button: solid(rt, CHROME_BUTTON, 1.0)?,
-            button_hover: solid(rt, CHROME_BUTTON_HOVER, 1.0)?,
-            button_border: solid(rt, CHROME_BUTTON_BORDER, 1.0)?,
+            glass: solid(rt, CHROME_GLASS, CHROME_GLASS_ALPHA)?,
+            glass_lit: solid(rt, CHROME_GLASS_LIT, CHROME_GLASS_LIT_ALPHA)?,
+            border: solid(rt, 0xFF_FF_FF, CHROME_BORDER_ALPHA)?,
+            ink: solid(rt, CHROME_INK, 1.0)?,
+            ink_dim: solid(rt, CHROME_INK_DIM, 1.0)?,
             accent: solid(rt, CHROME_ACCENT, 1.0)?,
             accent_hover: solid(rt, CHROME_ACCENT_HOVER, 1.0)?,
             accent_border: solid(rt, CHROME_ACCENT_BORDER, 1.0)?,
-            text: solid(rt, CHROME_TEXT, 1.0)?,
-            text_dim: solid(rt, CHROME_TEXT_DIM, 1.0)?,
             white: solid(rt, 0xFF_FF_FF, 1.0)?,
             text_box: solid(rt, 0xFF_FF_FF, 0.78)?,
+            metal: solid(rt, 0xD8_D8_D8, 1.0)?,
+            metal_edge: solid(rt, 0x8A_8A_8A, 0.9)?,
+            pin_slot: solid(rt, 0x00_00_00, 0.32)?,
         })
     }
 }
@@ -2904,6 +2816,11 @@ struct Surface {
     triangle: ID2D1Geometry,
     targets: [Option<ID2D1Bitmap1>; 2],
     target_props: D2D1_BITMAP_PROPERTIES1,
+    /// The opaque photo-plus-marks target; the window itself is transparent.
+    card: Option<ID2D1Bitmap1>,
+    card_props: D2D1_BITMAP_PROPERTIES1,
+    /// The card's baked shadow, the same texture the line uses.
+    shadow: Option<crate::render::ShadowBake>,
     width_px: u32,
     height_px: u32,
     dpi: f32,
@@ -2934,17 +2851,29 @@ impl Surface {
         let rt: ID2D1RenderTarget = context
             .cast()
             .map_err(|error| format!("ID2D1DeviceContext -> ID2D1RenderTarget: {error}"))?;
+        // The window is transparent around the card and the pills, so the swap
+        // chain is premultiplied; the opaque card bitmap below it keeps
+        // ClearType for the text marks.
         let target_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_IGNORE),
+            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
             dpiX: dpi_f,
             dpiY: dpi_f,
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let card_props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: pixel_format(D2D1_ALPHA_MODE_IGNORE),
+            dpiX: dpi_f,
+            dpiY: dpi_f,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
             colorContext: ManuallyDrop::new(None),
         };
         let stroke_round = stroke_style(&factory, D2D1_DASH_STYLE_SOLID, None)?;
         let stroke_dash = stroke_style(&factory, D2D1_DASH_STYLE_CUSTOM, Some(&[4.0, 3.0]))?;
         let triangle = create_triangle(&factory)?;
         let dwrite = create_dwrite()?;
+        let shadow = crate::render::bake_card_shadow(&context, dpi_f, 20.0, 5.0)
+            .map_err(|error| format!("bake card shadow: {error}"))?;
         let mut surface = Self {
             hwnd,
             swap_chain,
@@ -2958,6 +2887,9 @@ impl Surface {
             triangle,
             targets: [None, None],
             target_props,
+            card: None,
+            card_props,
+            shadow: Some(shadow),
             width_px,
             height_px,
             dpi: dpi_f,
@@ -3002,6 +2934,7 @@ impl Surface {
             self.context.SetTarget(None::<&ID2D1Image>);
         }
         self.targets = [None, None];
+        self.card = None;
         // SAFETY: every D2D target was released above.
         unsafe {
             self.swap_chain.ResizeBuffers(
@@ -3022,10 +2955,72 @@ impl Surface {
         }
         self.target_props.dpiX = self.dpi;
         self.target_props.dpiY = self.dpi;
+        self.card_props.dpiX = self.dpi;
+        self.card_props.dpiY = self.dpi;
+        self.shadow = crate::render::bake_card_shadow(&self.context, self.dpi, 20.0, 5.0).ok();
         Ok(())
     }
 
-    fn begin(&mut self) -> Result<(), String> {
+    /// Binds the opaque card bitmap for `photo` and starts painting on it.
+    fn begin_card(&mut self, photo: RectF, dpi: f32) -> Result<(), String> {
+        self.ensure_card(photo, dpi)?;
+        let Some(card) = self.card.as_ref() else {
+            return Err("card bitmap missing".to_string());
+        };
+        // SAFETY: the card is a target for this context and stays alive.
+        unsafe {
+            self.context.SetTarget(card);
+            self.context.SetDpi(self.dpi, self.dpi);
+            self.context.SetTransform(&Matrix3x2::identity());
+            self.context
+                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+            self.context.BeginDraw();
+            self.context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }));
+        }
+        Ok(())
+    }
+
+    fn end_card(&mut self) -> Result<(), String> {
+        // SAFETY: `begin_card` called `BeginDraw` on this thread.
+        unsafe { self.context.EndDraw(None, None) }
+            .map_err(|error| format!("EndDraw(card): {error}"))
+    }
+
+    fn ensure_card(&mut self, photo: RectF, dpi: f32) -> Result<(), String> {
+        let scale = dpi.max(96.0) / 96.0;
+        let width = ((photo.width() * scale).round() as u32).max(1);
+        let height = ((photo.height() * scale).round() as u32).max(1);
+        if self
+            .card
+            .as_ref()
+            .map(|bitmap| {
+                // SAFETY: a pure query on a live bitmap.
+                let size = unsafe { bitmap.GetPixelSize() };
+                size.width == width && size.height == height
+            })
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        // SAFETY: the context is ours and the target bitmap is created with the
+        // photo's exact pixel size.
+        self.card = Some(
+            unsafe {
+                self.context
+                    .CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &self.card_props)
+            }
+            .map_err(|error| format!("CreateBitmap(card {width}x{height}): {error}"))?,
+        );
+        Ok(())
+    }
+
+    /// Binds the transparent swap-chain buffer and starts a window frame.
+    fn begin_window(&mut self) -> Result<(), String> {
         // SAFETY: the swap chain is ours and the returned index is checked.
         let index = unsafe { self.swap_chain3.GetCurrentBackBufferIndex() } as usize;
         if index >= self.targets.len() {
@@ -3051,19 +3046,23 @@ impl Surface {
             self.context.SetTarget(bitmap);
             self.context.SetDpi(self.dpi, self.dpi);
             self.context.SetTransform(&Matrix3x2::identity());
+            // Text sits on the translucent pills; ClearType is reserved for
+            // the opaque card bitmap.
+            self.context
+                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             self.context.BeginDraw();
             self.context.Clear(Some(&D2D1_COLOR_F {
-                r: 0x22 as f32 / 255.0,
-                g: 0x22 as f32 / 255.0,
-                b: 0x22 as f32 / 255.0,
-                a: 1.0,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
             }));
         }
         Ok(())
     }
 
     fn end(&mut self) -> Result<(), String> {
-        // SAFETY: `BeginDraw` was called by `begin` on this thread.
+        // SAFETY: `begin_window` called `BeginDraw` on this thread.
         unsafe { self.context.EndDraw(None, None) }.map_err(|error| format!("EndDraw: {error}"))
     }
 
@@ -3140,8 +3139,9 @@ fn create_swap_chain(
         BufferCount: 2,
         Scaling: DXGI_SCALING_STRETCH,
         SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        // The editor window is opaque, so its content needs no alpha.
-        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+        // The window is transparent around the card and the pills; the card's
+        // own bitmap is opaque, so premultiplied alpha composites cleanly.
+        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
         Flags: 0,
     };
     // SAFETY: the factory and device are alive; a composition swap chain takes
@@ -3389,61 +3389,6 @@ fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
 mod tests {
     use super::*;
 
-    fn widths() -> LabelWidths {
-        LabelWidths {
-            undo: 62.0,
-            redo: 58.0,
-            cancel: 70.0,
-            save: 66.0,
-        }
-    }
-
-    #[test]
-    fn toolbar_fits_the_minimum_window() {
-        let layout = toolbar_layout(MIN_WIDTH_DIP, widths());
-        assert!(layout.compact, "the minimum width needs glyph undo/redo");
-        assert!(layout.undo.right < layout.cancel.left);
-        assert!(layout.save.right <= MIN_WIDTH_DIP);
-        assert_eq!(layout.colors.len(), COLORS.len());
-        let mut previous = 0.0;
-        for rect in layout.tools.iter() {
-            assert!(rect.left >= previous);
-            previous = rect.right;
-        }
-        // Three separators, in left-to-right order, each between its groups.
-        assert!(layout.separators[0] > layout.tools[3].right);
-        assert!(layout.separators[0] < layout.colors[0].left);
-        assert!(layout.separators[1] > layout.colors[5].right);
-        assert!(layout.separators[1] < layout.widths[0].left);
-        assert!(layout.separators[2] > layout.redo.right);
-        assert!(layout.separators[2] < layout.cancel.left);
-        // Nothing may spill into the action cluster at the minimum width.
-        assert!(layout.widths[2].right < layout.undo.left);
-    }
-
-    #[test]
-    fn toolbar_uses_labels_on_a_wide_window() {
-        let layout = toolbar_layout(CLIENT_WIDTH_DIP, widths());
-        assert!(!layout.compact);
-        assert!(layout.undo.width() > 34.0);
-        assert!(layout.save.right <= CLIENT_WIDTH_DIP);
-        // The action cluster is right-aligned instead of trailing the styles.
-        assert!(layout.undo.left > layout.widths[2].right + 100.0);
-    }
-
-    #[test]
-    fn canvas_never_upscales_and_stays_inside() {
-        let small = canvas_layout(CLIENT_WIDTH_DIP, CLIENT_HEIGHT_DIP, (100, 50));
-        assert_eq!(small.scale, 1.0);
-        assert_eq!((small.image.width(), small.image.height()), (100.0, 50.0));
-
-        let large = canvas_layout(MIN_WIDTH_DIP, MIN_HEIGHT_DIP, (1920, 1080));
-        assert!(large.scale < 1.0);
-        assert!(large.image.left >= CANVAS_MARGIN - 0.01);
-        assert!(large.image.top >= TOOLBAR_HEIGHT + CANVAS_MARGIN - 0.01);
-        assert!(large.image.bottom <= MIN_HEIGHT_DIP - CANVAS_MARGIN + 0.01);
-    }
-
     #[test]
     fn drags_normalize_negative_directions() {
         assert_eq!(drag_rect((10.0, 20.0), (4.0, 5.0)), (4.0, 5.0, 6.0, 15.0));
@@ -3535,15 +3480,23 @@ mod tests {
 
     #[test]
     fn ime_caret_is_below_the_text_box_in_client_pixels() {
-        let canvas = canvas_layout(CLIENT_WIDTH_DIP, CLIENT_HEIGHT_DIP, (697, 584));
+        let (width, height) = layout::window_size((697, 584), (1920.0, 1040.0));
+        let fitted = layout::fit(width, height, (697, 584));
+        let canvas = CanvasLayout {
+            image: fitted.photo,
+            scale: fitted.scale,
+        };
         // The text box bottom is at source y = 120 + 38, the IME anchor two
         // DIPs below it (the four DIP box padding plus the two DIP gap).
         let (x96, y96) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 96.0);
         let (x192, y192) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 192.0);
-        assert_eq!((x96, y96), (409, 281));
-        assert_eq!((x192, y192), (817, 562));
-        assert!(x96 < pixels(CLIENT_WIDTH_DIP, 96));
-        assert!(y96 < pixels(CLIENT_HEIGHT_DIP, 96));
+        assert!(x96 < pixels(width, 96));
+        assert!(y96 < pixels(height, 96));
+        assert!(
+            (x192 - x96 * 2).abs() <= 1,
+            "the anchor must follow the DPI"
+        );
+        assert!((y192 - y96 * 2).abs() <= 1);
         let top_px = ((canvas.image.top + 120.0 * canvas.scale) * 2.0).round() as i32;
         assert!(y192 > top_px + 70, "IME anchor must sit below the text box");
     }

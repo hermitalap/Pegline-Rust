@@ -689,10 +689,15 @@ fn run_flight(
         renderer.end()?;
         let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
         draw_max_ms = draw_max_ms.max(draw_ms);
-        frames += 1;
         if renderer.present(true) == Present::DeviceLost {
             return Err("device lost during flight".to_string());
         }
+        if frames == 0 {
+            // The first frame is on screen: whatever the flight took over from
+            // can be hidden now without leaving an empty frame behind it.
+            on_event(FlightEvent::Started(token));
+        }
+        frames += 1;
 
         if landed && elapsed >= FLIGHT_SECONDS + LAND_FADE_SECONDS {
             on_event(FlightEvent::Finished(token));

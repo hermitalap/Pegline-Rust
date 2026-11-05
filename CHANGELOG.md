@@ -4,6 +4,25 @@
 
 ### Changes
 
+- **The annotation editor is now a floating hanging picture.** It has no title
+  bar and no window buttons: a frameless, transparent, always-on-top window
+  holds an enlarged white-glass card with a clothespin and a baked shadow, and
+  the toolbar floats around it as five glass pills — tools, colours and line
+  widths above the card, undo/redo and Cancel/Save below it, each 26 DIP from
+  the card and from the window edge. The picture is fitted to the work area
+  (never upscaled, capped at 1400×1000 DIP), the photo and its marks are painted
+  into an opaque card bitmap so text keeps ClearType, and the pads are
+  composited through a rounded mask. Opening from a card grows the picture out of
+  its slot and shows the editor when the flight lands; clicking outside the card,
+  losing focus, Ctrl+S or the Save button writes the PNG and shrinks the marked
+  preview (up to 720 px) back onto the line, while Esc cancels and flies the
+  untouched picture home. The source card is hidden for the whole edit, so the
+  line never shows a second copy. See `docs/BEHAVIOR.md` §11.
+- Restored cards now remember the picture's real pixel size instead of the
+  thumbnail's, so their aspect ratio, the annotation flight and the editor
+  layout are right after a restart.
+- A development switch `--annotate-demo` hangs one demo card and opens the real
+  Annotate flow on it, so the two flights can be captured without a mouse.
 - **Sticky notes now have a WYSIWYG editor.** An invisible entry appears to the
   right of the last card: after 120 ms a blank note flies in to the slot where it
   would hang and bobs there. The mouse pulls it with a distance/direction force
@@ -47,6 +66,10 @@
 
 ### Fixes
 
+- Editing an existing note no longer leaves a second copy hanging on the line
+  while its paper is in the editor. The card is hidden under the opening
+  flight's first frame (`SetRehang`, so the row keeps its slot) and reappears
+  with the return flight; a failed save or archive puts it back immediately.
 - The annotation arrow's head now points the way the drag went and sits on the
   end of its shaft. `atan2` returns radians while `Matrix3x2::rotation` wraps
   `D2D1MakeRotateMatrix`, which takes **degrees**, so every head was rotated by

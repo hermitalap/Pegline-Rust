@@ -5,6 +5,7 @@
 //! [`window::Editor::open`] and receives [`window::EditorEvent`]s on its own
 //! thread; the editor never touches the line.
 
+pub mod layout;
 pub mod model;
 pub mod window;
 

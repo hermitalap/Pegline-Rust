@@ -114,6 +114,22 @@ a `SetRehang` scene command that keeps the row from reflowing; an editor pass wi
 no changed text plays the same flight instead of closing in place. See `PLAN.md`
 §9.2 and the `docs/visual/note-entry-*` / `note-rehang-*` screenshots.
 
+**The annotation editor was rebuilt as a floating hanging picture on 2026-11-05**
+(`docs/BEHAVIOR.md` §11): a frameless, transparent, always-on-top window with no
+title bar or caption buttons, an enlarged white-glass card (4 DIP frame, 16 DIP
+radius, clothespin, baked nine-patch shadow) and five floating glass pills 26
+DIP outside the card. The photo and marks render into an opaque card bitmap
+(ClearType) composited through a rounded mask; the window itself uses a
+premultiplied swap chain. Opening from a card grows the thumb out of its slot
+and shows the editor on landing; clicking outside the card, losing focus,
+Ctrl+S or Save writes the PNG and flies a marked preview (≤720 px) back to the
+card, while Esc cancels with the untouched thumb. The source card is hidden for
+the whole edit. Restored cards now read their real pixel size (`wic::pixel_size`)
+instead of the thumbnail size, and the note editor hides the edited note's card
+under the opening flight and restores it with the return. `--annotate-demo`
+drives the card-to-editor round trip without a mouse; the visual evidence is in
+`docs/VISUAL-TESTS.md` §3.12 and `docs/visual/editor-2.0.png` / `editor-flight.png`.
+
 ## Read first
 
 1. `PLAN.md` — milestones, budget, decisions, open questions.

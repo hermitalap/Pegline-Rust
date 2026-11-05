@@ -111,6 +111,12 @@ const HELPER_IDLE_SECONDS: f64 = 10.0;
 const NOTE_FLIGHT_TOKEN: u64 = u64::MAX;
 /// Flight token for the throw-away tumble of an empty new note.
 const TUMBLE_FLIGHT_TOKEN: u64 = u64::MAX - 1;
+/// Flight token for a picture growing out of its card into the annotation
+/// editor. Distinct from the closing flight so the two hand-offs can each show
+/// or hide their window at the right moment.
+const ANNOTATE_OPEN_TOKEN: u64 = u64::MAX - 2;
+/// Flight token for the annotated picture shrinking back onto the line.
+const ANNOTATE_CLOSE_TOKEN: u64 = u64::MAX - 3;
 /// Hover-note physics: a damped spring home with a pointer pull whose
 /// equilibrium offset is a fraction of the pointer distance.
 ///
@@ -177,6 +183,13 @@ struct EditingCapture {
     card: Option<CardId>,
     own: bool,
     area: Option<RectI>,
+    /// The card's bitmap when the editor opened; the cancel flight carries it
+    /// home. `None` when there was no card.
+    image: Option<ImageData>,
+    tilt: f32,
+    /// The enlarged card in screen pixels: the flight's target on the way in
+    /// and its origin on the way back.
+    card_rect: Option<RectI>,
 }
 
 /// A note open in the WYSIWYG editor (NOTE-EDITOR.md §5–§8).
@@ -499,9 +512,15 @@ struct App {
     /// drop interrupts the old animation (BEHAVIOR §3.8), so this is cleared as
     /// soon as the flight window moves on.
     flying_card: Option<CardId>,
-    /// True when `flying_card` is an edited note returning to its existing slot
-    /// rather than a new card arriving at the right end.
+    /// True when `flying_card` is an edited note or picture returning to its
+    /// existing slot rather than a new card arriving at the right end.
     flying_rehang: bool,
+    /// The opening flight did not report its landing yet; show the editor after
+    /// this time anyway (the flight may have been interrupted by a capture).
+    annotate_show_at: Option<f64>,
+    /// Safety deadline for the closing flight: release the hidden editor even
+    /// if the flight window was taken over by a capture.
+    annotate_close_at: Option<f64>,
     /// The same for the preview and the drag ghost, which are cheaper to
     /// rebuild.
     preview_idle_at: Option<f64>,
@@ -521,6 +540,12 @@ struct App {
     /// `--editor-demo`: open the annotation editor on a generated picture and
     /// close it after a few seconds. Development check, like `--demo`.
     editor_demo_at: Option<f64>,
+    /// `--annotate-demo`: hang one demo card and open the real annotate flow on
+    /// it, so the card-to-editor flight and the return can be captured without
+    /// a mouse. Development check, like `--demo`.
+    annotate_demo: bool,
+    annotate_demo_stage: u8,
+    annotate_demo_at: f64,
     /// `--note-editor-demo`: open the WYSIWYG note editor with sample text so
     /// the visual acceptance run can screenshot it.
     note_demo: bool,
@@ -626,6 +651,8 @@ impl App {
             flight_idle_at: None,
             flying_card: None,
             flying_rehang: false,
+            annotate_show_at: None,
+            annotate_close_at: None,
             preview_idle_at: None,
             ghost_idle_at: None,
             recent: Vec::new(),
@@ -635,6 +662,9 @@ impl App {
             panic_test: std::env::args().any(|arg| arg == "--panic-test"),
             panicked: false,
             editor_demo_at: None,
+            annotate_demo: std::env::args().any(|arg| arg == "--annotate-demo"),
+            annotate_demo_stage: 0,
+            annotate_demo_at: 0.0,
             note_demo: std::env::args().any(|arg| arg == "--note-editor-demo"),
             note_demo_opened: false,
             note_hover_demo: std::env::args().any(|arg| arg == "--note-hover-demo"),
@@ -1129,6 +1159,27 @@ impl App {
                 if let Some(editor) = self.note_editor.as_mut() {
                     editor.show();
                 }
+                // The flight was interrupted before its first frame (a new
+                // capture can take the flight window over); the card must not
+                // stay hanging next to the open editor.
+                self.hide_note_card();
+            }
+        }
+        if let Some(at) = self.annotate_show_at {
+            if now >= at {
+                self.annotate_show_at = None;
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.show();
+                }
+                self.hide_annotated_card();
+            }
+        }
+        if let Some(at) = self.annotate_close_at {
+            if now >= at {
+                // The return flight never reported back; release the hidden
+                // editor and put the card back rather than leaking both.
+                logging::trace("annotation return deadline reached");
+                self.close_editor();
             }
         }
         if self.note_demo && !self.note_demo_opened && now - self.start_time > 1.0 {
@@ -1268,6 +1319,37 @@ impl App {
                 4 if now - self.note_storage_at > 1.5 => {
                     self.finish_note_storage_demo();
                     self.note_storage_stage = 5;
+                }
+                _ => {}
+            }
+        }
+        if self.annotate_demo {
+            if self.annotate_demo_stage == 0 {
+                self.annotate_demo_stage = 1;
+                self.annotate_demo_at = now;
+            }
+            self.keep_open = true;
+            if !self.is_present {
+                self.present();
+            }
+            if !self.is_revealed {
+                self.reveal(false, 0.0);
+            }
+            match self.annotate_demo_stage {
+                1 if now - self.annotate_demo_at > 1.2 => {
+                    if self.demo_card_id().is_none() {
+                        self.install_demo_cards();
+                    }
+                    self.annotate_demo_stage = 2;
+                    self.annotate_demo_at = now;
+                }
+                2 if now - self.annotate_demo_at > 1.2 => {
+                    // Only ever annotate a demo card: a restored user picture
+                    // must not be rewritten by a development switch.
+                    if let Some(id) = self.demo_card_id() {
+                        self.annotate_item(id);
+                    }
+                    self.annotate_demo_stage = 3;
                 }
                 _ => {}
             }
@@ -1413,7 +1495,9 @@ impl App {
                         }
                     }
                 }
-                Event::Editor(EditorEvent::Saved(bytes)) => self.on_editor_saved(bytes, now),
+                Event::Editor(EditorEvent::Saved { png, preview }) => {
+                    self.on_editor_saved(png, preview, now)
+                }
                 Event::Editor(EditorEvent::Cancelled) => self.on_editor_cancelled(),
                 Event::NoteEditor(event) => self.on_note_editor_event(event),
                 Event::NoteSaved {
@@ -1434,6 +1518,21 @@ impl App {
                         if let Some(editor) = self.note_editor.as_mut() {
                             editor.hide();
                         }
+                    } else if token == NOTE_FLIGHT_TOKEN {
+                        // The flight's first frame is on screen, so the note's
+                        // card can vanish from the line without a gap. It is
+                        // hidden only now: hiding it before the first frame
+                        // would leave the slot empty for a frame.
+                        self.hide_note_card();
+                    } else if token == ANNOTATE_OPEN_TOKEN {
+                        // Same hand-off for a picture growing into the editor.
+                        self.hide_annotated_card();
+                    } else if token == ANNOTATE_CLOSE_TOKEN {
+                        // The return flight is on screen: the editor behind it
+                        // can go without a frame of empty desktop.
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.hide();
+                        }
                     }
                 }
                 Event::Flight(FlightEvent::Landed { token, .. }) => {
@@ -1441,6 +1540,30 @@ impl App {
                         self.note_show_at = None;
                         if let Some(editor) = self.note_editor.as_mut() {
                             editor.show();
+                        }
+                        if let Some(flight) = self.flight.as_ref() {
+                            win32::set_topmost(flight.hwnd());
+                        }
+                        continue;
+                    }
+                    if token == ANNOTATE_OPEN_TOKEN {
+                        // The enlarged card is drawn by the flight; now the
+                        // real editor can appear underneath it.
+                        self.annotate_show_at = None;
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.show();
+                        }
+                        if let Some(flight) = self.flight.as_ref() {
+                            win32::set_topmost(flight.hwnd());
+                        }
+                        continue;
+                    }
+                    if token == ANNOTATE_CLOSE_TOKEN {
+                        // The picture is home: hand it to the card underneath.
+                        let id = self.flying_card.take();
+                        self.flying_rehang = false;
+                        if let Some(id) = id {
+                            self.send_scene(Command::SetRehang { id, flying: false });
                         }
                         if let Some(flight) = self.flight.as_ref() {
                             win32::set_topmost(flight.hwnd());
@@ -1476,6 +1599,26 @@ impl App {
                             flight.hide();
                         }
                         self.flight_idle_at = Some(win32::now_seconds());
+                        continue;
+                    }
+                    if id == ANNOTATE_OPEN_TOKEN {
+                        // The editor is fully drawn underneath; the window can
+                        // give its surface back until the return flight.
+                        if let Some(flight) = self.flight.as_mut() {
+                            flight.hide();
+                        }
+                        self.flight_idle_at = Some(win32::now_seconds());
+                        continue;
+                    }
+                    if id == ANNOTATE_CLOSE_TOKEN {
+                        if let Some(flight) = self.flight.as_mut() {
+                            flight.hide();
+                        }
+                        self.flight_idle_at = Some(win32::now_seconds());
+                        self.flying_card = None;
+                        self.flying_rehang = false;
+                        self.annotate_close_at = None;
+                        self.close_editor();
                         continue;
                     }
                     if id == TUMBLE_FLIGHT_TOKEN {
@@ -1529,6 +1672,12 @@ impl App {
         if self.note_tumbling {
             // The discarded paper is already on its way off the screen; the
             // editor behind it is hidden and must not be committed again.
+            return;
+        }
+        if self.editor.is_some() {
+            // The annotation window owns the pointer; the line never reacts
+            // while a picture is being marked up. A click outside the window
+            // finishes the edit through its focus loss.
             return;
         }
         if self.note_editor.is_some() {
@@ -1663,7 +1812,7 @@ impl App {
     }
 
     fn on_right_down(&mut self, x: i32, y: i32) {
-        if self.note_editor.is_some() {
+        if self.note_editor.is_some() || self.editor.is_some() {
             return;
         }
         self.hide_preview();
@@ -1778,7 +1927,7 @@ impl App {
         }
 
         // Hover and click-through.
-        let hover = if self.is_revealed && self.note_editor.is_none() {
+        let hover = if self.is_revealed && self.note_editor.is_none() && self.editor.is_none() {
             self.hit_test(x, y).map(|(id, _)| id)
         } else {
             None
@@ -1790,11 +1939,12 @@ impl App {
         // The hover buttons light up individually. The scene only publishes
         // their boxes while the card is hovered, so this is None the rest of
         // the time.
-        let hover_action = if self.is_revealed && self.note_editor.is_none() {
-            self.action_at(x, y)
-        } else {
-            None
-        };
+        let hover_action =
+            if self.is_revealed && self.note_editor.is_none() && self.editor.is_none() {
+                self.action_at(x, y)
+            } else {
+                None
+            };
         if self.hover_action != hover_action {
             self.hover_action = hover_action;
             self.send_scene(Command::HoverAction(hover_action));
@@ -2092,9 +2242,12 @@ impl App {
                     let size_px = if note {
                         (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32)
                     } else {
-                        thumb
-                            .as_ref()
-                            .map(|thumb| (thumb.width, thumb.height))
+                        // The source pixels, not the thumbnail's: the card's
+                        // aspect, the annotation flight and the editor layout
+                        // all use this size.
+                        wic::pixel_size(&thread_path)
+                            .ok()
+                            .or_else(|| thumb.as_ref().map(|thumb| (thumb.width, thumb.height)))
                             .unwrap_or((0, 0))
                     };
                     let _ = tx.send(Event::RestoreReady {
@@ -3587,8 +3740,13 @@ impl App {
                 if launched {
                     self.flight_idle_at = None;
                     self.note_show_at = Some(win32::now_seconds() + 1.0);
-                } else if let Some(editor) = self.note_editor.as_mut() {
-                    editor.show();
+                } else {
+                    if let Some(editor) = self.note_editor.as_mut() {
+                        editor.show();
+                    }
+                    // No flight (the strip is gone or the flight window could
+                    // not be built): hide the card at once.
+                    self.hide_note_card();
                 }
                 logging::trace(format!("note editor for card {id}"));
             }
@@ -4039,11 +4197,30 @@ impl App {
         }
     }
 
+    /// Hides the card of the note being edited while its paper is in the
+    /// editor. `SetRehang` hides it in place, so the row keeps the slot the
+    /// note will fly back to.
+    fn hide_note_card(&mut self) {
+        if let Some(id) = self.note_editing.as_ref().and_then(|editing| editing.card) {
+            self.send_scene(Command::SetRehang { id, flying: true });
+        }
+    }
+
     fn close_note_editor(&mut self) {
         logging::trace("note editor closed");
         self.note_committing = false;
         self.note_tumbling = false;
         self.note_show_at = None;
+        // The card was hidden for the duration of the edit. A return flight
+        // that is already carrying it will reveal it on landing; any other
+        // close path (a failed save, a failed archive) must put it back here.
+        let card = self.note_editing.as_ref().and_then(|editing| editing.card);
+        if let Some(id) = card {
+            let carried = self.flying_rehang && self.flying_card == Some(id);
+            if !carried {
+                self.send_scene(Command::SetRehang { id, flying: false });
+            }
+        }
         self.note_editing = None;
         if let Some(mut editor) = self.note_editor.take() {
             editor.shutdown();
@@ -4198,24 +4375,53 @@ impl App {
             return;
         }
         let path = item.path.clone();
-        self.open_editor(path, Some(id), false, None);
+        let size = item.size_px;
+        self.open_editor(path, Some(id), false, None, size);
     }
 
     /// `--editor-demo`: opens the editor on a generated picture. Without a card
     /// the saved picture hangs as a new capture.
-    fn open_editor_for(&mut self, path: PathBuf, own: bool, area: Option<RectI>) {
-        self.open_editor(path, None, own, area);
+    fn open_editor_for(
+        &mut self,
+        path: PathBuf,
+        own: bool,
+        area: Option<RectI>,
+        source_size: (u32, u32),
+    ) {
+        self.open_editor(path, None, own, area, source_size);
     }
 
-    fn open_editor(&mut self, path: PathBuf, card: Option<CardId>, own: bool, area: Option<RectI>) {
-        let dpi = self.screen_dpi().unwrap_or(96);
+    /// Opens the annotation window for `path`. With a card, the picture grows
+    /// out of its slot into the editor's enlarged card; without one it simply
+    /// opens in place.
+    fn open_editor(
+        &mut self,
+        path: PathBuf,
+        card: Option<CardId>,
+        own: bool,
+        area: Option<RectI>,
+        source_size: (u32, u32),
+    ) {
+        if self.editor.is_some() {
+            return;
+        }
+        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
+            return;
+        };
+        let from = card.and_then(|id| self.current_card_px(id));
+        let (image, tilt) = card
+            .and_then(|id| self.items.iter().find(|item| item.id == id))
+            .map(|item| (Some(item.thumb.clone()), item.tilt))
+            .unwrap_or((None, 0.0));
+        let flight = from.is_some() && image.is_some();
         let tx = self.events_tx.clone();
         let notify = Box::new(move |event: EditorEvent| {
             let _ = tx.send(Event::Editor(event));
             window::wake(HWND::default());
         });
-        match Editor::open(&path, dpi, notify) {
+        match Editor::open(&path, source_size, monitor.dpi, monitor, !flight, notify) {
             Ok(editor) => {
+                let card_rect = editor.card_px();
                 logging::trace(format!("editor opened for {}", path.display()));
                 self.editor = Some(editor);
                 self.editing = Some(EditingCapture {
@@ -4223,14 +4429,57 @@ impl App {
                     card,
                     own,
                     area,
+                    image: image.clone(),
+                    tilt,
+                    card_rect,
                 });
                 self.hide_preview();
+                if flight {
+                    self.present();
+                    self.reveal(true, 0.0);
+                    let launched = match (from, card_rect, image) {
+                        (Some(from), Some(to), Some(image)) => {
+                            self.ensure_flight().is_some_and(|flight| {
+                                flight.fly(
+                                    ANNOTATE_OPEN_TOKEN,
+                                    image,
+                                    from,
+                                    to,
+                                    tilt,
+                                    0.0,
+                                    true,
+                                    monitor.dpi,
+                                )
+                            })
+                        }
+                        _ => false,
+                    };
+                    if launched {
+                        self.flight_idle_at = None;
+                        self.annotate_show_at = Some(win32::now_seconds() + 1.0);
+                    } else {
+                        if let Some(editor) = self.editor.as_mut() {
+                            editor.show();
+                        }
+                        self.hide_annotated_card();
+                    }
+                } else if let Some(id) = card {
+                    self.send_scene(Command::SetRehang { id, flying: true });
+                }
             }
             Err(error) => logging::error(format!("editor: {error}")),
         }
     }
 
-    fn on_editor_saved(&mut self, png: Vec<u8>, now: f64) {
+    /// Hides the picture being annotated while the editor is open; the row
+    /// keeps its slot (`SetRehang`), so the flight has somewhere to land.
+    fn hide_annotated_card(&mut self) {
+        if let Some(id) = self.editing.as_ref().and_then(|editing| editing.card) {
+            self.send_scene(Command::SetRehang { id, flying: true });
+        }
+    }
+
+    fn on_editor_saved(&mut self, png: Vec<u8>, preview: ImageData, now: f64) {
         let Some(editing) = self.editing.take() else {
             logging::error("editor saved without an open picture");
             return;
@@ -4238,18 +4487,31 @@ impl App {
         let target = editing.path;
         if let Err(error) = wic::write_png_bytes(&target, &png) {
             logging::error(format!("editor save {}: {error}", target.display()));
+            self.close_editor();
             return;
         }
         // The watcher may see the same file if the card lives in the screenshots
         // folder; the edit must refresh the existing card, never hang a twin.
         self.recently_saved.push((target.clone(), now));
         if let Some(id) = editing.card {
+            // The landing card must already wear the marks: hand the scene the
+            // preview, then let the worker upload the card-sized decode.
+            self.send_scene(Command::SetImage {
+                id,
+                image: preview.clone(),
+            });
+            if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                item.thumb = preview.clone();
+                item.revision = item.revision.wrapping_add(1);
+            }
             self.reload_item_picture(id, &target);
+            self.fly_picture_back(id, editing.card_rect, editing.tilt, preview);
             return;
         }
         self.recent.retain(|recent| recent.path != target);
         let own = editing.own || target.starts_with(win32::inbox_dir());
         self.spawn_capture(target, own, editing.area);
+        self.close_editor();
     }
 
     /// Re-decodes one card's picture after the annotation editor wrote it.
@@ -4293,18 +4555,96 @@ impl App {
         let Some(editing) = self.editing.take() else {
             return;
         };
-        // An existing card keeps its file: cancelling an annotation changes
-        // nothing. Only a demo capture may own a file to clean up.
-        if editing.card.is_some() || !editing.own {
+        if let Some(id) = editing.card {
+            // The file is untouched: the card's own bitmap flies home.
+            if let Some(image) = editing.image {
+                self.fly_picture_back(id, editing.card_rect, editing.tilt, image);
+                return;
+            }
+            self.send_scene(Command::SetRehang { id, flying: false });
+            self.close_editor();
             return;
         }
-        self.recent.retain(|recent| recent.path != editing.path);
-        if let Err(error) = std::fs::remove_file(&editing.path) {
-            logging::error(format!(
-                "editor cancel remove {}: {error}",
-                editing.path.display()
-            ));
+        // A demo capture may own a file to clean up.
+        if editing.own {
+            self.recent.retain(|recent| recent.path != editing.path);
+            if let Err(error) = std::fs::remove_file(&editing.path) {
+                logging::error(format!(
+                    "editor cancel remove {}: {error}",
+                    editing.path.display()
+                ));
+            }
         }
+        self.close_editor();
+    }
+
+    /// Flies the annotated picture back into `id`'s slot. The card is hidden
+    /// under the flight and shown on landing; the editor is hidden as soon as
+    /// the flight's first frame is up and released when it finishes.
+    fn fly_picture_back(&mut self, id: CardId, from: Option<RectI>, tilt: f32, image: ImageData) {
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            self.close_editor();
+            return;
+        };
+        let card_size = self.items[index].card_size;
+        let target = self.card_slot_px(index, self.items.len(), card_size);
+        let from = from.or_else(|| self.current_card_px(id));
+        let dpi = self.screen_dpi();
+        let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) else {
+            // No line or no geometry: just put the card back.
+            self.send_scene(Command::SetRehang { id, flying: false });
+            self.close_editor();
+            return;
+        };
+        self.release_flying_card();
+        self.present();
+        self.reveal(false, PEEK_SECONDS);
+        self.send_scene(Command::SetRehang { id, flying: true });
+        if let Some(flight) = self.ensure_flight() {
+            if flight.fly(
+                ANNOTATE_CLOSE_TOKEN,
+                image,
+                from,
+                target,
+                tilt,
+                0.0,
+                true,
+                dpi,
+            ) {
+                self.flight_idle_at = None;
+                self.flying_card = Some(id);
+                self.flying_rehang = true;
+                self.annotate_close_at = Some(win32::now_seconds() + 2.0);
+                if let Some(flight) = self.flight.as_ref() {
+                    // `present`/`reveal` may have put the strip above the
+                    // flight window; the landing picture must stay on top.
+                    win32::set_topmost(flight.hwnd());
+                }
+                return;
+            }
+        }
+        self.send_scene(Command::SetRehang { id, flying: false });
+        self.close_editor();
+    }
+
+    /// Releases the annotation window (hidden or not) and its bookkeeping.
+    fn close_editor(&mut self) {
+        self.annotate_show_at = None;
+        self.annotate_close_at = None;
+        self.editing = None;
+        if let Some(mut editor) = self.editor.take() {
+            editor.shutdown();
+        }
+        // A return flight that is still running owns the card; any other path
+        // must make it visible again. A capture flight started by a saved
+        // demo picture is not ours: leave its bookkeeping alone.
+        if self.flying_rehang {
+            if let Some(id) = self.flying_card.take() {
+                self.send_scene(Command::SetRehang { id, flying: false });
+            }
+            self.flying_rehang = false;
+        }
+        self.pinned = false;
     }
 
     // ---- drag ghost -------------------------------------------------------
@@ -4854,13 +5194,23 @@ impl App {
             logging::error(format!("editor demo write: {error}"));
             return;
         }
-        self.open_editor_for(path, false, None);
+        self.open_editor_for(path, false, None, (w, h));
         let hold = std::env::args().any(|arg| arg == "--editor-hold");
         self.editor_demo_at = if hold {
             None
         } else {
             Some(win32::now_seconds() + 4.0)
         };
+    }
+
+    /// The first card that belongs to the development demo folder, if any.
+    /// `--annotate-demo` only ever edits one of these, never a user picture.
+    fn demo_card_id(&self) -> Option<CardId> {
+        let directory = win32::local_dir().join("demo");
+        self.items
+            .iter()
+            .find(|item| item.path.starts_with(&directory))
+            .map(|item| item.id)
     }
 
     fn install_demo_cards(&mut self) {
@@ -5383,11 +5733,14 @@ mod tests {
             card: Some(1),
             own: false,
             area: None,
+            image: None,
+            tilt: 0.0,
+            card_rect: None,
         });
 
         let after = ImageData::new(3, 2, vec![255u8; 3 * 2 * 4]);
         let marked = wic::encode_png_bytes(&after).expect("encode after");
-        app.on_editor_saved(marked, 1.0);
+        app.on_editor_saved(marked, after, 1.0);
 
         assert!(app.editing.is_none(), "the edit must finish");
         assert_eq!(app.items.len(), 1, "an annotation must not hang a twin");
