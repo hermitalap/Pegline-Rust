@@ -20,6 +20,9 @@ const COPIED_SECONDS: f64 = 1.2;
 const FADE_SECONDS: f32 = 0.16;
 /// Delay for the hide animation, seconds.
 const HIDE_SECONDS: f32 = 0.22;
+/// How much of the blank entry note peeks below the line when the pointer is
+/// anywhere over the strip, DIP.
+const NOTE_PEEK_DIP: f32 = 16.0;
 
 /// What the UI thread asks the line to do.
 #[derive(Debug)]
@@ -53,6 +56,16 @@ pub enum Command {
     Dragging(Option<CardId>),
     /// The flight window carries this card; keep it invisible until it lands.
     SetFlying { id: CardId, flying: bool },
+    /// The flight window carries an existing card back to its slot. Unlike
+    /// [`Command::SetFlying`] the row must not reflow: the card keeps its place
+    /// and only goes invisible under the flight.
+    SetRehang { id: CardId, flying: bool },
+    /// The entry note's peeking corner: `true` slides its top slice down from
+    /// the slot, `false` takes it back up.
+    NotePeek(bool),
+    /// Drop the peeking corner at once: the full note is taking over its slot
+    /// and a shrinking copy behind it would read as a second card.
+    HideNotePeek,
     /// Flash the "Copied" pill on a card.
     Copied(CardId),
     /// A gust of wind (also fired by the internal timer).
@@ -105,6 +118,9 @@ struct Card {
     arriving: bool,
     arrived: bool,
     flying: bool,
+    /// Hidden under the flight that is carrying an edited note back to its
+    /// slot; the row layout is untouched (unlike `flying`).
+    rehang: bool,
     image: Option<ID2D1Bitmap1>,
     note: bool,
     note_color: usize,
@@ -133,6 +149,7 @@ impl Card {
             arriving: spec.arriving,
             arrived: false,
             flying: false,
+            rehang: false,
             image: None,
             note: spec.note,
             note_color: 0,
@@ -303,6 +320,8 @@ pub struct Scene {
     slide: Spring,
     hide_t: f32,
     hide_from: f32,
+    /// 0 = the entry note is hidden, 1 = its 16 DIP top corner is showing.
+    note_peek: Spring,
     cards: Vec<Card>,
     hover: Option<CardId>,
     hover_action: Option<(CardId, ActionKind)>,
@@ -337,6 +356,7 @@ impl Scene {
             slide: Spring::new(0.42, 0.82, layout::HIDDEN_SLIDE),
             hide_t: -1.0,
             hide_from: layout::HIDDEN_SLIDE,
+            note_peek: Spring::new(0.22, 1.0, 0.0),
             cards: Vec::new(),
             hover: None,
             hover_action: None,
@@ -412,6 +432,7 @@ impl Scene {
             self.hover = None;
             self.hover_action = None;
             self.pressed = None;
+            self.note_peek.snap(0.0);
             self.dirty = true;
         }
     }
@@ -429,6 +450,9 @@ impl Scene {
                     self.revealed = revealed;
                     if !revealed {
                         self.hide_t = -1.0;
+                        // The peeking corner belongs to a line that is down; it
+                        // must not pop back when the strip returns.
+                        self.note_peek.snap(0.0);
                         // Let the spring start from wherever it is and keep the
                         // velocity: the quadratic ease-out takes over below.
                     } else if now >= self.next_gust {
@@ -565,6 +589,18 @@ impl Scene {
                     self.relayout_cards();
                 }
             }
+            Command::SetRehang { id, flying } => self.set_rehang(id, flying),
+            Command::NotePeek(on) => {
+                let target = if on { 1.0 } else { 0.0 };
+                if (self.note_peek.target - target).abs() > f32::EPSILON {
+                    self.note_peek.target = target;
+                    self.dirty = true;
+                }
+            }
+            Command::HideNotePeek => {
+                self.note_peek.snap(0.0);
+                self.dirty = true;
+            }
             Command::Copied(id) => {
                 self.copied = Some(id);
                 self.copied_until = now + COPIED_SECONDS;
@@ -586,6 +622,29 @@ impl Scene {
         }
     }
 
+    /// Hides an existing card under the flight that is bringing it back, or
+    /// shows it again on landing. The row layout is deliberately left alone.
+    fn set_rehang(&mut self, id: CardId, flying: bool) {
+        if let Some(card) = self.cards.iter_mut().find(|card| card.id == id) {
+            if card.rehang != flying {
+                card.rehang = flying;
+                card.arrived = true;
+                if flying {
+                    // The flight draws the note from the editor back to this
+                    // slot; the card waits invisible in place and the rest of
+                    // the row never moves.
+                    card.opacity = 0.0;
+                    card.swing.snap(0.0);
+                    card.nudge_t = -1.0;
+                } else {
+                    card.opacity = 1.0;
+                    card.nudge(2.2);
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
     fn gust(&mut self, now: f64) {
         for card in &mut self.cards {
             let delay = self.rng.range(0.0, 0.35);
@@ -604,6 +663,15 @@ impl Scene {
             return false;
         }
         let mut animating = false;
+
+        // The entry note's peeking corner runs on the scene clock, so the hint
+        // slides in/out at display rate instead of the UI tick.
+        let peek_before = self.note_peek.value;
+        self.note_peek.step(dt);
+        animating |= !self.note_peek.settled();
+        if (self.note_peek.value - peek_before).abs() > 0.0001 {
+            self.dirty = true;
+        }
 
         // Slide: a spring when opening, a 0.22 s quadratic ease when closing.
         if self.revealed {
@@ -682,7 +750,7 @@ impl Scene {
 
             // Fade-in follows the drop; a card only becomes visible once it has
             // arrived, and a card in flight is drawn by the flight window.
-            if card.flying {
+            if card.flying || card.rehang {
                 card.opacity = 0.0;
             } else if !card.arrived {
                 card.opacity = 0.0;
@@ -708,7 +776,8 @@ impl Scene {
                 || !card.drop.settled()
                 || !card.swing_at_rest()
                 || (card.press.value - card.press.target).abs() > 0.002
-                || (card.opacity - if card.flying { 0.0 } else { 1.0 }).abs() > 0.002
+                || (card.opacity - if card.flying || card.rehang { 0.0 } else { 1.0 }).abs()
+                    > 0.002
                 || card.cross_alpha > 0.002
                 || card.actions_alpha > 0.002
                 || card.copied_alpha > 0.002
@@ -738,7 +807,7 @@ impl Scene {
         for card in &self.cards {
             // A card in flight is drawn by the flight window and must not take
             // clicks on the line under it.
-            if card.flying {
+            if card.flying || card.rehang {
                 continue;
             }
             let slot_center = card.x.value;
@@ -794,6 +863,19 @@ impl Scene {
         ));
         renderer.draw_rope(self.width_dip);
 
+        if self.note_peek.value > 0.001 {
+            let (card_height, note) = self
+                .cards
+                .last()
+                .map(|card| (card.card_size.1, card.note))
+                .unwrap_or((layout::NOTE_CARD_HEIGHT, true));
+            if let Some(hotspot) =
+                layout::note_hotspot(self.cards.len(), self.width_dip, card_height, note)
+            {
+                self.draw_note_peek(renderer, hotspot);
+            }
+        }
+
         if self.hint_alpha > 0.01 && self.cards.is_empty() {
             let center_x = self.width_dip * 0.5;
             let center_y = layout::rope_y(center_x, self.width_dip) + 34.0;
@@ -820,6 +902,32 @@ impl Scene {
             self.draw_card(renderer, index, slot_left, hovered);
         }
         renderer.reset_transform();
+    }
+
+    /// The entry note's peeking corner: the top [`NOTE_PEEK_DIP`] of a blank
+    /// note card, clipped so only that slice shows.
+    fn draw_note_peek(&self, renderer: &mut Renderer, hotspot: RectF) {
+        let reveal = self.note_peek.value.clamp(0.0, 1.0);
+        let (card_w, card_h) = layout::note_card_size();
+        let left =
+            (hotspot.center().0 - card_w * 0.5).clamp(0.0, (self.width_dip - card_w).max(0.0));
+        let top = hotspot.top;
+        let height = (NOTE_PEEK_DIP * reveal).min(card_h);
+        if height <= 0.01 {
+            return;
+        }
+        renderer.push_clip(RectF::from_xywh(left, top, card_w, height));
+        let frame = RectF::from_xywh(left, top, card_w, card_h);
+        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
+        let paper = RectF::new(
+            frame.left + layout::PHOTO_INSET,
+            frame.top + layout::PHOTO_INSET,
+            frame.right - layout::PHOTO_INSET,
+            frame.bottom - layout::PHOTO_INSET,
+        );
+        renderer.fill_round(paper, layout::PHOTO_RADIUS, crate::render::Brush::NotePaper);
+        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
+        renderer.pop_clip();
     }
 
     fn draw_card(&mut self, renderer: &mut Renderer, index: usize, slot_left: f32, hovered: bool) {
@@ -1039,6 +1147,55 @@ mod tests {
         );
         assert_eq!(scene.cards[0].opacity, 1.0);
         assert!(scene.cards[0].nudge_t >= 0.0);
+    }
+
+    #[test]
+    fn a_rehang_keeps_the_row_in_place_and_hides_the_card() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            32.0,
+            std::sync::Arc::clone(&snapshot),
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.value = 0.0;
+        let mut first = card();
+        first.id = 1;
+        first.x.value = 786.0;
+        first.x.target = 786.0;
+        let mut second = card();
+        second.id = 2;
+        second.note = true;
+        second.x.value = 960.0;
+        second.x.target = 960.0;
+        scene.cards.push(first);
+        scene.cards.push(second);
+        scene.relayout_cards();
+        let targets: Vec<f32> = scene.cards.iter().map(|card| card.x.target).collect();
+
+        scene.set_rehang(2, true);
+        assert!(scene.cards[1].rehang);
+        assert_eq!(scene.cards[1].opacity, 0.0);
+        // The other cards must not close the gap while the note is away.
+        let after: Vec<f32> = scene.cards.iter().map(|card| card.x.target).collect();
+        assert_eq!(after, targets);
+        scene.publish(0.0);
+        assert_eq!(
+            snapshot.lock().unwrap().cards.len(),
+            1,
+            "the returning note must not take clicks while in flight"
+        );
+
+        scene.set_rehang(2, false);
+        assert!(!scene.cards[1].rehang);
+        assert_eq!(scene.cards[1].opacity, 1.0);
+        assert!(scene.cards[1].nudge_t >= 0.0, "landing must sway");
+        scene.publish(0.0);
+        assert_eq!(snapshot.lock().unwrap().cards.len(), 2);
     }
 
     fn card() -> Card {

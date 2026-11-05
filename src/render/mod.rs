@@ -24,8 +24,9 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
     D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
@@ -110,6 +111,8 @@ pub enum Brush {
     /// The blank entry note's label: a grey that reads as a hint on the note
     /// paper, #606060.
     Placeholder,
+    /// The default note paper, used by the entry's peeking corner: #FFF4B8.
+    NotePaper,
 }
 
 /// Cached text layouts.
@@ -282,6 +285,7 @@ struct Palette {
     paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
     placeholder: ID2D1SolidColorBrush,
+    note_paper: ID2D1SolidColorBrush,
     pin_slot: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
@@ -322,6 +326,7 @@ impl Palette {
             paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
             placeholder: solid(context, [0x60, 0x60, 0x60], 1.0)?,
+            note_paper: solid(context, split(crate::notes::PALETTE[0].paper), 1.0)?,
             pin_slot: solid(context, [0, 0, 0], 0x52 as f32 / 255.0)?,
             metal,
             metal_edge,
@@ -346,6 +351,7 @@ impl Palette {
             Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
             Brush::Placeholder => &self.placeholder,
+            Brush::NotePaper => &self.note_paper,
         }
     }
 }
@@ -637,6 +643,22 @@ impl Renderer {
 
     pub fn reset_transform(&mut self) {
         self.set_transform(Matrix3x2::identity());
+    }
+
+    /// Clips subsequent drawing to an axis-aligned rectangle in the current
+    /// coordinate space. Used by the entry note's peeking corner, which is the
+    /// top slice of a full card.
+    pub fn push_clip(&mut self, rect: RectF) {
+        // SAFETY: the context is ours and BeginDraw has been called.
+        unsafe {
+            self.context
+                .PushAxisAlignedClip(&d2d_rect(rect), D2D1_ANTIALIAS_MODE_ALIASED);
+        }
+    }
+
+    pub fn pop_clip(&mut self) {
+        // SAFETY: balances a successful PushAxisAlignedClip.
+        unsafe { self.context.PopAxisAlignedClip() };
     }
 
     /// Fills a rounded rectangle in DIP.

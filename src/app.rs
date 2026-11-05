@@ -135,11 +135,15 @@ const NOTE_TILT_MAX_DEG: f32 = 5.0;
 const NOTE_TILT_RANGE_DIP: f32 = 120.0;
 const NOTE_TILT_RESPONSE: f32 = 0.56;
 const NOTE_TILT_DAMPING: f32 = 0.6;
-/// Hover note fly-in/out. Deliberately a touch slower than the card flight so
-/// the small paper reads as a light object instead of a flicker.
-const NOTE_FLY_IN_SECONDS: f64 = 0.48;
+/// Hover note fly-in/out. The entry is advertised by its peeking corner, so
+/// moving onto it drops the rest of the note in quickly instead of the old
+/// slow fall from above the screen.
+const NOTE_FLY_IN_SECONDS: f64 = 0.22;
 const NOTE_FLY_OUT_SECONDS: f64 = 0.42;
-const NOTE_ARC_DIP: f32 = 22.0;
+/// How far above its slot the full entry note starts, DIP. Keeps the fast
+/// fly-in visible as a short drop from the peeking corner.
+const NOTE_ENTRY_DROP_DIP: f32 = 16.0;
+const NOTE_ARC_DIP: f32 = 4.0;
 
 /// One pegged item, as the UI thread knows it.
 struct Item {
@@ -451,8 +455,8 @@ struct App {
     hover: Option<CardId>,
     /// Which of the hovered card's two buttons the pointer is over.
     hover_action: Option<(CardId, ActionKind)>,
-    /// The invisible entry hotspot: dwell timer, animation and line pin.
-    note_armed_at: Option<f64>,
+    /// The invisible entry hotspot and its line pin.
+    note_peek_on: bool,
     note_hover: Option<HoverNote>,
     note_hotspot_hovered: bool,
     note_pin: bool,
@@ -499,6 +503,9 @@ struct App {
     /// drop interrupts the old animation (BEHAVIOR §3.8), so this is cleared as
     /// soon as the flight window moves on.
     flying_card: Option<CardId>,
+    /// True when `flying_card` is an edited note returning to its existing slot
+    /// rather than a new card arriving at the right end.
+    flying_rehang: bool,
     /// The same for the preview and the drag ghost, which are cheaper to
     /// rebuild.
     preview_idle_at: Option<f64>,
@@ -591,7 +598,7 @@ impl App {
             hide_at: None,
             hover: None,
             hover_action: None,
-            note_armed_at: None,
+            note_peek_on: false,
             note_hover: None,
             note_hotspot_hovered: false,
             note_pin: false,
@@ -618,6 +625,7 @@ impl App {
             last_reload: start,
             flight_idle_at: None,
             flying_card: None,
+            flying_rehang: false,
             preview_idle_at: None,
             ghost_idle_at: None,
             recent: Vec::new(),
@@ -1431,6 +1439,7 @@ impl App {
                         }
                         continue;
                     }
+                    let rehang = self.flying_rehang && self.flying_card == Some(token);
                     if self.flying_card == Some(token) {
                         self.flying_card = None;
                     }
@@ -1439,10 +1448,19 @@ impl App {
                     if let Some(flight) = self.flight.as_ref() {
                         win32::set_topmost(flight.hwnd());
                     }
-                    self.send_scene(Command::SetFlying {
-                        id: token,
-                        flying: false,
-                    });
+                    let command = if rehang {
+                        Command::SetRehang {
+                            id: token,
+                            flying: false,
+                        }
+                    } else {
+                        Command::SetFlying {
+                            id: token,
+                            flying: false,
+                        }
+                    };
+                    self.send_scene(command);
+                    self.flying_rehang = false;
                 }
                 Event::Flight(FlightEvent::Finished(id)) => {
                     if id == NOTE_FLIGHT_TOKEN {
@@ -1463,6 +1481,7 @@ impl App {
                         continue;
                     }
                     self.flying_card = None;
+                    self.flying_rehang = false;
                     if let Some(flight) = self.flight.as_mut() {
                         flight.hide();
                     }
@@ -1730,7 +1749,7 @@ impl App {
                 };
                 x >= rect.left && x < rect.right && y >= screen.bounds.top && y < rect.bottom
             });
-            if inside && self.pinned {
+            if inside && self.pinned && self.note_editor.is_none() {
                 self.pinned = false;
             }
             let busy = self.pinned
@@ -2363,12 +2382,7 @@ impl App {
             if let Some(end) = self.flight_target_px(index, index + 1, card_size) {
                 // A burst of captures must not queue flights: show the old card
                 // at its slot and let the flight window switch to the new one.
-                if let Some(previous) = self.flying_card.take() {
-                    self.send_scene(Command::SetFlying {
-                        id: previous,
-                        flying: false,
-                    });
-                }
+                self.release_flying_card();
                 if let Some(flight) = self.ensure_flight() {
                     // Same tilt `add_item` gives the real card, and the row
                     // glide it will perform after landing. The flight window
@@ -2383,6 +2397,7 @@ impl App {
                     if flying {
                         self.flight_idle_at = None;
                         self.flying_card = Some(id);
+                        self.flying_rehang = false;
                     }
                 }
             }
@@ -2469,6 +2484,26 @@ impl App {
         let scale = overlay.scale().max(0.1);
         let width_dip = overlay.width_px() as f32 / scale;
         let x = layout::flight_slot_x(index, count, width_dip);
+        let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
+        let left = x - card_size.0 * 0.5;
+        Some(RectI::new(
+            window.left + (left * scale).round() as i32,
+            window.top + (top * scale).round() as i32,
+            window.left + ((left + card_size.0) * scale).round() as i32,
+            window.top + ((top + card_size.1) * scale).round() as i32,
+        ))
+    }
+
+    /// Where card `index` of `count` will sit once the row settles, in screen
+    /// pixels, ignoring any reveal offset. Used as the landing target when an
+    /// edited note returns to its existing slot, including when the strip is
+    /// still on its way down.
+    fn card_slot_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
+        let overlay = self.overlay.as_ref()?;
+        let window = win32::window_rect(overlay.hwnd())?;
+        let scale = overlay.scale().max(0.1);
+        let width_dip = overlay.width_px() as f32 / scale;
+        let x = layout::slot_x(index, count, width_dip);
         let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
         let left = x - card_size.0 * 0.5;
         Some(RectI::new(
@@ -2821,10 +2856,11 @@ impl App {
         )
     }
 
-    /// 120 ms dwell, fly-in, follow/float, fly-out (NOTE-EDITOR.md §3.1, §4.3).
+    /// The peeking corner, fast entry drop, follow/float and fly-out
+    /// (NOTE-EDITOR.md §3.1, §4.3).
     fn update_note_entry(&mut self, now: f64) {
         if !self.is_revealed || self.note_editor.is_some() || self.menu_open || self.dragging {
-            if self.note_hover.is_some() || self.note_armed_at.is_some() {
+            if self.note_hover.is_some() || self.note_peek_on {
                 logging::trace(format!(
                     "note entry reset: revealed={} editor={} menu={} dragging={}",
                     self.is_revealed,
@@ -2833,7 +2869,7 @@ impl App {
                     self.dragging
                 ));
             }
-            self.note_armed_at = None;
+            self.hide_note_peek_now();
             self.note_hotspot_hovered = false;
             self.cancel_note_hover();
             return;
@@ -2851,8 +2887,8 @@ impl App {
             let scale = overlay.scale().max(0.1);
             let (cx, cy) = hotspot.center();
             // Park the synthetic pointer inside the hotspot: it must stay in
-            // (the 120 ms arm needs that) while the offset from the centre
-            // shows the pull and the lean. A narrow hotspot shrinks it.
+            // while the offset from the centre shows the pull and the lean. A
+            // narrow hotspot shrinks it.
             let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
             let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
             let dx = self.note_demo_pointer.0.clamp(-limit_x, limit_x);
@@ -2888,7 +2924,20 @@ impl App {
         let keep_near_entry = hotspot
             .as_ref()
             .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
+        // The whole strip, and a little air around it, is the tool's range: as
+        // soon as the pointer is there the entry advertises itself with a
+        // corner of the blank note. Only stepping onto the hotspot completes it.
+        let in_line_range = self.overlay.as_ref().is_some_and(|overlay| {
+            win32::window_rect(overlay.hwnd()).is_some_and(|rect| {
+                let margin = (12.0 * overlay.scale()).round() as i32;
+                pointer_x >= rect.left - margin
+                    && pointer_x < rect.right + margin
+                    && pointer_y >= rect.top
+                    && pointer_y < rect.bottom + margin
+            })
+        });
         self.note_hotspot_hovered = in_hotspot;
+        self.set_note_peek(in_line_range && self.note_hover.is_none() && hotspot.is_some());
 
         let (card_w, card_h) = layout::note_card_size();
         let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
@@ -2903,9 +2952,9 @@ impl App {
                     let t = ((now - hover.started) / (NOTE_FLY_IN_SECONDS * slow)).clamp(0.0, 1.0)
                         as f32;
                     let k = ease::in_out_cubic(t);
-                    // No work-area clamp here: the note starts above the screen
-                    // and must be allowed to enter; clamping would pin it to the
-                    // top edge for most of the flight.
+                    // No work-area clamp here: the quick drop starts just above
+                    // the slot and must be allowed to enter; clamping would pin
+                    // it to the top edge.
                     let center = (
                         hover.from.0 + (hover.to.0 - hover.from.0) * k,
                         hover.from.1 + (hover.to.1 - hover.from.1) * k
@@ -2984,13 +3033,10 @@ impl App {
                 ));
             }
         } else if in_hotspot {
-            let armed = *self.note_armed_at.get_or_insert(now);
-            if now - armed >= 0.12 {
-                self.begin_note_hover(now, screen, scale);
-                return;
-            }
-        } else {
-            self.note_armed_at = None;
+            // The pointer reached the advertised entry: show the rest of the
+            // note at once (a short drop), with no dwell timer.
+            self.begin_note_hover(now, screen, scale);
+            return;
         }
 
         if let Some(bounds) = bounds {
@@ -3008,7 +3054,7 @@ impl App {
     }
 
     fn begin_note_hover(&mut self, now: f64, screen: Monitor, scale: f32) {
-        self.note_armed_at = None;
+        self.hide_note_peek_now();
         self.hide_preview();
         self.preview_state.reset();
         if self.preview.is_none() {
@@ -3030,7 +3076,10 @@ impl App {
         let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         let window_width = (card_w + NOTE_PADDING_DIP * 2.0) * scale;
         let home = clamp_center(home, window_width * 0.5, window_height * 0.5, screen.work);
-        let from = (home.0, screen.work.top as f32 - window_height * 0.7);
+        // The entry has already advertised itself with its peeking corner, so
+        // the rest of the note drops in from just above the slot instead of
+        // falling from above the screen.
+        let from = (home.0, home.1 - NOTE_ENTRY_DROP_DIP * scale);
         let color = 0;
         let dpi = screen.dpi;
         let bounds = self.note_preview_bounds(from, dpi);
@@ -3092,8 +3141,25 @@ impl App {
             self.hide_preview();
         }
         self.note_pin = false;
-        self.note_armed_at = None;
         self.note_hotspot_hovered = false;
+    }
+
+    /// Shows or hides the entry's peeking corner. The scene animates it, so the
+    /// command is only sent when the state actually changes.
+    fn set_note_peek(&mut self, on: bool) {
+        if self.note_peek_on != on {
+            self.note_peek_on = on;
+            self.send_scene(Command::NotePeek(on));
+        }
+    }
+
+    /// Takes the peeking corner away without its 0.22 s retract, so the full
+    /// note replacing it never has a yellow copy shrinking behind it.
+    fn hide_note_peek_now(&mut self) {
+        if self.note_peek_on {
+            self.note_peek_on = false;
+            self.send_scene(Command::HideNotePeek);
+        }
     }
 
     /// A click on the blank note opens a brand-new note in the editor.
@@ -3107,6 +3173,9 @@ impl App {
         let from = self.note_hover_paper_px();
         let flight_image = notes::render("", 0);
         self.cancel_note_hover();
+        // The flight window is about to be taken over for the trip to the
+        // editor; any card it was carrying must become visible in the scene.
+        self.release_flying_card();
         let tx = self.events_tx.clone();
         let notify = Box::new(move |event| {
             let _ = tx.send(Event::NoteEditor(event));
@@ -3419,6 +3488,8 @@ impl App {
             return;
         }
         self.cancel_note_hover();
+        // Opening the editor interrupts whatever the flight window was doing.
+        self.release_flying_card();
         let Some(item) = self.items.iter().find(|item| item.id == id) else {
             return;
         };
@@ -3643,7 +3714,10 @@ impl App {
             return;
         }
         if text == original {
-            self.close_note_editor();
+            // Opening the editor and clicking away without touching the text is
+            // not a save, but it must look like one: the note flies back to its
+            // card instead of the editor vanishing in place.
+            self.fly_note_back_unchanged();
             return;
         }
         self.note_committing = true;
@@ -3681,6 +3755,37 @@ impl App {
                 }
                 window::wake(HWND::default());
             });
+    }
+
+    /// An existing note was opened for editing but the text did not change:
+    /// fly the card's own bitmap back to its slot, exactly like a save, then
+    /// close the editor. A brand-new note never reaches this path (empty text
+    /// is discarded, typed text is saved).
+    fn fly_note_back_unchanged(&mut self) {
+        let Some(editing) = self.note_editing.as_ref() else {
+            self.close_note_editor();
+            return;
+        };
+        let Some(id) = editing.card else {
+            self.close_note_editor();
+            return;
+        };
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            self.close_note_editor();
+            return;
+        };
+        let (image, tilt, card_size) = {
+            let item = &self.items[index];
+            (item.thumb.clone(), item.tilt, item.card_size)
+        };
+        let from = self.note_editor_paper_px();
+        let target = self.card_slot_px(index, self.items.len(), card_size);
+        let dpi = self.screen_dpi();
+        if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
+            logging::trace(format!("unchanged note {id} flies back to its slot"));
+            self.fly_note_back(id, from, image, tilt, target, dpi);
+        }
+        self.close_note_editor();
     }
 
     fn on_note_saved(
@@ -3722,7 +3827,14 @@ impl App {
                     .find(|item| item.id == id)
                     .map(|item| item.tilt)
                     .unwrap_or(0.0);
-                let target = self.current_card_px(id);
+                let target = self
+                    .items
+                    .iter()
+                    .position(|item| item.id == id)
+                    .and_then(|index| {
+                        let card_size = self.items[index].card_size;
+                        self.card_slot_px(index, self.items.len(), card_size)
+                    });
                 if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
                     item.text = Some(text);
                     item.path = path;
@@ -3749,12 +3861,7 @@ impl App {
                 let target = self.flight_target_px(index, index + 1, card_size);
                 let mut flying = false;
                 if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
-                    if let Some(previous) = self.flying_card.take() {
-                        self.send_scene(Command::SetFlying {
-                            id: previous,
-                            flying: false,
-                        });
-                    }
+                    self.release_flying_card();
                     if let Some(flight) = self.ensure_flight() {
                         let slide_dip = if index == 0 {
                             0.0
@@ -3766,6 +3873,7 @@ impl App {
                         if flying {
                             self.flight_idle_at = None;
                             self.flying_card = Some(id);
+                            self.flying_rehang = false;
                         }
                     }
                 }
@@ -3789,7 +3897,9 @@ impl App {
         self.close_note_editor();
     }
 
-    /// Starts the editor-to-card flight for an existing note.
+    /// Starts the editor-to-card flight for an existing note. The strip is
+    /// brought down first (if it had retracted) and the card waits invisible in
+    /// its own slot, so the row never reflows around a note coming home.
     fn fly_note_back(
         &mut self,
         id: CardId,
@@ -3798,22 +3908,47 @@ impl App {
         tilt: f32,
         target: RectI,
         dpi: u32,
-    ) {
-        if let Some(previous) = self.flying_card.take() {
-            self.send_scene(Command::SetFlying {
-                id: previous,
-                flying: false,
-            });
-        }
-        self.send_scene(Command::SetFlying { id, flying: true });
+    ) -> bool {
+        self.release_flying_card();
+        self.present();
+        self.reveal(false, PEEK_SECONDS);
+        self.send_scene(Command::SetRehang { id, flying: true });
         if let Some(flight) = self.ensure_flight() {
             if flight.fly(id, image, from, target, tilt, 0.0, true, dpi) {
                 self.flight_idle_at = None;
                 self.flying_card = Some(id);
-                return;
+                self.flying_rehang = true;
+                if let Some(flight) = self.flight.as_ref() {
+                    // `present`/`reveal` may have put the strip above the
+                    // flight window; the landing note must stay on top.
+                    win32::set_topmost(flight.hwnd());
+                }
+                return true;
             }
         }
-        self.send_scene(Command::SetFlying { id, flying: false });
+        self.send_scene(Command::SetRehang { id, flying: false });
+        false
+    }
+
+    /// Stops tracking a card the flight window is carrying and makes that card
+    /// visible in the scene again. The command differs for a new arrival (the
+    /// row is waiting to glide) and a returning note (the row never moved).
+    fn release_flying_card(&mut self) {
+        if let Some(previous) = self.flying_card.take() {
+            let command = if self.flying_rehang {
+                Command::SetRehang {
+                    id: previous,
+                    flying: false,
+                }
+            } else {
+                Command::SetFlying {
+                    id: previous,
+                    flying: false,
+                }
+            };
+            self.send_scene(command);
+        }
+        self.flying_rehang = false;
     }
 
     /// Empty text on an existing note: move its file into `Notes\Archive` and
@@ -3915,6 +4050,7 @@ impl App {
         ));
         // The editor stays visible until the flight reports its first frame, so
         // the paper never blinks out between the two windows.
+        self.release_flying_card();
         let launched = match image {
             Some(image) => self.ensure_flight().is_some_and(|flight| {
                 flight.tumble(
@@ -4290,12 +4426,7 @@ impl App {
         self.sound(Cue::Pop);
         // A drop interrupts a flight in progress; the card left behind must be
         // visible at its slot before it falls.
-        if let Some(previous) = self.flying_card.take() {
-            self.send_scene(Command::SetFlying {
-                id: previous,
-                flying: false,
-            });
-        }
+        self.release_flying_card();
         if let Some(flight) = self.ensure_flight() {
             if flight.drop_card(id, thumb, rect, tilt, dpi) {
                 self.flight_idle_at = None;

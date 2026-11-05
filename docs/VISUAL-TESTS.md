@@ -370,7 +370,7 @@
 | `PEGLINE_NOTE_DEMO_POINTER` 四象限 | 同一模式，指针分别放在热点中心左上/右上/左下/右下 | `visual/note-hover-lean-quadrants.png`：左上 **+2.3°**、右上 **−2.3°**、左下 **−4.0°**、右下 **+4.0°**（正值 = 顺时针），即“左上/右下顺时针、右上/左下逆时针” |
 | 连续截帧（90 ms 间隔） | 同一条目，记录 16 帧 | 便签中心从 (4239,195) 缓慢回摆到 (4239,186)，带阻尼；没有抖动或跑出工作区 |
 | 连续截帧（135 ms 间隔，倾斜） | 默认指针，从飞入落地开始记录 30 帧 | 倾角 **0 → +1.02 → +3.45 → +4.24（峰值）→ +4.08 → +3.97°（稳定）**：0.6 阻尼下只轻微过冲约 7 %，约 0.6 s 回正，没有回摆 |
-| `PEGLINE_NOTE_SLOW=4` 飞入 | 慢放 4× 后连续截帧 | `visual/note-hover-enter-frames.png`：便签从工作区上方进入、下降，不再贴住屏幕顶边（这张是 2026-11-04 的，便签当时还没有玻璃外框和“新建便签”） |
+| `PEGLINE_NOTE_SLOW=4` 飞入 | 慢放 4× 后连续截帧 | `visual/note-hover-enter-frames.png`：旧版便签从工作区上方进入、下降（这张是 2026-11-04 的）；2026-11-05 起改为露角后从槽位上方 16 DIP 快速落下，见下方露角/展开条目 |
 | `PEGLINE_NOTE_SLOW=4` 飞出 | 悬停后把指针移出热点，连续截帧 | `visual/note-hover-exit-frames.png`：便签沿 0.42 s 曲线上移消失，窗口随后隐藏（同上，外观为旧版） |
 | 同上 + 鼠标点击便签 | 点击进入中央飞行 | `visual/note-center-flight.png`：便签沿曲线飞向中央（旧版带夹子；2026-11-05 起新便签的这次飞行不画挂夹，见上面 `--note-hover-demo --note-flow-demo` 一行） |
 | `--note-editor-demo` | 打开示例文档，滚轮下滚 | `visual/note-editor-lists.png`（标题/列表/任务）、`visual/note-editor-code.png`（引用/行内代码/链接/代码块/中文） |
@@ -381,6 +381,19 @@
 | 中文 IME 组合 | Microsoft Pinyin 输入 `nihao` | `visual/note-editor-ime-composition.png`：活跃行内 `ni'hao` 带下划线，候选窗贴光标 |
 | 中文 IME 提交 | 按空格选“你好” | `visual/note-editor-ime-committed.png`：`你好` 作为源码插入，组合下划线消失 |
 | `--note-storage-demo` | 临时便签：建卡→同路径编辑器→改字提交→归档→清理 | trace：`has_card=true text_has_edit=true bytes=32 bom=true crlf=true`；归档文件存在，测试文件和卡片已清理 |
+
+- 入口露角、快速展开与编辑后挂回（2026-11-05，debug 构建，6016×3384 @200%）：
+  - 指针进入线带内（远离热点）后 0.22 s，入口槽位出现空白便签顶部 **16 DIP**
+    的露角，玻璃框和纸面顶边与绳上卡片同宽同圆角；`visual/note-entry-peek.jpg`。
+  - 指针移到热点后约 0.12–0.22 s，完整便签落在理论挂点；露角同时消失，
+    不再有 120 ms 驻留或从屏幕外上方飞入的等待；`visual/note-entry-fast.jpg`。
+  - 从卡片右键“编辑”打开已有便签，指针移到中央编辑窗口 2 s 后线带仍在屏幕
+    上（编辑期间钉住）；点纸面外且没改字，编辑窗口关闭，飞行层带着卡片从
+    编辑窗口飞回原槽位，落地后两卡位置不变；`visual/note-rehang-unchanged.jpg`
+    是飞行中间帧。
+  - `--note-storage-demo` 改字提交：飞行中间帧里其余卡片不补位、不重排，
+    落回原槽位后第三张便签出现；`visual/note-rehang-changed.jpg`。
+  - 本轮是 debug 构建的逐帧截图，只验证动画/状态，没有新的内存或帧率数字。
 
 - 体积与内存（release，200%，6 卡，线带可见；`PrivateMemorySize64`）：
   - `pegline.exe` **1,649,664 B（1.57 MB）**，比上一版 1,385,984 B 增加

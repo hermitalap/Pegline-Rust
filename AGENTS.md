@@ -73,8 +73,9 @@ hover/centre flight, the empty editor, the full Markdown projection (headings,
 lists, tasks, quote, inline code, link, code block, Chinese), scrolling, saving a
 new note and its card flight. The entry hover is a fixed home slot with a
 0.56 s/0.6 damped spring (it overshoots about 7 % and settles, no swing), a
-pointer-distance pull capped at 30 DIP and a 15 ms physics timer (0.48 s fly-in,
-0.42 s fly-out); the blank note wears the same glass card as a hanging picture
+pointer-distance pull capped at 30 DIP and a 15 ms physics timer (0.22 s quick
+drop from the peeking corner, 0.42 s fly-out); the blank note wears the same
+glass card as a hanging picture
 (144×96 DIP frame, the 136×88 paper inset by `PHOTO_INSET`) with a grey
 `new_note` label centred on the paper; a second spring of the same response and
 damping leans that card by up to 5° about its centre — clockwise in the
@@ -102,6 +103,13 @@ BOM+CRLF, moved to `Notes\Archive`, and cleaned up. Still pending: 200 % DPI
 re-centre, three-language menu/balloon checks and the keyboard-to-pixel latency;
 do not mark those as passed without a measurement. The old note "Edit" path now
 opens this editor instead of Notepad; "Archive" replaces "Discard" for notes.
+On 2026-11-05 the entry gained a top-corner peek whenever the pointer is anywhere
+over the strip (16 DIP, scene-drawn, 0.22 s spring), the 120 ms dwell was removed
+so entering the hotspot drops the full note in 0.22 s from 16 DIP above, and the
+line stays pinned while the editor is open. An edited note now flies back through
+a `SetRehang` scene command that keeps the row from reflowing; an editor pass with
+no changed text plays the same flight instead of closing in place. See `PLAN.md`
+§9.2 and the `docs/visual/note-entry-*` / `note-rehang-*` screenshots.
 
 ## Read first
 
