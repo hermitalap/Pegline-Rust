@@ -163,10 +163,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_defaults() {
-        let snip = parse("Ctrl+Alt+S").expect("default screenshot shortcut");
-        assert_eq!(snip.virtual_key, 'S' as u32);
-        assert_eq!(snip.modifiers, MOD_CONTROL.0 | MOD_ALT.0);
+    fn parses_stored_shortcut_forms() {
+        let stored = parse("Ctrl+Alt+S").expect("stored shortcut form");
+        assert_eq!(stored.virtual_key, 'S' as u32);
+        assert_eq!(stored.modifiers, MOD_CONTROL.0 | MOD_ALT.0);
 
         let toggle = parse("Ctrl+Alt+T").expect("toggle shortcut");
         assert_eq!(toggle.virtual_key, 'T' as u32);

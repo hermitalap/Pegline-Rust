@@ -43,9 +43,7 @@ const TOOLTIP: &str = "Pegline";
 // order because the enum is a stable API and the menu order is a product
 // decision; keeping them apart means adding a command cannot move an id.
 const ID_TOGGLE_REVEAL: u32 = 1;
-const ID_SNIP: u32 = 2;
 const ID_NOTE: u32 = 3;
-const ID_SNIP_KEY: u32 = 4;
 const ID_NOTE_KEY: u32 = 5;
 const ID_CLEAR_LINE: u32 = 6;
 const ID_CLEAR_FILES: u32 = 7;
@@ -59,9 +57,7 @@ const ID_EXIT: u32 = 12;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuCommand {
     ToggleReveal,
-    Snip,
     Note,
-    SnipKey,
     NoteKey,
     ClearLine,
     ClearFiles,
@@ -81,9 +77,6 @@ pub struct MenuState {
     pub autostart: bool,
     pub caught_files: usize,
     pub live_cards: usize,
-    pub empty: bool,
-    pub hotkey_registered: bool,
-    pub snip_key: String,
     pub note_key: String,
 }
 
@@ -96,9 +89,6 @@ impl Default for MenuState {
             autostart: false,
             caught_files: 0,
             live_cards: 1,
-            empty: false,
-            hotkey_registered: true,
-            snip_key: "Ctrl+Alt+S".to_string(),
             note_key: "Ctrl+Alt+N".to_string(),
         }
     }
@@ -342,20 +332,8 @@ fn build_menu(menu: HMENU, state: &MenuState) -> Result<(), String> {
         strings.show_line
     };
     append_item(menu, MenuCommand::ToggleReveal, toggle, MF_UNCHECKED)?;
-    append_item(
-        menu,
-        MenuCommand::Snip,
-        strings.take_screenshot,
-        MF_UNCHECKED,
-    )?;
     append_item(menu, MenuCommand::Note, strings.hang_note, MF_UNCHECKED)?;
 
-    let snip = shortcut_label(
-        strings.screenshot_shortcut,
-        strings.key_separator,
-        &state.snip_key,
-    );
-    append_item(menu, MenuCommand::SnipKey, &snip, MF_UNCHECKED)?;
     let note = shortcut_label(
         strings.note_shortcut,
         strings.key_separator,
@@ -422,7 +400,7 @@ fn build_menu(menu: HMENU, state: &MenuState) -> Result<(), String> {
     Ok(())
 }
 
-/// `"Screenshot shortcut: Ctrl+Alt+S…"`, exactly as the WPF app formatted it.
+/// `"Note shortcut: Ctrl+Alt+N…"`, exactly as the WPF app formatted it.
 fn shortcut_label(title: &str, separator: &str, key: &str) -> String {
     format!("{title}{separator}{key}…")
 }
@@ -436,9 +414,7 @@ fn delete_caught_label(template: &str, count: usize) -> String {
 fn menu_id(command: MenuCommand) -> u32 {
     match command {
         MenuCommand::ToggleReveal => ID_TOGGLE_REVEAL,
-        MenuCommand::Snip => ID_SNIP,
         MenuCommand::Note => ID_NOTE,
-        MenuCommand::SnipKey => ID_SNIP_KEY,
         MenuCommand::NoteKey => ID_NOTE_KEY,
         MenuCommand::ClearLine => ID_CLEAR_LINE,
         MenuCommand::ClearFiles => ID_CLEAR_FILES,
@@ -454,9 +430,7 @@ fn menu_id(command: MenuCommand) -> u32 {
 fn command_for_id(id: u32) -> Option<MenuCommand> {
     match id {
         ID_TOGGLE_REVEAL => Some(MenuCommand::ToggleReveal),
-        ID_SNIP => Some(MenuCommand::Snip),
         ID_NOTE => Some(MenuCommand::Note),
-        ID_SNIP_KEY => Some(MenuCommand::SnipKey),
         ID_NOTE_KEY => Some(MenuCommand::NoteKey),
         ID_CLEAR_LINE => Some(MenuCommand::ClearLine),
         ID_CLEAR_FILES => Some(MenuCommand::ClearFiles),
@@ -484,11 +458,9 @@ pub fn taskbar_created_message() -> u32 {
 mod tests {
     use super::*;
 
-    const ALL: [MenuCommand; 12] = [
+    const ALL: [MenuCommand; 10] = [
         MenuCommand::ToggleReveal,
-        MenuCommand::Snip,
         MenuCommand::Note,
-        MenuCommand::SnipKey,
         MenuCommand::NoteKey,
         MenuCommand::ClearLine,
         MenuCommand::ClearFiles,
@@ -524,12 +496,12 @@ mod tests {
     #[test]
     fn shortcut_labels_match_the_wpf_format() {
         assert_eq!(
-            shortcut_label("Screenshot shortcut", ": ", "Ctrl+Alt+S"),
-            "Screenshot shortcut: Ctrl+Alt+S…"
+            shortcut_label("Note shortcut", ": ", "Ctrl+Alt+N"),
+            "Note shortcut: Ctrl+Alt+N…"
         );
         assert_eq!(
-            shortcut_label("截图快捷键", "：", "Ctrl+Alt+S"),
-            "截图快捷键：Ctrl+Alt+S…"
+            shortcut_label("便签快捷键", "：", "Ctrl+Alt+N"),
+            "便签快捷键：Ctrl+Alt+N…"
         );
     }
 

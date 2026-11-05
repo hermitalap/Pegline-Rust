@@ -19,7 +19,6 @@ pub mod keys {
     pub const CATCH_OFFERED: &str = "catchOffered";
     pub const CATCH_CLIPBOARD: &str = "catchClipboard";
     pub const SOUND_OFF: &str = "soundOff";
-    pub const SNIP_KEY: &str = "snipKey";
     pub const NOTE_KEY: &str = "noteKey";
     pub const FPS: &str = "fps";
     /// Prefix of the per-note colour keys (`noteColor:<file name>`).

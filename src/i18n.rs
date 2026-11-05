@@ -34,9 +34,7 @@ pub struct Strings {
     /// Tray menu.
     pub hide_line: &'static str,
     pub show_line: &'static str,
-    pub take_screenshot: &'static str,
     pub hang_note: &'static str,
-    pub screenshot_shortcut: &'static str,
     pub note_shortcut: &'static str,
     pub none: &'static str,
     pub in_use_by_another_app: &'static str,
@@ -81,7 +79,6 @@ pub struct Strings {
     pub ok: &'static str,
     pub add_modifier: &'static str,
     pub conflict_toggle: &'static str,
-    pub conflict_other: &'static str,
     pub conflict_external: &'static str,
 }
 
@@ -98,9 +95,7 @@ const EN: Strings = Strings {
     move_to_recycle: "Move to Recycle Bin",
     hide_line: "Hide line",
     show_line: "Show line",
-    take_screenshot: "Take a screenshot",
     hang_note: "Hang copied text as a note",
-    screenshot_shortcut: "Screenshot shortcut",
     note_shortcut: "Note shortcut",
     none: "none",
     in_use_by_another_app: " (in use by another app)",
@@ -138,7 +133,6 @@ const EN: Strings = Strings {
     ok: "OK",
     add_modifier: "Add Ctrl, Alt, Shift or Win.",
     conflict_toggle: "Ctrl+Alt+T already shows and hides the line.",
-    conflict_other: "Pegline already uses this combination for something else.",
     conflict_external: "Another app is using this combination. Try another one.",
 };
 
@@ -155,9 +149,7 @@ const ES: Strings = Strings {
     move_to_recycle: "Mover a la Papelera",
     hide_line: "Ocultar tendedero",
     show_line: "Mostrar tendedero",
-    take_screenshot: "Hacer una captura",
     hang_note: "Colgar el texto copiado como nota",
-    screenshot_shortcut: "Atajo de captura",
     note_shortcut: "Atajo de nota",
     none: "ninguno",
     in_use_by_another_app: " (en uso por otra aplicación)",
@@ -195,7 +187,6 @@ const ES: Strings = Strings {
     ok: "Aceptar",
     add_modifier: "Añade Ctrl, Alt, Mayús o Win.",
     conflict_toggle: "Ctrl+Alt+T ya muestra y oculta el tendedero.",
-    conflict_other: "Pegline ya usa esta combinación para otra cosa.",
     conflict_external: "Otra aplicación está usando esta combinación. Prueba con otra.",
 };
 
@@ -212,9 +203,7 @@ const ZH: Strings = Strings {
     move_to_recycle: "移到回收站",
     hide_line: "收起绳子",
     show_line: "放下绳子",
-    take_screenshot: "截图",
     hang_note: "把复制的文字挂成便签",
-    screenshot_shortcut: "截图快捷键",
     note_shortcut: "便签快捷键",
     none: "未设置",
     in_use_by_another_app: "（被其他程序占用）",
@@ -252,7 +241,6 @@ const ZH: Strings = Strings {
     ok: "确定",
     add_modifier: "请加上 Ctrl、Alt、Shift 或 Win。",
     conflict_toggle: "Ctrl+Alt+T 已经是显示/隐藏绳子了。",
-    conflict_other: "Pegline 已经用这个组合键做别的事了。",
     conflict_external: "其他程序占用了这个组合键，换一个试试。",
 };
 

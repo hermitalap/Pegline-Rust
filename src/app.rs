@@ -58,7 +58,6 @@ const TIMER_GHOST: usize = 2;
 const GHOST_MS: u32 = 15;
 
 const HOTKEY_TOGGLE: i32 = 1;
-const HOTKEY_SNIP: i32 = 2;
 const HOTKEY_NOTE: i32 = 3;
 
 /// How long the pointer must rest on the top edge before the line drops.
@@ -87,7 +86,7 @@ const DOUBLE_CLICK: f64 = 0.4;
 const MISSING_LIMIT: u32 = 2;
 /// Inbox and Windows-saved copies of one screenshot merge within this window.
 ///
-/// The Windows file can appear several seconds after the snip (the watcher
+/// The Windows file can appear several seconds after the capture (the watcher
 /// then debounces for another quarter second before the decode and compare),
 /// so the WPF's 4 s is too tight for this pipeline.
 const TWIN_SECONDS: f64 = 8.0;
@@ -363,9 +362,6 @@ struct App {
     /// The annotation editor, while one is open.
     editor: Option<Editor>,
     editing: Option<EditingCapture>,
-    /// `Ctrl+Alt+S`: annotate the next clipboard capture before hanging it.
-    /// Unix-free monotonic deadline; 0 means not armed (60 s window, as WPF).
-    arm_editor_until: f64,
     /// Files our own editor just wrote, ignored by the watcher for 2 s.
     recently_saved: Vec<(PathBuf, f64)>,
     last_reload: f64,
@@ -388,7 +384,6 @@ struct App {
     last_clip_hash: u64,
     last_clip_at: f64,
     /// Whether RegisterHotKey succeeded; the tray menu says when it did not.
-    snip_hotkey_ok: bool,
     note_hotkey_ok: bool,
     /// `--panic-test`: panic once inside the message handler to prove recovery.
     panic_test: bool,
@@ -449,7 +444,6 @@ impl App {
             dragging: false,
             editor: None,
             editing: None,
-            arm_editor_until: 0.0,
             recently_saved: Vec::new(),
             last_reload: start,
             flight_idle_at: None,
@@ -459,7 +453,6 @@ impl App {
             recent: Vec::new(),
             last_clip_hash: 0,
             last_clip_at: 0.0,
-            snip_hotkey_ok: false,
             note_hotkey_ok: false,
             panic_test: std::env::args().any(|arg| arg == "--panic-test"),
             panicked: false,
@@ -581,26 +574,6 @@ impl App {
                 'T' as u32,
             );
         }
-        let snip = self.configured_hotkey("snipKey", "Ctrl+Alt+S");
-        if let Some(hotkey) = snip {
-            // SAFETY: as above.
-            let result = unsafe {
-                RegisterHotKey(
-                    Some(self.hwnd),
-                    HOTKEY_SNIP,
-                    windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(
-                        hotkey.register_modifiers(),
-                    ),
-                    hotkey.virtual_key,
-                )
-            };
-            match result {
-                Ok(()) => self.snip_hotkey_ok = true,
-                Err(error) => logging::error(format!("RegisterHotKey(snip): {error}")),
-            }
-        } else {
-            self.snip_hotkey_ok = true;
-        }
         let note = self.configured_hotkey("noteKey", "Ctrl+Alt+N");
         if let Some(hotkey) = note {
             let result = unsafe {
@@ -632,40 +605,16 @@ impl App {
         }
     }
 
-    /// Opens the recorder for one action and applies the choice (BEHAVIOR §12.2).
-    fn change_hotkey(&mut self, target: HotkeyTarget) {
-        let (id, setting, default, other_setting, other_default, title) = match target {
-            HotkeyTarget::Snip => (
-                HOTKEY_SNIP,
-                "snipKey",
-                "Ctrl+Alt+S",
-                "noteKey",
-                "Ctrl+Alt+N",
-                i18n::s().screenshot_shortcut,
-            ),
-            HotkeyTarget::Note => (
-                HOTKEY_NOTE,
-                "noteKey",
-                "Ctrl+Alt+N",
-                "snipKey",
-                "Ctrl+Alt+S",
-                i18n::s().note_shortcut,
-            ),
-        };
-        let current = self.configured_hotkey(setting, default);
-        let other = self.configured_hotkey(other_setting, other_default);
-        let (other_id, other_target) = match target {
-            HotkeyTarget::Snip => (HOTKEY_NOTE, HotkeyTarget::Note),
-            HotkeyTarget::Note => (HOTKEY_SNIP, HotkeyTarget::Snip),
-        };
+    /// Opens the note shortcut recorder and applies the choice (BEHAVIOR §12.2).
+    fn change_note_hotkey(&mut self) {
+        let current = self.configured_hotkey("noteKey", "Ctrl+Alt+N");
         // Release every app hotkey while recording. Otherwise pressing one of
         // our own combinations triggers it instead of reaching the dialog, and
         // the recorder's availability probe would fail on our registrations.
         // SAFETY: the hotkey ids belong to this window.
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE);
-            let _ = UnregisterHotKey(Some(self.hwnd), id);
-            let _ = UnregisterHotKey(Some(self.hwnd), other_id);
+            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_NOTE);
         }
         let validate = move |choice: Option<shortcut::Hotkey>| -> Option<String> {
             let hotkey = choice?;
@@ -676,34 +625,36 @@ impl App {
             {
                 return Some(i18n::s().conflict_toggle.to_string());
             }
-            if other == Some(hotkey) {
-                return Some(i18n::s().conflict_other.to_string());
-            }
             None
         };
-        let choice = window::shortcuts::ask(self.hwnd, title, current, Box::new(validate));
+        let choice = window::shortcuts::ask(
+            self.hwnd,
+            i18n::s().note_shortcut,
+            current,
+            Box::new(validate),
+        );
         let mut registered = false;
         match choice {
             window::shortcuts::Choice::Cancelled => {
                 if let Some(hotkey) = current {
-                    registered = Self::register_hotkey(self.hwnd, id, hotkey);
+                    registered = Self::register_hotkey(self.hwnd, HOTKEY_NOTE, hotkey);
                 }
             }
             window::shortcuts::Choice::Chosen(None) => {
-                self.settings.set_string(setting, "none");
+                self.settings.set_string("noteKey", "none");
                 self.settings.save();
                 registered = true;
             }
             window::shortcuts::Choice::Chosen(Some(hotkey)) => {
-                if Self::register_hotkey(self.hwnd, id, hotkey) {
-                    self.settings.set_string(setting, &hotkey.label());
+                if Self::register_hotkey(self.hwnd, HOTKEY_NOTE, hotkey) {
+                    self.settings.set_string("noteKey", &hotkey.label());
                     self.settings.save();
                     registered = true;
                 } else {
                     // Somebody took it between the probe and now.
                     logging::error("hotkey: registration failed after the dialog");
                     if let Some(previous) = current {
-                        registered = Self::register_hotkey(self.hwnd, id, previous);
+                        registered = Self::register_hotkey(self.hwnd, HOTKEY_NOTE, previous);
                     }
                     let body = i18n::s().conflict_external.to_string();
                     if let Some(tray) = self.tray.as_mut() {
@@ -712,19 +663,7 @@ impl App {
                 }
             }
         }
-        match target {
-            HotkeyTarget::Snip => self.snip_hotkey_ok = registered,
-            HotkeyTarget::Note => self.note_hotkey_ok = registered,
-        }
-        // Put the untouched action and the show/hide combination back.
-        let other_ok = match other {
-            Some(hotkey) => Self::register_hotkey(self.hwnd, other_id, hotkey),
-            None => true,
-        };
-        match other_target {
-            HotkeyTarget::Snip => self.snip_hotkey_ok = other_ok,
-            HotkeyTarget::Note => self.note_hotkey_ok = other_ok,
-        }
+        self.note_hotkey_ok = registered;
         // SAFETY: the toggle id belongs to this window; the combination is the
         // fixed Ctrl+Alt+T.
         let toggle = unsafe {
@@ -745,7 +684,7 @@ impl App {
 
     /// Registers one app hotkey; returns whether Windows accepted it.
     fn register_hotkey(hwnd: HWND, id: i32, hotkey: shortcut::Hotkey) -> bool {
-        // SAFETY: the window is ours and the id is one of our two action ids.
+        // SAFETY: the window is ours and the id is one of our action ids.
         let result = unsafe {
             RegisterHotKey(
                 Some(hwnd),
@@ -834,7 +773,6 @@ impl App {
             WM_HOTKEY => {
                 match wparam.0 as i32 {
                     HOTKEY_TOGGLE => self.toggle(),
-                    HOTKEY_SNIP => self.snip(),
                     HOTKEY_NOTE => self.note_shortcut(),
                     _ => {}
                 }
@@ -892,9 +830,6 @@ impl App {
             autostart: win32::autostart_enabled(),
             caught_files: count_inbox_files(),
             live_cards: self.items.len(),
-            empty: self.items.is_empty(),
-            hotkey_registered: true,
-            snip_key: self.hotkey_menu_label("snipKey", "Ctrl+Alt+S", self.snip_hotkey_ok),
             note_key: self.hotkey_menu_label("noteKey", "Ctrl+Alt+N", self.note_hotkey_ok),
         }
     }
@@ -913,7 +848,6 @@ impl App {
     fn apply(&mut self, command: MenuCommand) {
         match command {
             MenuCommand::ToggleReveal => self.toggle(),
-            MenuCommand::Snip => self.snip(),
             MenuCommand::CatchScreenshots => {
                 let on = !self.settings.catch_clipboard();
                 self.settings.set_catch_clipboard(on);
@@ -943,8 +877,7 @@ impl App {
             MenuCommand::ClearFiles => self.clear_inbox(),
             MenuCommand::Exit => self.request_quit(),
             MenuCommand::Note => self.note_shortcut(),
-            MenuCommand::SnipKey => self.change_hotkey(HotkeyTarget::Snip),
-            MenuCommand::NoteKey => self.change_hotkey(HotkeyTarget::Note),
+            MenuCommand::NoteKey => self.change_note_hotkey(),
         }
     }
 
@@ -1920,12 +1853,6 @@ impl App {
             .as_ref()
             .is_some_and(|editing| editing.path == path)
         {
-            return;
-        }
-        // `Ctrl+Alt+S`: the clipboard capture is annotated before it hangs.
-        if now < self.arm_editor_until && own && clip_hash.is_some() {
-            self.arm_editor_until = 0.0;
-            self.open_editor_for(path, own, area, size_px, thumb);
             return;
         }
         if self.items.iter().any(|item| item.path == path) {
@@ -3098,10 +3025,7 @@ impl App {
     // ---- capture ----------------------------------------------------------
 
     fn on_clipboard_changed(&mut self) {
-        // While the snip shortcut is armed, catching is on even if the user
-        // turned ordinary clipboard catching off (as in the WPF catcher).
-        let armed = win32::now_seconds() < self.arm_editor_until;
-        if (!self.settings.catch_clipboard() && !armed) || clipboard::self_write_recent() {
+        if !self.settings.catch_clipboard() || clipboard::self_write_recent() {
             return;
         }
         let _ = self.events_tx.send(Event::ClipboardChanged);
@@ -3175,16 +3099,6 @@ impl App {
                 window::wake(HWND::default());
                 let _ = now;
             });
-    }
-
-    fn snip(&mut self) {
-        // The next clipboard capture opens the annotation editor first
-        // (BEHAVIOR §9.2: "转接编辑器"). The catcher stays armed for 60 s, which
-        // is how long a snip selection can take.
-        self.arm_editor_until = win32::now_seconds() + 60.0;
-        if let Err(error) = win32::shell_open(std::path::Path::new("ms-screenclip:")) {
-            logging::error(format!("ms-screenclip: {error}"));
-        }
     }
 
     fn guess_area(&self, path: &std::path::Path, fresh: bool) -> Option<RectI> {
@@ -3345,7 +3259,6 @@ impl App {
         // SAFETY: hotkeys are per-window and ours.
         unsafe {
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE);
-            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_SNIP);
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_NOTE);
         }
         if let Some(tray) = self.tray.as_mut() {
@@ -3390,13 +3303,6 @@ enum CardAction {
     Discard,
     TakeDown,
     Trash,
-}
-
-/// The two configurable actions in the recorder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HotkeyTarget {
-    Snip,
-    Note,
 }
 
 /// Window procedure for the hidden message window.
