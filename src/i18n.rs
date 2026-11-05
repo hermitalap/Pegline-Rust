@@ -24,8 +24,8 @@ pub struct Strings {
     pub copy: &'static str,
     pub open: &'static str,
     pub copied: &'static str,
-    /// Card context menu. Pictures are annotated in the editor; notes still
-    /// open in Notepad, so both verbs exist.
+    /// Card context menu. Pictures are annotated in the annotation editor;
+    /// notes open the WYSIWYG note editor, so both verbs exist.
     pub annotate: &'static str,
     pub edit: &'static str,
     pub show_in_explorer: &'static str,

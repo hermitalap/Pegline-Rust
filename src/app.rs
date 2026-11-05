@@ -3778,8 +3778,8 @@ impl App {
         let Some(item) = self.items.iter().find(|item| item.id == id) else {
             return;
         };
-        // Notes keep the old "Edit" verb: they belong in Notepad, not in the
-        // picture annotation window.
+        // Notes keep the old "Edit" verb, which opens the WYSIWYG note editor;
+        // only pictures belong in the annotation window.
         if item.note {
             self.edit_item(id);
             return;
@@ -4209,8 +4209,8 @@ impl App {
         let item = self.items.iter().find(|item| item.id == id)?;
         let (own, note) = (item.own, item.note);
         let strings = i18n::s();
-        // Notes keep "Edit" (Notepad); pictures get "Annotate", which opens the
-        // same window as the old Ctrl+Alt+S capture flow.
+        // Notes keep "Edit" (the note editor); pictures get "Annotate", which
+        // opens the same window as the old Ctrl+Alt+S capture flow.
         let middle = if note { strings.edit } else { strings.annotate };
         // SAFETY: menus are created and destroyed on this thread.
         unsafe {
