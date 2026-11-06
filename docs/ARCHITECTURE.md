@@ -271,39 +271,71 @@ struct Card {
 
 ## 10. 模块划分
 
+下面的树是**当前实际布局**（2026-11-06 拆分后）。早先的设计稿把 `d2d.rs` / `shadow.rs` /
+`texture.rs` / `gestures.rs` / `twins.rs` 都列为独立文件，但落地时没有拆成那么细：
+画刷与阴影烘焙留在 `render/mod.rs`，手势在 `app/pointer.rs`，孪生合并在
+`app/capture_flow.rs`。分层意图没变，粒度变了。
+
 ```
 src/
   main.rs            进程入口、单实例、panic hook、消息循环
-  app.rs             控制器：托盘、快捷键、放下/收起状态机、截图编排
-  win32.rs           DPI、屏幕、光标、全屏检测、窗口样式
-  window/
-    mod.rs           窗口类注册、消息分发
-    overlay.rs       线带窗口 + DComp 目标 + 交换链
-    message.rs       隐藏消息窗口（热键、剪贴板）
-    flight.rs        飞行/掉落窗口
-    preview.rs       悬停预览窗口
-    ghost.rs         拖拽预览
-    editor/          标注窗口
+  lib.rs             模块清单
+  app/               控制器：一条消息循环、一个状态机（UI 线程）
+    mod.rs           消息循环、tick 编排、窗口过程
+    pool.rs          WindowPool：全部窗口/句柄池 + 空闲释放
+    book.rs          FlightBook：飞行中的卡片与交接截止时间
+    line.rs          Line：线上的卡片（纯数据）
+    state.rs         LineState：可见性/悬停/按压状态机
+    capture_state.rs Capture：监视器、孪生窗口、剪贴板簿记
+    sessions.rs      Sessions：两个就地编辑器的会话与交接
+    reveal.rs        放下/收起/换屏
+    pointer.rs       指针状态机：停留、悬停、按压、双击、起拖
+    cards.rs         卡片几何、命中框、容量、pegged.txt
+    capture_flow.rs  还原、监视、孪生合并、采集落地
+    tray_menu.rs     托盘菜单与命令
+    dev.rs           --*-demo 验收脚手架（普通启动一次比较即返回）
+  platform
+    win32.rs         DPI、屏幕、光标、全屏检测、窗口样式、高精度时钟
+    window/
+      mod.rs         窗口类注册、消息分发、COM 守卫、ModalGuard
+      overlay.rs     线带窗口 + DComp 目标 + 交换链（渲染线程）
+      flight/        飞行/掉落窗口（mod.rs 时间线 + paint.rs 绘制）
+      preview.rs     悬停预览窗口
+      ghost.rs       拖拽预览（自己跟随指针）
+      shortcuts.rs   快捷键录制对话框（GDI）
+  gfx/
+    mod.rs           图形基础设施
+    device.rs        D3D11 / D2D / DComp / DWrite / 交换链创建（唯一一份）
   render/
-    mod.rs           设备、交换链、帧提交
-    d2d.rs           画刷/几何/文字缓存
-    shadow.rs        九宫格阴影烘焙
-    texture.rs       纹理上传与池化
-  scene.rs           Line / Pegged / Card / Spring
-  layout.rs          X、RopeY、PhotoSize、CardSize、命中框、预览位置
-  flight.rs          飞行/掉落时间线
-  gestures.rs        点击、长按、拖拽、菜单
+    mod.rs           Renderer：设备、交换链、帧提交、绘制原语、画刷/几何缓存
+  scene/             线的动画模型
+    mod.rs           Scene / Card / 弹簧 / apply / update / publish
+    paint.rs         整个场景的绘制
+  model & layout
+    layout.rs        X、RopeY、PhotoSize、CardSize、命中框、预览位置
+    types.rs         RectF / RectI / CardId / ImageData / FrameSnapshot
+    spring.rs        帧率无关的弹簧积分
+    preview.rs       预览几何（纯函数）
+  editor/            标注编辑器
+    model.rs         marks、撤销、命中几何
+    layout.rs        卡片与药丸的布局
+    window/          mod.rs 窗口/线程/状态机/IME + paint.rs 绘制
+  note_editor/       便签 WYSIWYG 编辑器
+    model.rs         文本、光标、选区、撤销
+    display.rs       Markdown → 显示投影（纯函数）
+    render/          mod.rs 状态机 + 排版缓存 + paint.rs 绘制
+    window.rs        窗口、输入、IME、焦点
   capture/
-    clipboard.rs
-    watcher.rs
+    clipboard.rs     Win32 剪贴板管道
+    dib.rs           DIB ↔ BGRA 编解码（纯算术）
+    watcher.rs       ReadDirectoryChangesW
+    wic.rs           WIC 解码/缩放/编码
     areas.rs         截取区域推断
-    twins.rs         双胞胎合并
-  notes.rs           便签渲染
-  tray.rs
-  sound.rs
-  settings.rs
-  i18n.rs
-  probe.rs           （bin）帧率/内存测量
+  notes.rs           便签文件（原子写、归档、摘要）与 GDI 光栅化
+  tray.rs            托盘图标
+  dragdrop.rs        OLE 拖出
+  sound.rs / settings.rs / i18n.rs / logging.rs / shortcut.rs / font.rs
+  bin/probe.rs       帧率/内存测量（独立 bin）
 ```
 
 ---

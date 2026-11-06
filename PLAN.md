@@ -85,7 +85,7 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 | 飞行（1600 px 图，真实路径包围盒） | **62.43 fps**，82 帧 / 1.314 s，draw max 8.38 ms | ≥ 58 fps ✅ |
 | 6K 全屏飞行（6016×3384 窗口） | **61.79 fps**，draw max 3.91 ms，私有 155.4 MB | ≥ 58 fps ✅ / ≤ 100 MB ❌ |
 | 私有内存（6 卡恢复、未放下、未飞行） | **50.7 MB** | ≤ 60 MB ✅ |
-| 私有内存（6 卡可见，probe） | **80.9 MB** | ≤ 60 MB ❌ |
+| 私有内存（6 卡可见，probe） | **80.9 MB**（2026-11-02；2026-11-06 复测 **92.2–92.5 MB**，见 §10） | ≤ 60 MB ❌ |
 | 私有内存（首次飞行后，窗口池化） | **128.0 MB** | ≤ 60 MB ❌ |
 | 私有内存（空线带，1 帧后空闲） | 37.2 MB | ≤ 60 MB ✅ |
 | 冷启动到托盘 | 约 120 ms（`app started` trace 时间戳） | ≤ 500 ms ✅ |
@@ -344,11 +344,11 @@ exe 内嵌版本与 `Cargo.toml` 一致，最后生成 zip 和 `.sha256`。
 |:--|:--|
 | `src/note_editor/model.rs` | 文本/光标/选区/撤销，纯逻辑单测 |
 | `src/note_editor/display.rs` | 行导向 Markdown 投影、活跃行、源码↔显示映射 |
-| `src/note_editor/render.rs` | DComp 窗口、纸面离屏 ClearType、阴影、IME 组合串 |
+| `src/note_editor/render/mod.rs` | DComp 窗口、纸面离屏 ClearType、阴影、IME 组合串、按行排版缓存 |
 | `src/note_editor/window.rs` | 无边框焦点窗口、输入/IME/剪贴板、提交 |
 | `src/window/preview.rs` | 悬停空白便签（`SetWindowPos` 跟随 + 按最新倾角重绘纸面） |
 | `src/notes.rs` | 原子写、BOM+CRLF、归档、卡片摘要 |
-| `src/app.rs` | 入口热点、悬停状态机、编辑器编排、飞回卡片 |
+| `src/app/` | 入口热点、悬停状态机、编辑器编排、飞回卡片 |
 
 已用真实桌面截图验证：入口悬停空白便签、飞向中央、空编辑器、标题/列表/任务/
 引用/链接/代码块/中文渲染、滚动、双击选词、西语占位符、提交后卡片和新卡片
@@ -434,7 +434,7 @@ false，从已有卡片进编辑器、以及飞回绳上的飞行仍带夹子）
 入口不再等 120 ms：工具范围里先露出屏幕外倾斜卡片的一个角，指针移到入口后
 0.22 s 从屏幕外快速落下并回正。
 
-- **工具范围露角**：指针进入整条线带窗口及其周围 12 DIP 时，`scene.rs` 把一张
+- **工具范围露角**：指针进入整条线带窗口及其周围 12 DIP 时，`scene/` 把一张
   倾斜 **18°** 的空白便签卡片中心放在屏幕顶边上方约 **56 DIP**，只让右下角伸进
   线带窗口 **12 DIP**，其余被窗口裁掉；高度由 0.22 s 临界阻尼弹簧从 0 滑到 12
   DIP。它由线带的 60 fps 渲染线程画，不新建窗口，也不与悬停大图争用 `Preview`
@@ -510,3 +510,96 @@ false，从已有卡片进编辑器、以及飞回绳上的飞行仍带夹子）
   全过。视觉证据（debug，200 %，6016×3384）：`docs/visual/note-entry-editor-image.png`、
   `note-return-editor-image.png`、`editor-entry-flight.png`、`editor-return-flight.png`。
   本轮未重新测内存/帧率。
+
+---
+
+## 10. 巨石文件拆分与代码审查修复（2026-11-06）
+
+一次覆盖全库的解耦与修复，不改产品行为。起点是三个巨石文件加两个准巨石：
+
+| 起点文件 | 行数 | 现在 |
+|:--|--:|:--|
+| `src/app.rs` | 6,221 | `src/app/` 13 个模块，最大 `mod.rs` **4,423** |
+| `src/editor/window.rs` | 4,285 | `editor/window/mod.rs` 3,274 + `window/paint.rs` 1,054 |
+| `src/note_editor/render.rs` | 2,703 | `render/mod.rs` 2,197 + `render/paint.rs` 533 |
+| `src/window/flight.rs` | 1,760 | `flight/mod.rs` 1,584 + `flight/paint.rs` 197 |
+| `src/scene.rs` | 1,687 | `scene/mod.rs` 1,470 + `scene/paint.rs` 231 |
+
+拆分手法：把 `foo.rs` 变成 `foo/mod.rs` + `foo/paint.rs`，**公共路径完全不变**（所以所有
+外部 `use` 一行都不用改）；`paint.rs` 作为子模块可以直接读写 `super` 的私有字段，因此
+不需要把任何字段改成 `pub`，也不需要 `RefCell` 或裸指针。
+
+**单项指标**
+
+| 项 | 起点 | 现在 |
+|:--|--:|--:|
+| `App` 字段数 | 94 | **16**（`Windows`/`FlightBook`/`Line`/`LineState`/`Capture`/`Sessions`/`Dev`） |
+| `App::tick()` | 271 行 | 115 行 |
+| `App::drain_events()` | 240 行 | 115 行 |
+| `App::update_note_entry()` | 217 行 | 159 行 |
+| `Window::run_flight()` | 280 行 | 81 行 |
+| `editor_wndproc_inner` | 304 行 | 53 行 + 10 个 handler |
+| `note_wndproc_inner` | 227 行 | 50 行 |
+| 死代码 | 9 私有 + 23 `pub` | **0**（`#![allow(dead_code)]` 已移除） |
+| 重复的 GPU 设备初始化 | 3 份 | 1 份（`src/gfx/device.rs`） |
+| 测试 | 200 | 206 |
+
+**行为修复（不改视觉）**：悬停卡片时渲染线程不再满速空转（`cross_alpha` 等三个
+渐近量原本与 `0.002` 比较，恒为真）；覆盖层交换链现在真的会 resize（原本
+`Command::Layout` 只改场景，窗口尺寸变化后由 DXGI 拉伸）；运行中改显示缩放会重新放置
+（原本只比较监视器句柄）；`window::wake` 的 17 处调用原本传空 `HWND`，消息被
+`DispatchMessageW` 丢弃，worker 结果只能等 33 ms 定时器；便签编辑器在设备丢失后会重建
+表面，重建失败则把文本走正常提交路径落地而不是静默冻结；托盘 `HICON` 补上 `Drop`。
+
+**并发与重入**：`TrackPopupMenu` / `MessageBoxW` / `DoDragDrop` / 快捷键录制器都会在
+UI 线程泵消息，而外层帧持有 `&mut App` —— 这是真实的双重可变借用 UB。新增
+`window::ModalGuard`：模态期间不碰 `App` 指针，定时器丢弃（会自愈），其余消息入队并在
+最外层退出时重投。拖拽幽灵改为在自己的渲染线程里跟随指针（15 ms），不再依赖 UI 线程
+定时器。
+
+**最终 A/B（同一台机器，release，6016×420 @200%，`git worktree` 检出 HEAD 对照）**
+
+| 项 | HEAD (v2.3.0) | 拆分后 | 判定 |
+|:--|:--|:--|:--|
+| 线带 6 卡 fps | 60.35 / 60.36 | 60.37 / 60.34 | 相同 |
+| 线带 p50 | 16.67 / 16.66 | 16.67 / 16.67 | 相同 |
+| 线带 draw p50 | 0.798 / 0.810 ms | 0.798 / 0.802 ms | 相同 |
+| 线带 draw p95 | 1.038 / 1.090 ms | 1.084 / 1.064 ms | 相同 |
+| 线带私有内存 | 92.2 / 92.4 MB | 92.4 / 92.5 MB | 相同（噪声内） |
+| 空转 | 1 帧 | 1 帧 | 相同 |
+| 飞行 | 42 帧 / 0.659 s，私有 76.7 MB | 42 帧 / 0.652 s，私有 77.0 MB | 相同 |
+
+**结论：这次重构是性能中性的** —— 帧率、绘制时间、内存三项都在噪声范围内，这正是
+"行为保持"的模块化应有的结果。收益全部在结构（文件与函数的规模、死代码清零、重复实现
+合一）和上面那组行为修复上。
+
+⚠️ **§3.2 的 80.9 MB 已不可复现**：那是 2026-11-02 M1–M4 的数值。本次用 `git worktree`
+检出 `v2.3.0` 的 HEAD 实测，**HEAD 自己就是 92.0–92.3 MB**，与拆分后的 92.2–92.5 无法
+区分。也就是说这 +11 MB 出现在 11-02 之后、本次重构之前的 Phase B 工作里，不是本次造成的。
+该数字是否按实测值更新，等用户确认。
+
+### 10.1 两项 P2 提案：测量后放弃
+
+审查报告里还有两条 P2，这次都用数字处理掉了，没有改代码。
+
+**DComp visual 变换替掉便笺倾斜重绘** —— 前提不成立。读代码确认：`draw_note` 画的是
+**已经渲染好的纸面位图**（`paint_preview_card` 一次 `DrawBitmap` + 玻璃 + 边框），
+不是整卡重渲染；`tilt_note` 本来就有 `tilt_pending` 合并（同一时刻最多排队一次重绘）、
+`NOTE_TILT_STEP_DEG = 0.05°` 的步进、以及静止时完全不重绘。所以倾斜期间最多每帧一次
+小的旋转 blit，停下就没有。审查里"约 100 次整卡重绘"这个估算是错的（把 `tilt_note`
+的调用频率当成了重绘次数）。改成合成器旋转要重构预览窗口的 visual 树，收益却是把
+0.2–0.4 ms 的 blit 换成 µs 级的 `SetTransform`，不值得在这个已被用户验收过的特性上冒
+视觉风险。
+
+**共享一个 `ID3D11Device`** —— 有了数字，也不划算。新增 `probe --mode=duo`：同一进程
+里先建线带（6 卡）再建第二个窗口，量出第二套设备的代价。
+
+```
+PROBE mode=duo one_renderer=87.3MB two_renderers=104.2MB second_window=16.8MB cards=6
+PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB cards=1
+```
+
+第二窗口约 **17–19 MB**，但这里面包含必须保留的交换链（900×700 ×2 buffer ≈ 5 MB），
+真正能通过共享设备省下的更少。而且应用**已经**用"池化窗口空闲 10–30 s 后销毁"把这块
+内存还回去了 —— 共享设备反而会削弱那条路径（丢窗口不再释放设备）。改动要横跨 6 种
+窗口与全部 `Surface`，风险高、收益被现有机制吃掉，最终放弃，只留下这个可复现的测量。

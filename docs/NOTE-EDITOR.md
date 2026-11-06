@@ -1,7 +1,7 @@
 # 便签 WYSIWYG 编辑器 — 设计与实施计划
 
 > 状态：**v1 已实现（2026-11-04）**。代码在 `src/note_editor/`、`src/notes.rs`、
-> `src/app.rs` 和 `src/window/preview.rs`；行为摘要已并入 `docs/BEHAVIOR.md`
+> `src/app/` 和 `src/window/preview.rs`；行为摘要已并入 `docs/BEHAVIOR.md`
 > §10.1，决策记录见 `docs/DECISIONS.md` D9，验收记录见
 > `docs/VISUAL-TESTS.md` §3.11。本文保留为设计与边界依据。
 > 关联：`docs/BEHAVIOR.md` §4/§8/§10/§11、`docs/DECISIONS.md` D1、
@@ -10,7 +10,7 @@
 > 实现偏差：Markdown 投影使用 `src/note_editor/display.rs` 的行导向解析器，
 > 没有引入 `pulldown-cmark`（理由见 DECISIONS D9/N9）；悬停便签的飞入/飞出/
 > 物理跟随由 `Preview` 窗口的 `SetWindowPos` 完成（内容只画一次），点击后的
-> 中央飞行与挂上后的飞回复用 `window/flight.rs`。中文 IME 已在 200% DPI 用
+> 中央飞行与挂上后的飞回复用 `window/flight/`。中文 IME 已在 200% DPI 用
 > Microsoft Pinyin 实测（组合串下划线、候选窗、提交）；尚未实测：DPI 改变后的
 > 重新居中、三语菜单/气泡、按键到像素延迟。
 >
@@ -29,7 +29,7 @@
 核心约束：
 
 - 源码始终是唯一真相；渲染只是投影。
-- 不新增第二套飞行系统，复用现有 `window/flight.rs` 的曲线与交接。
+- 不新增第二套飞行系统，复用现有 `window/flight/` 的曲线与交接。
 - 不把 continuity 作为依赖；只参考其投影/IME/光标锚定思路，按最小范围改写。
 - 不改变截图、图片标注、拖拽、托盘等现有行为。
 
@@ -80,7 +80,7 @@
 不变量：
 
 1. 便签内容以 `.txt` 源码为准；卡片、飞行纹理、悬停预览都是它的投影。
-2. 不新增飞行窗口/动画系统；笔记飞行复用 `window/flight.rs`，只增加“便签 profile”。
+2. 不新增飞行窗口/动画系统；笔记飞行复用 `window/flight/`，只增加“便签 profile”。
 3. UI 线程不做写盘、不做大图编解码；提交的写盘走 worker，完成后才落地。
 4. 编辑器窗口是唯一一个会抢键盘焦点的便签窗口；悬停便签和飞行窗口都不抢焦点。
 5. `.txt` + UTF-8 BOM + CRLF 的既有格式不变；WPF 版仍能打开这些文件。
@@ -247,7 +247,7 @@ hotspot.height   = slot_height(card_height, note)
 
 飞入/飞出由**悬停窗口本身**沿曲线移动完成（位置 `SetWindowPos`，内容只在倾斜
 变化时重绘），不新建飞行窗口；点击后的中央飞行和挂上后的飞回卡片才复用
-`window/flight.rs`：
+`window/flight/`：
 
 | 参数 | 飞入 | 飞出 |
 |:--|:--|:--|
@@ -259,9 +259,9 @@ hotspot.height   = slot_height(card_height, note)
 | 倾斜/淡入 | 从 18° 回正到 0° | 飞出期间角弹簧回正 |
 | 落地交接 | 无（动画结束即悬停） | 无 |
 
-露角由 `scene.rs` 绘制，不创建第二个窗口：把一张倾斜 18° 的完整空白便签卡片的中心放到屏幕顶边上方约 56 DIP，只有右下角伸进线带窗口 12 DIP，窗口自然裁掉其余部分。指针进入热点时场景露角立即隐藏，`Preview` 窗口从**同一中心、同一倾角**出现并沿 `in_out_cubic` 落下、回正，所以是“从屏幕外掉下来”，不是原地突变。
+露角由 `scene/` 绘制，不创建第二个窗口：把一张倾斜 18° 的完整空白便签卡片的中心放到屏幕顶边上方约 56 DIP，只有右下角伸进线带窗口 12 DIP，窗口自然裁掉其余部分。指针进入热点时场景露角立即隐藏，`Preview` 窗口从**同一中心、同一倾角**出现并沿 `in_out_cubic` 落下、回正，所以是“从屏幕外掉下来”，不是原地突变。
 
-悬浮物理（v1 实测参数，`src/app.rs`）：
+悬浮物理（v1 实测参数，`src/app/mod.rs` 的 `step_hover_physics` / `step_hover_spin` / `hover_tilt_target`）：
 
 - 挂点 = 理论槽位的卡片中心；y 上叠加 `sin(2π · 0.22 · t) · 3 DIP` 的上下浮动。
 - 回位弹簧：响应 0.56 s、阻尼比 **0.6**（轻微欠阻尼：过冲约 7 % 后回正，不再来回摆）。
@@ -557,7 +557,7 @@ Run   { text, source_range, style, visible }
 
 ### 7.1 复用现有飞行
 
-不新建飞行窗口。复用 `src/window/flight.rs`：
+不新建飞行窗口。复用 `src/window/flight/`：
 
 - 时长 0.65 s；`ease::in_out_cubic`。
 - 尺寸在起点/终点矩形之间线性插值。
@@ -736,12 +736,14 @@ See THIRD-PARTY-NOTICES.md.
 | `src/note_editor/model.rs` | 文本、光标、选区、撤销、行规范化、纯逻辑测试 |
 | `src/note_editor/display.rs` | pulldown-cmark 解析、Block/Line/Run、源码↔显示映射、活跃行 |
 | `src/note_editor/window.rs` | 无边框窗口、消息循环、输入/IME、焦点/失焦、提交 |
-| `src/note_editor/render.rs` | 纸面离屏位图、玻璃边框、阴影、文本/光标/选区、DPI |
+| `src/note_editor/render/mod.rs` | 纸面离屏位图、玻璃边框、阴影、DPI、按行排版缓存 |
+| `src/note_editor/render/paint.rs` | 文本/光标/选区/列表标记的绘制 |
 | `src/window/preview.rs` | 悬停便签窗口（空白纸面、跟随/浮动/光标、空闲销毁） |
-| `src/window/flight.rs` | 复用现有飞行：悬停→中央、编辑→卡片；便签纹理作为飞行图像 |
+| `src/window/flight/mod.rs` | 复用现有飞行：悬停→中央、编辑→卡片；便签纹理作为飞行图像 |
+| `src/window/flight/paint.rs` | 飞行卡片的绘制 |
 | `src/notes.rs` | `write_atomic`、`archive`、`summary`（卡片去标记）、归档目录 |
-| `src/app.rs` | 入口热点、悬停/编辑状态、提交/归档编排、线带交互抑制、事件 |
-| `src/scene.rs` / `types.rs` | 热点命中矩形进快照；不新增卡片类型 |
+| `src/app/` | 入口热点、悬停/编辑状态、提交/归档编排、线带交互抑制、事件（`mod.rs` 与 12 个子模块） |
+| `src/scene/` / `types.rs` | 热点命中矩形进快照；不新增卡片类型 |
 | `src/layout.rs` | 热点几何、空线带位置 |
 | `src/i18n.rs` | 新字符串（占位符、归档失败等），en/es/zh |
 | `Cargo.toml` | **未新增依赖**：行导向投影写在仓库内，不引入 pulldown-cmark |

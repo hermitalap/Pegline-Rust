@@ -27,7 +27,7 @@ Esc 取消、Enter 确定、冲突/被占用就地提示。
 内容只在开始拖拽时绘制一次；15 ms 定时器只做 `SetWindowPos`，不重绘。
 拖拽结束隐藏并把交换链缩到 2×2；空闲 10 s 后销毁整个窗口与设备。
 
-## D4 飞行窗口允许被新截图打断（`src/window/flight.rs`）
+## D4 飞行窗口允许被新截图打断（`src/window/flight/`）
 
 WPF 版一次飞行一条时间线；Rust 版加了 generation 计数：新的飞行/掉落会把
 正在跑的那条时间线作废（渲染线程每帧检查），因此连拍 5 张时每张都立刻起飞，
@@ -108,7 +108,7 @@ WPF 版一次飞行一条时间线；Rust 版加了 generation 计数：新的�
 - **N5** 文件继续是 `.txt` + UTF-8 BOM + CRLF，WPF 版仍能打开。
 - **N6** 参考 continuity 的投影/IME/光标锚定思路，但不引入
   `continuity-*`、tree-sitter、SQLite、zstd、notify 依赖。
-- **N7** 飞行复用 `window/flight.rs`：点击悬停便签飞到中央、编辑后飞回卡片，
+- **N7** 飞行复用 `window/flight/`：点击悬停便签飞到中央、编辑后飞回卡片，
   都使用同一套 `ease::in_out_cubic`、弧高、倾角、玻璃边框和落地淡出。
   悬停便签的**飞入/飞出/物理跟随**是 `Preview` 窗口的 `SetWindowPos`（内容只画
   一次），不新增第二个飞行窗口或 D3D 设备。

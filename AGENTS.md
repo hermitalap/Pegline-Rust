@@ -41,6 +41,15 @@ Do not trade features or visual quality for memory; the remaining options (hidde
 swap chain, thumbnail atlas, destroying the idle flight window) are optional. Phase B
 (M5) is unblocked. Read `PLAN.md` §8 before picking the next task.
 
+**Those numbers were re-measured on 2026-11-06 and have drifted.** Probe
+`--mode=line` now reports **92.2–92.5 MB** private (p50 16.67 ms, draw p50 0.80 ms),
+`--mode=static` 58.8 MB and `--mode=flight` 76.7 MB. A `git worktree` checkout of
+`v2.3.0`'s HEAD measures **92.0–92.3 MB** on the same machine, i.e. the drift
+happened between 2026-11-02 and v2.3.0 — during the Phase B work — and not in the
+2026-11-06 modularisation, which measured no change in memory, frame rate or draw
+time against HEAD. The 50.7 MB and ~128 MB app-level figures above are from
+2026-11-02 and were not re-measured; the probe cannot reach that state.
+
 **Phase B (M5) landed on 2026-11-02**: hover preview, sticky notes, the annotation
 editor (opened from a picture's right-click "Annotate" command), the drag ghost,
 the three sounds, the shortcut recorder and the full tray menu are implemented,
@@ -71,7 +80,7 @@ portable package is built with `pwsh tools\package-release.ps1`.
 
 **The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
 `docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the
-entry hotspot and hover note in `src/app.rs` + `src/window/preview.rs`, and atomic
+entry hotspot and hover note in `src/app/` + `src/window/preview.rs`, and atomic
 write/archive in `src/notes.rs`. It reuses the existing flight window for hover →
 centre and editor → card, paints the paper to an opaque D2D bitmap for ClearType,
 and keeps notes as `.txt` + BOM + CRLF. Verified by desktop screenshots for the
