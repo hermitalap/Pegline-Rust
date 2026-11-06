@@ -96,10 +96,6 @@ name = "pegline"
 path = "src/main.rs"
 # #![windows_subsystem = "windows"] in main.rs
 
-[[bin]]
-name = "spike"
-path = "src/bin/spike.rs"
-
 [profile.release]
 opt-level = 3
 lto = "thin"

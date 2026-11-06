@@ -269,11 +269,11 @@ impl Card {
         let left = slot_left + (layout::CARD_WIDTH - actions.total_width) * 0.5;
         let top = layout::actions_top_for(self.card_size.1, self.note);
         (
-            RectF::from_xywh(left, top, actions.copy_width, actions.height),
+            RectF::from_xywh(left, top, actions.left_width, actions.height),
             RectF::from_xywh(
-                left + actions.copy_width + actions.gap,
+                left + actions.left_width + actions.gap,
                 top,
-                actions.open_width,
+                actions.right_width,
                 actions.height,
             ),
         )
@@ -330,6 +330,9 @@ pub struct Scene {
     next_gust: f64,
     rng: Rng,
     actions: ActionsLayout,
+    /// Note cards keep the original Copy + Open row; pictures replace Copy
+    /// with Annotate.
+    note_actions: ActionsLayout,
     copied_height: f32,
     snapshot: Arc<Mutex<FrameSnapshot>>,
     dirty: bool,
@@ -340,6 +343,7 @@ impl Scene {
         width_px: u32,
         dpi: u32,
         hover_actions: ActionsLayout,
+        note_hover_actions: ActionsLayout,
         copied_height: f32,
         snapshot: Arc<Mutex<FrameSnapshot>>,
     ) -> Self {
@@ -365,6 +369,7 @@ impl Scene {
             next_gust: 7.0,
             rng: Rng(0x9E37_79B9),
             actions: hover_actions,
+            note_actions: note_hover_actions,
             copied_height,
             snapshot,
             dirty: true,
@@ -790,6 +795,15 @@ impl Scene {
         animating || self.dirty
     }
 
+    /// The button row a card of this kind publishes and draws.
+    fn actions_for(&self, note: bool) -> &ActionsLayout {
+        if note {
+            &self.note_actions
+        } else {
+            &self.actions
+        }
+    }
+
     /// Rebuilds the hit boxes and publishes them to the UI thread.
     fn publish(&mut self, _now: f64) {
         let mut snapshot = match self.snapshot.lock() {
@@ -816,17 +830,23 @@ impl Scene {
                 + self.slide.value;
             let frame = card.frame_rect(slot_left).offset(0.0, slot_top);
             let hovered = self.hover == Some(card.id) && self.dragging.is_none();
+            let actions_layout = self.actions_for(card.note);
             let actions = if hovered {
-                card.actions_rect(slot_left, &self.actions)
+                card.actions_rect(slot_left, actions_layout)
                     .offset(0.0, slot_top)
             } else {
                 RectF::default()
             };
-            let (copy_button, open_button) = if hovered {
-                let (copy, open) = card.button_rects(slot_left, &self.actions);
-                (copy.offset(0.0, slot_top), open.offset(0.0, slot_top))
+            let (primary_button, open_button) = if hovered {
+                let (primary, open) = card.button_rects(slot_left, actions_layout);
+                (primary.offset(0.0, slot_top), open.offset(0.0, slot_top))
             } else {
                 (RectF::default(), RectF::default())
+            };
+            let primary_action = if card.note {
+                ActionKind::Copy
+            } else {
+                ActionKind::Annotate
             };
             let swatches = if card.note
                 && self.hover == Some(card.id)
@@ -842,9 +862,11 @@ impl Scene {
                 id: card.id,
                 frame,
                 actions,
-                copy_button,
+                primary_button,
+                primary_action,
                 open_button,
                 note: card.note,
+                angle: card.swing.value + card.tilt,
                 swatches,
             });
         }
@@ -1045,14 +1067,18 @@ impl Scene {
         }
 
         if actions_alpha > 0.01 {
-            let a = self.actions;
+            let a = if note {
+                self.note_actions
+            } else {
+                self.actions
+            };
             let left = (layout::CARD_WIDTH - a.total_width) * 0.5;
             // The row rises into place as it fades in, like the original's
             // -4 DIP translate.
             let lift = -4.0 * (1.0 - actions_alpha);
             let top = layout::actions_top_for(card_h, note) + lift;
-            let copy = RectF::from_xywh(left, top, a.copy_width, a.height);
-            let open = RectF::from_xywh(left + a.copy_width + a.gap, top, a.open_width, a.height);
+            let primary = RectF::from_xywh(left, top, a.left_width, a.height);
+            let open = RectF::from_xywh(left + a.left_width + a.gap, top, a.right_width, a.height);
             if note {
                 // The colour dots sit above the buttons in their own glass pill.
                 let pill = layout::swatch_pill(card_h).offset(0.0, lift);
@@ -1072,10 +1098,16 @@ impl Scene {
             }
             let bounds = RectF::from_xywh(left, top - 8.0, a.total_width, a.height + 16.0);
             let pushed = renderer.push_opacity(bounds, actions_alpha);
+            let primary_text = if note { TextId::Copy } else { TextId::Annotate };
+            let primary_action = if note {
+                ActionKind::Copy
+            } else {
+                ActionKind::Annotate
+            };
             renderer.draw_pill(
-                copy,
-                TextId::Copy,
-                self.hover_action == Some((id, ActionKind::Copy)),
+                primary,
+                primary_text,
+                self.hover_action == Some((id, primary_action)),
             );
             renderer.draw_pill(
                 open,
@@ -1113,6 +1145,7 @@ mod tests {
         let mut scene = Scene::new(
             1920,
             96,
+            crate::render::ActionsLayout::default(),
             crate::render::ActionsLayout::default(),
             32.0,
             snapshot,
@@ -1198,6 +1231,7 @@ mod tests {
         let mut scene = Scene::new(
             1920,
             96,
+            crate::render::ActionsLayout::default(),
             crate::render::ActionsLayout::default(),
             32.0,
             std::sync::Arc::clone(&snapshot),
@@ -1389,6 +1423,74 @@ mod tests {
             "value={} velocity={}",
             card.swing.value,
             card.swing.velocity
+        );
+    }
+
+    #[test]
+    fn pictures_publish_annotate_while_notes_keep_copy() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            ActionsLayout {
+                left_width: 74.0,
+                right_width: 58.0,
+                gap: 6.0,
+                total_width: 138.0,
+                height: 26.0,
+            },
+            ActionsLayout {
+                left_width: 58.0,
+                right_width: 58.0,
+                gap: 6.0,
+                total_width: 122.0,
+                height: 26.0,
+            },
+            32.0,
+            std::sync::Arc::clone(&snapshot),
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.snap(0.0);
+        let mut picture = card();
+        picture.id = 1;
+        picture.x.value = 786.0;
+        picture.x.target = 786.0;
+        let mut note = card();
+        note.id = 2;
+        note.note = true;
+        note.x.value = 960.0;
+        note.x.target = 960.0;
+        scene.cards.push(picture);
+        scene.cards.push(note);
+
+        scene.hover = Some(1);
+        scene.publish(0.0);
+        let frame = snapshot.lock().expect("snapshot");
+        let picture = frame.cards.iter().find(|card| card.id == 1).unwrap();
+        assert_eq!(picture.primary_action, ActionKind::Annotate);
+        assert!(!picture.primary_button.is_empty());
+        assert_eq!(
+            frame.action_at(
+                picture.primary_button.center().0,
+                picture.primary_button.center().1
+            ),
+            Some((1, ActionKind::Annotate))
+        );
+
+        drop(frame);
+        scene.hover = Some(2);
+        scene.publish(0.0);
+        let frame = snapshot.lock().expect("snapshot");
+        let note = frame.cards.iter().find(|card| card.id == 2).unwrap();
+        assert_eq!(note.primary_action, ActionKind::Copy);
+        assert_eq!(
+            frame.action_at(
+                note.primary_button.center().0,
+                note.primary_button.center().1
+            ),
+            Some((2, ActionKind::Copy))
         );
     }
 }

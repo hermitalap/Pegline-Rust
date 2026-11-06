@@ -306,6 +306,7 @@ fn render_thread(
         width_px,
         dpi,
         renderer.actions_layout(),
+        renderer.note_actions_layout(),
         renderer.copied_height(),
         Arc::clone(&snapshot),
     );
@@ -442,6 +443,7 @@ fn render_thread(
                         renderer.width_px,
                         dpi,
                         renderer.actions_layout(),
+                        renderer.note_actions_layout(),
                         renderer.copied_height(),
                         Arc::clone(&snapshot),
                     );

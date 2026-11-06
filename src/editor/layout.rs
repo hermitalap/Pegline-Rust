@@ -64,6 +64,10 @@ pub const MAX_CARD_HEIGHT_DIP: f32 = 1000.0;
 pub const MIN_PHOTO: f32 = 140.0;
 /// Longest side of the preview rendered for the flight back to the line.
 pub const PREVIEW_MAX: u32 = 720;
+/// Longest side of the larger copy the flight back shows at the editor card's
+/// size. The card-sized preview is sharp on the line but blurry while it is
+/// still the enlarged editor card.
+pub const FLIGHT_PREVIEW_MAX: u32 = 2048;
 
 /// One toolbar hit target. The order of the variants is the order the buttons
 /// are laid out in.

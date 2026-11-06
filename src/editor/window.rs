@@ -108,10 +108,17 @@ use crate::window;
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
     /// The marked-up picture as PNG bytes, at the source resolution, plus a
-    /// card-sized preview so the flight back to the line carries the marks.
-    Saved { png: Vec<u8>, preview: ImageData },
-    /// The user cancelled; the file is untouched.
-    Cancelled,
+    /// card-sized preview and a larger flight image so the way back carries the
+    /// marks sharp even at the editor card's size.
+    Saved {
+        png: Vec<u8>,
+        preview: ImageData,
+        flight: ImageData,
+    },
+    /// The user cancelled; the file is untouched. `flight` is a sharp copy of
+    /// the original for the return flight (absent when it could not be
+    /// rendered).
+    Cancelled { flight: Option<ImageData> },
 }
 
 const CLASS_NAME: PCWSTR = w!("PeglineEditor");
@@ -304,7 +311,7 @@ impl Editor {
                     report(
                         &thread_shared,
                         fallback_hwnd.handle(),
-                        EditorEvent::Cancelled,
+                        EditorEvent::Cancelled { flight: None },
                     );
                 }
             }) {
@@ -986,7 +993,7 @@ fn render_thread(
     let mut done: Option<EditorEvent> = None;
     if let Err(error) = state.load(&start.path) {
         logging::error(format!("editor decode {}: {error}", start.path.display()));
-        done = Some(EditorEvent::Cancelled);
+        done = Some(EditorEvent::Cancelled { flight: None });
     }
     if done.is_none() {
         'session: loop {
@@ -1027,7 +1034,7 @@ fn render_thread(
                 logging::error(format!("editor draw: {error}"));
                 state.lost += 1;
                 if state.lost > 3 {
-                    done = Some(EditorEvent::Cancelled);
+                    done = Some(EditorEvent::Cancelled { flight: None });
                     break;
                 }
                 if let Err(error) = state.rebuild() {
@@ -1037,12 +1044,28 @@ fn render_thread(
             state.dirty = false;
         }
     }
+    // Report while the surface is still composed. The window is deliberately
+    // left showing its last frame: the app starts the return flight, hides the
+    // editor only when the flight's first frame is up, and sends `Stop` when
+    // the flight ends. Dropping the swap chain and composition target here
+    // used to make the window blink empty for a frame or two before the flight
+    // appeared.
+    if let Some(event) = done {
+        report(&shared, start.hwnd.0, event);
+        // If the app already asked us to stop (a direct close, an app exit),
+        // the `Stop` was consumed by the session loop above; there is no
+        // second one, and waiting here would deadlock `shutdown`'s join.
+        if !shared.stopping.load(Ordering::Acquire) {
+            while let Ok(command) = rx.recv() {
+                if matches!(command, Command::Stop) {
+                    break;
+                }
+            }
+        }
+    }
     // Release the swap chain and the DirectComposition target before the UI
     // thread destroys the window they belong to.
     drop(state);
-    if let Some(event) = done {
-        report(&shared, start.hwnd.0, event);
-    }
     logging::trace("editor render thread stopped");
 }
 
@@ -1359,7 +1382,7 @@ impl EditorState {
                     self.dirty = true;
                     return Step::Continue;
                 }
-                return Step::Done(EditorEvent::Cancelled);
+                return self.cancel_event();
             }
             Command::Undo => {
                 if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
@@ -1374,7 +1397,7 @@ impl EditorState {
                 }
             }
             Command::Save => return self.save_step(),
-            Command::Cancel => return Step::Done(EditorEvent::Cancelled),
+            Command::Cancel => return self.cancel_event(),
             Command::Stop => return Step::Stop,
         }
         Step::Continue
@@ -1669,7 +1692,7 @@ impl EditorState {
                     self.dirty = true;
                 }
             }
-            Hit::Cancel => return Step::Done(EditorEvent::Cancelled),
+            Hit::Cancel => return self.cancel_event(),
             Hit::Save => return self.save_step(),
         }
         Step::Continue
@@ -1681,10 +1704,14 @@ impl EditorState {
         }
         if self.doc.as_ref().map(|doc| doc.marks().is_empty()) == Some(true) {
             // Nothing was drawn: do not re-encode and rewrite the same picture.
-            return Step::Done(EditorEvent::Cancelled);
+            return self.cancel_event();
         }
         match self.save() {
-            Ok((png, preview)) => Step::Done(EditorEvent::Saved { png, preview }),
+            Ok((png, preview, flight)) => Step::Done(EditorEvent::Saved {
+                png,
+                preview,
+                flight,
+            }),
             Err(error) => {
                 // The window stays open: the marks are the user's work, and
                 // the next outside click may try again.
@@ -2340,6 +2367,7 @@ impl EditorState {
         height: u32,
         scale: f32,
         smooth: bool,
+        marks: bool,
     ) -> Result<ImageData, String> {
         let Some(doc) = self.doc.as_ref() else {
             return Err("there is no picture to save".to_string());
@@ -2387,18 +2415,20 @@ impl EditorState {
 
         let mut assets = Assets::new(rt.clone())?;
         assets.set_source(source)?;
-        for mark in doc.marks() {
-            let Mark::Mosaic { rect, block } = mark else {
-                continue;
-            };
-            let Some(key) = mosaic_key(*rect, *block, (source_width, source_height)) else {
-                continue;
-            };
-            if assets.has_mosaic(key) {
-                continue;
-            }
-            if let Some(image) = build_mosaic(source, key) {
-                assets.upload_mosaic(key, &image)?;
+        if marks {
+            for mark in doc.marks() {
+                let Mark::Mosaic { rect, block } = mark else {
+                    continue;
+                };
+                let Some(key) = mosaic_key(*rect, *block, (source_width, source_height)) else {
+                    continue;
+                };
+                if assets.has_mosaic(key) {
+                    continue;
+                }
+                if let Some(image) = build_mosaic(source, key) {
+                    assets.upload_mosaic(key, &image)?;
+                }
             }
         }
 
@@ -2450,7 +2480,9 @@ impl EditorState {
             triangle: &self.surface.triangle,
             base: transform,
         };
-        painter.marks(doc.marks(), &self.texts);
+        if marks {
+            painter.marks(doc.marks(), &self.texts);
+        }
         // SAFETY: `BeginDraw` was called above on this thread.
         unsafe { rt.EndDraw(None, None) }.map_err(|error| format!("EndDraw(save): {error}"))?;
 
@@ -2486,8 +2518,8 @@ impl EditorState {
     }
 
     /// Encodes the source-resolution PNG and renders the card-sized preview
-    /// the flight back to the line carries.
-    fn save(&mut self) -> Result<(Vec<u8>, ImageData), String> {
+    /// plus the larger flight image.
+    fn save(&mut self) -> Result<(Vec<u8>, ImageData, ImageData), String> {
         if self.texts_dirty {
             self.rebuild_texts();
             self.texts_dirty = false;
@@ -2495,14 +2527,52 @@ impl EditorState {
         let (source_width, source_height) = self.source_size;
         let width = source_width.max(1);
         let height = source_height.max(1);
-        let full = self.render_document(width, height, 1.0, false)?;
+        let full = self.render_document(width, height, 1.0, false, true)?;
         let png = wic::encode_png_bytes(&full)?;
         let longest = width.max(height) as f32;
         let scale = (layout::PREVIEW_MAX as f32 / longest).min(1.0);
         let preview_width = ((width as f32 * scale).round() as u32).max(1);
         let preview_height = ((height as f32 * scale).round() as u32).max(1);
-        let preview = self.render_document(preview_width, preview_height, scale, true)?;
-        Ok((png, preview))
+        let preview = self.render_document(preview_width, preview_height, scale, true, true)?;
+        let flight = self.render_flight_document(true)?;
+        Ok((png, preview, flight))
+    }
+
+    /// A larger copy of the picture for the flight to or from the line. It is
+    /// drawn at up to [`layout::FLIGHT_PREVIEW_MAX`] on the longest side, which
+    /// keeps the editor card's enlargement sharp without pushing a 6K surface
+    /// through the flight window.
+    fn render_flight_document(&mut self, marks: bool) -> Result<ImageData, String> {
+        let started = std::time::Instant::now();
+        if marks && self.texts_dirty {
+            self.rebuild_texts();
+            self.texts_dirty = false;
+        }
+        let (width, height) = self.source_size;
+        let longest = width.max(height) as f32;
+        let scale = (layout::FLIGHT_PREVIEW_MAX as f32 / longest).min(1.0);
+        let flight_width = ((width as f32 * scale).round() as u32).max(1);
+        let flight_height = ((height as f32 * scale).round() as u32).max(1);
+        let image = self.render_document(flight_width, flight_height, scale, true, marks)?;
+        logging::trace(format!(
+            "editor flight image {flight_width}x{flight_height} marks={marks} in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+        Ok(image)
+    }
+
+    /// Cancels the edit but keeps a sharp copy of the untouched picture for the
+    /// return flight. A render failure still cancels; the app then falls back to
+    /// the card thumbnail.
+    fn cancel_event(&mut self) -> Step {
+        let flight = match self.render_flight_document(false) {
+            Ok(image) => Some(image),
+            Err(error) => {
+                logging::error(format!("editor cancel flight image: {error}"));
+                None
+            }
+        };
+        Step::Done(EditorEvent::Cancelled { flight })
     }
 }
 

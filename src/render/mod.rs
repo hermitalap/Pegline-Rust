@@ -118,6 +118,7 @@ pub enum Brush {
 pub enum TextId {
     Hint,
     Copy,
+    Annotate,
     Open,
     Copied,
     /// The blank entry note's label, below its add-note icon.
@@ -125,10 +126,14 @@ pub enum TextId {
 }
 
 /// Where a card's button row goes, in DIP, derived from the text metrics.
+///
+/// The left pill differs by card kind: a picture is annotated, a note is
+/// copied (its single click already edits). Both layouts share the right
+/// "Open" pill and the gap.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ActionsLayout {
-    pub copy_width: f32,
-    pub open_width: f32,
+    pub left_width: f32,
+    pub right_width: f32,
     pub gap: f32,
     pub total_width: f32,
     pub height: f32,
@@ -142,7 +147,10 @@ struct TextItem {
 
 struct Texts {
     items: HashMap<TextId, TextItem>,
+    /// Picture cards: Annotate + Open.
     actions: ActionsLayout,
+    /// Note cards: Copy + Open.
+    note_actions: ActionsLayout,
     copied_height: f32,
 }
 
@@ -185,6 +193,7 @@ impl Texts {
                 };
             add(TextId::Hint, strings.hint, &hint)?;
             add(TextId::Copy, strings.copy, &ui)?;
+            add(TextId::Annotate, strings.annotate, &ui)?;
             add(TextId::Open, strings.open, &ui)?;
             add(TextId::NewNote, strings.new_note, &new_note)?;
             let copied = format!("\u{2713} {}", strings.copied);
@@ -192,14 +201,22 @@ impl Texts {
         }
 
         let copy_width = items[&TextId::Copy].width + 24.0;
+        let annotate_width = items[&TextId::Annotate].width + 24.0;
         let open_width = items[&TextId::Open].width + 24.0;
         let gap = 6.0;
         let copied_height = items[&TextId::Copied].height + 9.0;
         Ok(Self {
             items,
             actions: ActionsLayout {
-                copy_width,
-                open_width,
+                left_width: annotate_width,
+                right_width: open_width,
+                gap,
+                total_width: annotate_width + gap + open_width,
+                height: 26.0,
+            },
+            note_actions: ActionsLayout {
+                left_width: copy_width,
+                right_width: open_width,
                 gap,
                 total_width: copy_width + gap + open_width,
                 height: 26.0,
@@ -510,6 +527,11 @@ impl Renderer {
 
     pub fn actions_layout(&self) -> ActionsLayout {
         self.texts.actions
+    }
+
+    /// The note cards' button row: Copy + Open.
+    pub fn note_actions_layout(&self) -> ActionsLayout {
+        self.texts.note_actions
     }
 
     pub fn copied_height(&self) -> f32 {

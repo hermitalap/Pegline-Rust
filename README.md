@@ -14,19 +14,19 @@ Small, light, fast — targets, not hard limits:
 - **Light**: tens of MB of private memory at rest.
 - **Fast**: a stable 60 fps, with 120 fps on 120 Hz displays.
 
-The current release, **2.1.1**, ships the full feature set together with the
+The current release, **2.2.0**, ships the full feature set together with the
 optimisation work measured so far.
 
 ## Status
 
-**Pegline 2.1.1 is the current release (2026-11-03); 2.0.0 was the first complete
+**Pegline 2.2.0 is the current release (2026-11-06); 2.0.0 was the first complete
 Rust release.** Phase A (shell, tray, settings, hotkeys, the line with
 springs/cards/hover, folder and clipboard capture, flight/drop) and Phase B
 (hover preview, sticky notes, annotation editor, drag preview, sounds, the full
 tray menu, shortcut recorder, en/es/zh) are complete. Measured on the
-development machine: a 1.34 MB single executable, 81–86 ms to the tray with a
-warm cache, 60.3 fps on the 6K line, 61.5 fps for a 1600 px flight, and 200
-consecutive captures settling within 1.5% of the warm memory. Every launch
+development machine on the 2.1.1 build: a 1.34 MB single executable, 81–86 ms
+to the tray with a warm cache, 60.3 fps on the 6K line, 61.5 fps for a 1600 px
+flight, and 200 consecutive captures settling within 1.5% of the warm memory. Every launch
 drops the line for 2.5 s (5 s on the first run) so the start is visible.
 
 The remaining checks are hardware-specific (120 Hz, a second monitor,
@@ -40,11 +40,11 @@ reference.
 Measured numbers and the remaining work are in [PLAN.md](PLAN.md) §3.3–§3.5 and
 §8; the port's decision log is [docs/DECISIONS.md](docs/DECISIONS.md), the
 2026-11-03 visual acceptance pass is [docs/VISUAL-TESTS.md](docs/VISUAL-TESTS.md),
-and the release notes are [docs/RELEASE-2.0.0.md](docs/RELEASE-2.0.0.md).
+and the release notes are [docs/RELEASE-2.2.0.md](docs/RELEASE-2.2.0.md).
 
 ## Release
 
-The portable release is `dist/Pegline-2.1.1-win-x64.zip`: copy `pegline.exe`
+The portable release is `dist/Pegline-2.2.0-win-x64.zip`: copy `pegline.exe`
 anywhere and run it. There is no installer and no runtime. Build the same
 package with:
 
@@ -78,7 +78,8 @@ running.
 | | |
 |:--|:--|
 | [PLAN.md](PLAN.md) | milestones, performance budget, decisions, next steps |
-| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.1.1 |
+| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.2.0 |
+| [docs/RELEASE-2.2.0.md](docs/RELEASE-2.2.0.md) | 2.2.0 release notes and known limitations |
 | [docs/RELEASE-2.0.0.md](docs/RELEASE-2.0.0.md) | 2.0.0 release notes, checksum and known limitations (historical) |
 | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | the complete behavioural spec to reproduce |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | target architecture (Win32 + DirectComposition + D3D11/D2D) |

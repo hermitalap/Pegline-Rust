@@ -6,6 +6,7 @@
 //! shrunk to 2x2 so it gives its surface back. Its render thread owns the swap
 //! chain and the timeline; the UI thread only places, shows and hides it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::capture::wic;
 use crate::layout;
 use crate::logging;
 use crate::render::{Brush, Present, Renderer};
@@ -55,11 +57,78 @@ const ARC_DIP: f32 = 30.0;
 /// Chrome fades in between these two fractions of the flight.
 const CHROME_FADE_START: f32 = 0.10;
 const CHROME_FADE_END: f32 = 0.55;
+/// How long a note card takes to dissolve into the editor view at the start of
+/// its flight to the centre.
+const ENTRY_CROSSFADE_SECONDS: f32 = 0.12;
+/// Angular spring that brings a tilted hanging card upright before it flies to
+/// an editor. A short, slightly under-damped spring so the turn accelerates and
+/// eases out instead of snapping.
+const ENTRY_SETTLE_RESPONSE: f32 = 0.16;
+const ENTRY_SETTLE_DAMPING: f32 = 0.9;
 /// Padding around the travel bounds: 60 DIP plus 5% of the longer side.
 const PAD_DIP: f32 = 60.0;
 const PAD_FRACTION: f32 = 0.05;
 /// Smallest card that still gets a shadow, DIP.
 const SHADOW_MAX_CARD: f32 = 300.0;
+
+/// How the clothespin behaves during an editor flight.
+///
+/// A pin belongs to the line, not to the editor card. Showing it for the whole
+/// trip leaves a pin floating over the editor and makes it pop away only after
+/// the flight lands, so editor flights either hide it or fade it at the end
+/// that touches the rope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PinMode {
+    /// No pin at any point (a brand-new note flying from the hover card).
+    Hidden,
+    /// Pin from the first frame to the last (annotation editor and captures).
+    Full,
+    /// The card is leaving the line: the pin is present at take-off and fades
+    /// out as the card detaches.
+    Leave,
+    /// The card is coming back: no pin while it travels, then it fades in as
+    /// the card reaches its slot.
+    Arrive,
+}
+
+/// The picture a flight carries.
+///
+/// A capture already owns its decoded flight image. An annotation flight
+/// starts from a card whose bitmap is only card-sized, so the flight thread
+/// decodes the file once at a resolution that survives the enlargement; the
+/// card bitmap is the fallback when that fails.
+pub enum FlightImage {
+    Ready(ImageData),
+    File {
+        path: PathBuf,
+        max_edge: u32,
+        fallback: ImageData,
+    },
+}
+
+impl FlightImage {
+    /// Resolves the file-based variant on the flight thread, never on the UI
+    /// thread (WIC decoding is not allowed there).
+    fn resolve(self) -> ImageData {
+        match self {
+            Self::Ready(image) => image,
+            Self::File {
+                path,
+                max_edge,
+                fallback,
+            } => match wic::decode_scaled(&path, max_edge) {
+                Ok(image) => image,
+                Err(error) => {
+                    logging::error(format!(
+                        "flight decode {} at {max_edge}px: {error}",
+                        path.display()
+                    ));
+                    fallback
+                }
+            },
+        }
+    }
+}
 
 /// Messages from the render thread back to the UI thread.
 #[derive(Clone, Copy, Debug)]
@@ -85,7 +154,20 @@ enum FlightCommand {
     Fly {
         token: u64,
         generation: u64,
-        image: ImageData,
+        image: FlightImage,
+        /// The card's own bitmap, shown at the start and dissolved into
+        /// `image` before the travel begins (a note opening its editor).
+        start_image: Option<ImageData>,
+        /// The card's visual angle when the flight starts, degrees. When set,
+        /// the flight first turns the card upright with an angular spring so a
+        /// tilted hanging picture does not snap before flying.
+        settle_angle: Option<f32>,
+        /// Run the settle/cross-fade during the travel instead of first waiting
+        /// at the slot.
+        blend_entry: bool,
+        /// Keep the glass frame and pin fully opaque from the first frame:
+        /// editor flights start from a real, fully decorated card.
+        chrome_full: bool,
         from: RectI,
         to: RectI,
         /// Fixed card tilt, degrees, applied increasingly during the flight.
@@ -93,9 +175,9 @@ enum FlightCommand {
         /// How far the row glides after landing, DIP (normally -87, or 0 for
         /// the first card). The flight window mirrors the same spring.
         slide_dip: f32,
-        /// Whether the clothespin is part of this flight: a new note flying to
-        /// the editor is not hanging on the line, so it has no pin.
-        pin: bool,
+        /// How the clothespin behaves. A pin belongs to the line, not to the
+        /// editor card, so editor flights hide it or fade it at the rope end.
+        pin: PinMode,
         origin: RectI,
         dpi: u32,
     },
@@ -250,7 +332,109 @@ impl Flight {
         to: RectI,
         tilt: f32,
         slide_dip: f32,
-        pin: bool,
+        pin: PinMode,
+        dpi: u32,
+    ) -> bool {
+        self.start_flight(
+            token,
+            FlightImage::Ready(image),
+            None,
+            None,
+            false,
+            false,
+            from,
+            to,
+            tilt,
+            slide_dip,
+            pin,
+            dpi,
+        )
+    }
+
+    /// Flies a card back onto the line with its glass frame and pin already
+    /// drawn from the first frame. The editor behind it is still visible, so a
+    /// chrome fade would read as the frame blinking away.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fly_decorated(
+        &mut self,
+        token: u64,
+        image: ImageData,
+        from: RectI,
+        to: RectI,
+        tilt: f32,
+        slide_dip: f32,
+        pin: PinMode,
+        dpi: u32,
+    ) -> bool {
+        self.start_flight(
+            token,
+            FlightImage::Ready(image),
+            None,
+            None,
+            true,
+            false,
+            from,
+            to,
+            tilt,
+            slide_dip,
+            pin,
+            dpi,
+        )
+    }
+
+    /// Flies a hanging card into an editor.
+    ///
+    /// `settle_angle` is the card's current tilt; the flight turns it upright
+    /// with an angular spring. `start_image` (the card's own bitmap) is
+    /// dissolved into `image` (the editor's paper) at the start, so the
+    /// enlarged text never flies across the screen. `blend` runs the
+    /// cross-fade and the angular settle *during* the travel (note editor,
+    /// where waiting would read as input lag); otherwise they happen at the
+    /// slot first (annotation editor, which must be upright before it grows).
+    /// `image` may be decoded from the file on the flight thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fly_entry(
+        &mut self,
+        token: u64,
+        image: FlightImage,
+        start_image: Option<ImageData>,
+        from: RectI,
+        to: RectI,
+        settle_angle: f32,
+        pin: PinMode,
+        dpi: u32,
+        blend: bool,
+    ) -> bool {
+        self.start_flight(
+            token,
+            image,
+            start_image,
+            Some(settle_angle),
+            true,
+            blend,
+            from,
+            to,
+            0.0,
+            0.0,
+            pin,
+            dpi,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_flight(
+        &mut self,
+        token: u64,
+        image: FlightImage,
+        start_image: Option<ImageData>,
+        settle_angle: Option<f32>,
+        chrome_full: bool,
+        blend_entry: bool,
+        from: RectI,
+        to: RectI,
+        tilt: f32,
+        slide_dip: f32,
+        pin: PinMode,
         dpi: u32,
     ) -> bool {
         let scale = dpi.max(96) as f32 / 96.0;
@@ -274,6 +458,10 @@ impl Flight {
             token,
             generation: self.generation,
             image,
+            start_image,
+            settle_angle,
+            blend_entry,
+            chrome_full,
             from,
             to,
             tilt,
@@ -491,6 +679,10 @@ fn flight_thread(
                 token,
                 generation,
                 image,
+                start_image,
+                settle_angle,
+                blend_entry,
+                chrome_full,
                 from,
                 to,
                 tilt,
@@ -505,7 +697,11 @@ fn flight_thread(
                     token,
                     generation,
                     &interrupt,
-                    &image,
+                    &image.resolve(),
+                    start_image.as_ref(),
+                    settle_angle,
+                    blend_entry,
+                    chrome_full,
                     from,
                     to,
                     tilt,
@@ -582,11 +778,15 @@ fn run_flight(
     generation: u64,
     interrupt: &AtomicU64,
     image: &ImageData,
+    start_image: Option<&ImageData>,
+    settle_angle: Option<f32>,
+    blend_entry: bool,
+    chrome_full: bool,
     from: RectI,
     to: RectI,
     tilt: f32,
     slide_dip: f32,
-    pin: bool,
+    pin: PinMode,
     origin: RectI,
     dpi: u32,
     on_event: &dyn Fn(FlightEvent),
@@ -596,9 +796,33 @@ fn run_flight(
     renderer.resize(width_px, height_px, dpi)?;
     let scale = dpi.max(96) as f32 / 96.0;
     let texture = renderer.upload(image)?;
+    let start_texture = start_image
+        .map(|image| renderer.upload(image))
+        .transpose()?;
     let _ = hwnd;
 
+    let entry = settle_angle.is_some() || start_texture.is_some();
+    // Notes start moving at once: the cross-fade and the settle run during the
+    // first part of the flight instead of delaying it. The annotation editor
+    // still waits for the card to be upright before it grows.
+    let blend = blend_entry && entry;
+    let mut settle = settle_angle.map(|angle| {
+        let mut spring = Spring::new(ENTRY_SETTLE_RESPONSE, ENTRY_SETTLE_DAMPING, angle);
+        spring.target = 0.0;
+        spring
+    });
+    let pre_roll_card = {
+        let width = from.width() as f32 / scale;
+        let height = from.height() as f32 / scale;
+        let cx = (from.left + from.right) as f32 * 0.5 / scale - origin.left as f32 / scale;
+        let cy = (from.top + from.bottom) as f32 * 0.5 / scale - origin.top as f32 / scale;
+        RectF::from_xywh(cx - width * 0.5, cy - height * 0.5, width, height)
+    };
+
     let start = win32::now_seconds();
+    let mut flight_start = start;
+    let mut last = start;
+    let mut pre_roll = entry && !blend;
     let mut landed = false;
     let mut following = false;
     let mut last_elapsed = 0.0f32;
@@ -614,12 +838,85 @@ fn run_flight(
         if interrupt.load(Ordering::Relaxed) != generation {
             return Ok(());
         }
-        let elapsed = (win32::now_seconds() - start) as f32;
+        let now = win32::now_seconds();
+        let frame_dt = ((now - last) as f32).clamp(0.0, max_follow_dt);
+        last = now;
+
+        // ---- pre-roll (annotation editor): turn upright at the slot ----
+        if pre_roll {
+            let angle = match settle.as_mut() {
+                Some(spring) => {
+                    spring.step(frame_dt);
+                    spring.value
+                }
+                None => 0.0,
+            };
+            let crossfade = if start_texture.is_some() {
+                (((now - start) / ENTRY_CROSSFADE_SECONDS as f64).clamp(0.0, 1.0)) as f32
+            } else {
+                1.0
+            };
+            let settled = settle.as_ref().is_none_or(|spring| spring.settled());
+            let rotation = Matrix3x2::rotation_around(
+                angle,
+                Vector2 {
+                    X: pre_roll_card.left + pre_roll_card.width() * 0.5,
+                    Y: pre_roll_card.top - layout::CARD_OFFSET_BELOW_TOP,
+                },
+            );
+            let draw_start = win32::now_seconds();
+            renderer.begin()?;
+            renderer.set_transform(rotation);
+            draw_flight_card(
+                renderer,
+                &texture,
+                pre_roll_card,
+                1.0,
+                1.0,
+                true,
+                pin_alpha(pin, 0.0),
+            );
+            if let Some(start_texture) = start_texture.as_ref() {
+                let inset = layout::PHOTO_INSET;
+                let photo = RectF::new(
+                    pre_roll_card.left + inset,
+                    pre_roll_card.top + inset,
+                    pre_roll_card.right - inset,
+                    pre_roll_card.bottom - inset,
+                );
+                let alpha = 1.0 - ease::smooth(crossfade, 0.0, 1.0);
+                let pushed = renderer.push_opacity(photo, alpha.max(0.01));
+                renderer.draw_photo(start_texture, photo, layout::PHOTO_RADIUS);
+                if pushed {
+                    renderer.pop_opacity();
+                }
+            }
+            renderer.reset_transform();
+            renderer.end()?;
+            let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
+            draw_max_ms = draw_max_ms.max(draw_ms);
+            if renderer.present(true) == Present::DeviceLost {
+                return Err("device lost during flight pre-roll".to_string());
+            }
+            if frames == 0 {
+                on_event(FlightEvent::Started(token));
+            }
+            frames += 1;
+            if settled && crossfade >= 1.0 {
+                pre_roll = false;
+                flight_start = now;
+                last = now;
+            }
+            continue;
+        }
+
+        let elapsed = (now - flight_start) as f32;
         let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
         let k = ease::in_out_cubic(t);
 
         // After the hand-off the flight image mirrors the real card's row
-        // spring and landing sway, so the two never drift apart.
+        // spring and landing sway, so the two never drift apart. An editor
+        // flight lands on a still editor card, so it skips the sway.
         if landed && following {
             let dt = (elapsed - last_elapsed).clamp(0.0, max_follow_dt);
             follow.step(dt);
@@ -640,15 +937,33 @@ fn run_flight(
         let cy = (from_cy + (to_cy - from_cy) * k - origin.top as f32) / scale
             - (std::f32::consts::PI * k).sin() * ARC_DIP;
         let x_offset = if landed { follow.x.value } else { 0.0 };
-        let swing = if landed { follow.swing.value } else { 0.0 };
-        let angle = tilt * k + swing;
+        let swing = if landed && !entry {
+            follow.swing.value
+        } else {
+            0.0
+        };
+        // A blended note entry keeps its starting lean and settles while it
+        // travels; the annotation pre-roll has already brought it to zero.
+        let settle_now = if blend {
+            settle.as_mut().map_or(0.0, |spring| {
+                spring.step(frame_dt);
+                spring.value
+            })
+        } else {
+            0.0
+        };
+        let angle = if blend { settle_now } else { tilt * k } + swing;
         let card = RectF::from_xywh(
             cx - width * 0.5 + x_offset,
             cy - height * 0.5,
             width,
             height,
         );
-        let chrome = ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END);
+        let chrome = if chrome_full {
+            1.0
+        } else {
+            ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END)
+        };
         if !landed && t >= 1.0 {
             landed = true;
             on_event(FlightEvent::Landed {
@@ -684,7 +999,38 @@ fn run_flight(
         // Once landed, the real card underneath owns the shadow; drawing the
         // flight shadow too would double its alpha and make it pulse as the
         // flight fades.
-        draw_flight_card(renderer, &texture, card, chrome, alpha, !landed, pin);
+        draw_flight_card(
+            renderer,
+            &texture,
+            card,
+            chrome,
+            alpha,
+            !landed,
+            pin_alpha(pin, t),
+        );
+        if blend {
+            // The card's own paper is still visible under the pointer for the
+            // first fraction of the travel; it dissolves into the editor view
+            // while the card is already moving.
+            if let Some(start_texture) = start_texture.as_ref() {
+                let crossfade = (elapsed / ENTRY_CROSSFADE_SECONDS).clamp(0.0, 1.0);
+                if crossfade < 1.0 {
+                    let inset = layout::PHOTO_INSET * chrome;
+                    let photo = RectF::new(
+                        card.left + inset,
+                        card.top + inset,
+                        card.right - inset,
+                        card.bottom - inset,
+                    );
+                    let start_alpha = (1.0 - ease::smooth(crossfade, 0.0, 1.0)).max(0.01);
+                    let pushed = renderer.push_opacity(photo, start_alpha);
+                    renderer.draw_photo(start_texture, photo, layout::PHOTO_RADIUS);
+                    if pushed {
+                        renderer.pop_opacity();
+                    }
+                }
+            }
+        }
         renderer.reset_transform();
         renderer.end()?;
         let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
@@ -705,7 +1051,6 @@ fn run_flight(
         }
     }
 }
-
 #[allow(clippy::too_many_arguments)]
 fn run_drop(
     renderer: &mut Renderer,
@@ -757,7 +1102,7 @@ fn run_drop(
             1.0,
             1.0,
             true,
-            true,
+            1.0,
         );
         if pushed {
             renderer.pop_opacity();
@@ -865,7 +1210,7 @@ fn run_tumble(
             1.0,
             1.0,
             true,
-            false,
+            0.0,
         );
         renderer.reset_transform();
         renderer.end()?;
@@ -877,6 +1222,18 @@ fn run_tumble(
             on_event(FlightEvent::Started(token));
         }
         frames += 1;
+    }
+}
+
+fn pin_alpha(mode: PinMode, t: f32) -> f32 {
+    match mode {
+        PinMode::Hidden => 0.0,
+        PinMode::Full => 1.0,
+        // The card is still at the line for the first frame; the pin fades
+        // while it detaches instead of riding all the way to the editor.
+        PinMode::Leave => 1.0 - ease::smooth(t, 0.0, 0.12),
+        // The rope end: the pin is clipped back on just before landing.
+        PinMode::Arrive => ease::smooth(t, 0.72, 1.0),
     }
 }
 
@@ -908,7 +1265,7 @@ fn draw_flight_card(
     chrome: f32,
     alpha: f32,
     shadow: bool,
-    pin: bool,
+    pin: f32,
 ) {
     let width_dip = card.width();
     let inset = layout::PHOTO_INSET * chrome;
@@ -942,7 +1299,7 @@ fn draw_flight_card(
         }
     }
     renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
-    if pin && chrome > 0.01 {
+    if pin > 0.01 && chrome > 0.01 {
         // The card rotates about this point, exactly like the real card on the
         // line: the pin top, not the frame top (which is 14 DIP lower).
         let pin_left = card.left + width_dip * 0.5 - layout::PIN_WIDTH * 0.5;
@@ -954,7 +1311,7 @@ fn draw_flight_card(
                 layout::PIN_WIDTH + 8.0,
                 40.0,
             ),
-            chrome,
+            pin * chrome,
         );
         renderer.draw_pin(pin_left, pin_top);
         if pushed {
@@ -1020,5 +1377,24 @@ mod tests {
         let pin = apply(&transform, 72.0, 0.0);
         assert!((pin.1 - (10.0 + DROP_DISTANCE)).abs() < 1e-3);
         assert!(opacity.abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_pin_stays_at_the_rope_end() {
+        // Leaving a note: present at take-off, gone while the editor is far
+        // away, never lingering until the arrival.
+        assert!((pin_alpha(PinMode::Leave, 0.0) - 1.0).abs() < 1e-4);
+        assert!(pin_alpha(PinMode::Leave, 0.06) < 0.6);
+        assert_eq!(pin_alpha(PinMode::Leave, 0.12), 0.0);
+        assert_eq!(pin_alpha(PinMode::Leave, 1.0), 0.0);
+
+        // Coming home: no pin during the trip, clipped on only near the slot.
+        assert_eq!(pin_alpha(PinMode::Arrive, 0.0), 0.0);
+        assert_eq!(pin_alpha(PinMode::Arrive, 0.72), 0.0);
+        assert!(pin_alpha(PinMode::Arrive, 0.9) > 0.3);
+        assert!((pin_alpha(PinMode::Arrive, 1.0) - 1.0).abs() < 1e-4);
+
+        assert_eq!(pin_alpha(PinMode::Hidden, 0.5), 0.0);
+        assert_eq!(pin_alpha(PinMode::Full, 0.5), 1.0);
     }
 }

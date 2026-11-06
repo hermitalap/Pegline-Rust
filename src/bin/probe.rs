@@ -171,6 +171,7 @@ fn run_line(config: &Config) -> Result<String, String> {
         width_px,
         monitor.dpi,
         renderer.actions_layout(),
+        renderer.note_actions_layout(),
         renderer.copied_height(),
         snapshot,
     );
@@ -353,7 +354,7 @@ fn run_flight(config: &Config) -> Result<String, String> {
             to,
             0.0,
             0.0,
-            true,
+            pegline::window::flight::PinMode::Full,
             monitor.dpi,
         ) {
             return Err("flight did not start".to_string());

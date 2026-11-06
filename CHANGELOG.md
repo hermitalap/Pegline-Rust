@@ -1,9 +1,27 @@
 # Changelog
 
-## Unreleased
+## 2.2.0 — 2026-11-06
 
 ### Changes
 
+- **Hover buttons and default clicks follow the card kind.** A picture's left
+  hover pill is now **Annotate** (the annotation-editor entry) and its right
+  pill stays Open; a note keeps **Copy / Open**. A single click still copies a
+  picture, while a single click on a note now opens the WYSIWYG note editor.
+- **Editor flights no longer carry an enlarged thumbnail.** Before a tilted
+  card flies into the annotation editor it turns upright with a short damped
+  angular spring, then the flight carries a source image decoded at up to
+  2048 px. Note flights start moving at once and cross-fade the card paper into
+  the editor's own paper (rendered once through the WIC paint path, 3.7–8.7 ms
+  at 920×720) during the first 0.12 s, so there is no fade-then-fly pause; the
+  return flight carries the committed editor snapshot. The clothespin belongs to
+  the line: a returning note shows it only during the last 0.18 s as it reaches
+  the slot, and an existing note leaving for the editor fades its pin out in the
+  first 0.12 s instead of dragging it to the editor. The annotation return
+  carries a 2048 px marked preview instead of the 720 px card preview. The
+  editor window keeps its last frame and composition target until the return
+  flight's first frame is up, which removes the one-frame flicker on exit. See
+  `docs/BEHAVIOR.md` §9.5, §10.1, §11 and `docs/DECISIONS.md` D10.
 - **The annotation editor is now a floating hanging picture.** It has no title
   bar and no window buttons: a frameless, transparent, always-on-top window
   holds an enlarged white-glass card with a clothespin and a baked shadow, and
@@ -18,8 +36,8 @@
   composited through a rounded mask. Opening from a card grows the picture out of
   its slot and shows the editor when the flight lands; clicking outside the card,
   losing focus, Ctrl+S or the Save button writes the PNG and shrinks the marked
-  preview (up to 720 px) back onto the line, while Esc cancels and flies the
-  untouched picture home. The source card is hidden for the whole edit, so the
+  flight preview (up to 2048 px) back onto the line, while Esc cancels and flies
+  the untouched picture home. The source card is hidden for the whole edit, so the
   line never shows a second copy. See `docs/BEHAVIOR.md` §11.
 - The annotation toolbar has a fifth tool: an **eraser** (fourth in the row)
   removes whole marks under its 14 DIP disc, a drag counts as one undo step and

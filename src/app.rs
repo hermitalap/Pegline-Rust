@@ -46,7 +46,7 @@ use crate::spring::ease;
 use crate::tray::{MenuCommand, MenuState, Tray};
 use crate::types::{ActionKind, CardId, CardSpec, ImageData, RectF, RectI};
 use crate::win32::{self, Monitor};
-use crate::window::flight::{Flight, FlightEvent};
+use crate::window::flight::{Flight, FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
 use crate::window::preview::{NOTE_PADDING_DIP, Preview};
@@ -117,6 +117,9 @@ const TUMBLE_FLIGHT_TOKEN: u64 = u64::MAX - 1;
 const ANNOTATE_OPEN_TOKEN: u64 = u64::MAX - 2;
 /// Flight token for the annotated picture shrinking back onto the line.
 const ANNOTATE_CLOSE_TOKEN: u64 = u64::MAX - 3;
+/// Longest side of the flight image decoded for an annotation opening. The
+/// card-sized thumbnail is far too small for the enlarged editor card.
+const ANNOTATE_FLIGHT_MAX: u32 = 2048;
 /// Hover-note physics: a damped spring home with a pointer pull whose
 /// equilibrium offset is a fraction of the pointer distance.
 ///
@@ -493,6 +496,9 @@ struct App {
     /// True between a commit request and its worker result; the window stays
     /// open and disabled meanwhile.
     note_committing: bool,
+    /// The editor's paper bitmap captured when the user committed, carried by
+    /// the flight back to the line.
+    note_return_image: Option<ImageData>,
     /// True while an empty new note is tumbling off the screen; the editor is
     /// hidden and no click may commit it again.
     note_tumbling: bool,
@@ -643,6 +649,7 @@ impl App {
             note_editor: None,
             note_editing: None,
             note_committing: false,
+            note_return_image: None,
             note_tumbling: false,
             note_tumble_until: 0.0,
             note_show_at: None,
@@ -1495,10 +1502,14 @@ impl App {
                         }
                     }
                 }
-                Event::Editor(EditorEvent::Saved { png, preview }) => {
-                    self.on_editor_saved(png, preview, now)
+                Event::Editor(EditorEvent::Saved {
+                    png,
+                    preview,
+                    flight,
+                }) => self.on_editor_saved(png, preview, flight, now),
+                Event::Editor(EditorEvent::Cancelled { flight }) => {
+                    self.on_editor_cancelled(flight)
                 }
-                Event::Editor(EditorEvent::Cancelled) => self.on_editor_cancelled(),
                 Event::NoteEditor(event) => self.on_note_editor_event(event),
                 Event::NoteSaved {
                     card,
@@ -1724,11 +1735,12 @@ impl App {
             return;
         }
         // The two hover buttons are real targets; without this a click on
-        // "Open" would fall through to the card's single-click Copy.
+        // "Open" would fall through to the card's single-click action.
         if let Some((id, action)) = self.action_at(x, y) {
             logging::trace(format!("action {action:?} on card {id}"));
             match action {
                 ActionKind::Copy => self.copy_item(id),
+                ActionKind::Annotate => self.annotate_item(id),
                 ActionKind::Open => self.open_item(id),
             }
             return;
@@ -1783,7 +1795,18 @@ impl App {
             self.open_item(press.id);
         } else {
             self.last_click = Some((now, press.id));
-            self.copy_item(press.id);
+            // A picture still copies on a single click; a note opens its
+            // editor. Its Copy pill stays available for the clipboard.
+            let note = self
+                .items
+                .iter()
+                .find(|item| item.id == press.id)
+                .is_some_and(|item| item.note);
+            if note {
+                self.open_note_editor(press.id);
+            } else {
+                self.copy_item(press.id);
+            }
         }
     }
 
@@ -2555,7 +2578,7 @@ impl App {
                     } else {
                         -layout::SPACING * 0.5
                     };
-                    flying = flight.fly(id, image, area, end, tilt, slide_dip, true, dpi);
+                    flying = flight.fly(id, image, area, end, tilt, slide_dip, PinMode::Full, dpi);
                     if flying {
                         self.flight_idle_at = None;
                         self.flying_card = Some(id);
@@ -2690,6 +2713,19 @@ impl App {
             window.left + (card.frame.right * scale).round() as i32,
             window.top + (card.frame.bottom * scale).round() as i32,
         ))
+    }
+
+    /// The card's current visual angle in degrees, published with the same
+    /// snapshot as its frame. `None` when it is not on the line.
+    fn current_card_angle(&self, id: CardId) -> Option<f32> {
+        let overlay = self.overlay.as_ref()?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        snapshot
+            .cards
+            .iter()
+            .find(|card| card.id == id)
+            .map(|card| card.angle)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2880,6 +2916,17 @@ impl App {
         ))
     }
 
+    /// The note editor's glass card in screen pixels: the paper inflated by
+    /// the same 4 DIP frame the line's cards use. A flight carries the whole
+    /// card, so the paper image inside it lands exactly on the editor paper.
+    fn note_editor_card_px(&self) -> Option<RectI> {
+        let paper = self.note_editor_paper_px()?;
+        let editor = self.note_editor.as_ref()?;
+        let dpi = win32::window_dpi(editor.hwnd()).max(96);
+        let inset = (layout::PHOTO_INSET * dpi as f32 / 96.0).round() as i32;
+        Some(paper.inflate(inset))
+    }
+
     // ---- card actions -----------------------------------------------------
 
     fn copy_item(&mut self, id: CardId) {
@@ -2982,6 +3029,14 @@ impl App {
             (hover.center.0 + width * 0.5).round() as i32,
             (hover.center.1 + height * 0.5).round() as i32,
         ))
+    }
+
+    /// Where the hovering blank note's whole glass card is, in screen pixels.
+    fn note_hover_card_px(&self) -> Option<RectI> {
+        let paper = self.note_hover_paper_px()?;
+        let scale = self.note_hover.as_ref()?.dpi.max(96) as f32 / 96.0;
+        let inset = (layout::PHOTO_INSET * scale).round() as i32;
+        Some(paper.inflate(inset))
     }
 
     /// True when a screen pixel is on the leaning hover note's card.
@@ -3366,11 +3421,20 @@ impl App {
         if self.note_editor.is_some() || self.editor.is_some() {
             return;
         }
+        logging::trace("new note editor requested");
         let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
             return;
         };
-        let from = self.note_hover_paper_px();
-        let flight_image = notes::render("", 0);
+        let from = self.note_hover_card_px();
+        let angle = self
+            .note_hover
+            .as_ref()
+            .map(|hover| hover.angle)
+            .unwrap_or(0.0);
+        // The card's own blank paper dissolves into the editor view before the
+        // flight starts; the editor image itself is rendered by its render
+        // thread and taken below.
+        let start_image = notes::render("", 0);
         self.cancel_note_hover();
         // The flight window is about to be taken over for the trip to the
         // editor; any card it was carrying must become visible in the scene.
@@ -3391,21 +3455,36 @@ impl App {
                 self.note_committing = false;
                 self.present();
                 self.reveal(true, 0.0);
-                let to = self.note_editor_paper_px();
+                let image = self
+                    .note_editor
+                    .as_mut()
+                    .and_then(NoteEditor::take_flight_image)
+                    .or_else(|| notes::render("", 0));
+                let to = self.note_editor_card_px();
                 let dpi = monitor.dpi;
-                let launched = match (from, to, flight_image) {
+                let launched = match (from, to, image) {
                     (Some(from), Some(to), Some(image)) => {
                         // A brand-new note is not hanging yet, so its flight has
                         // no clothespin.
                         self.ensure_flight().is_some_and(|flight| {
-                            flight.fly(NOTE_FLIGHT_TOKEN, image, from, to, 0.0, 0.0, false, dpi)
+                            flight.fly_entry(
+                                NOTE_FLIGHT_TOKEN,
+                                FlightImage::Ready(image),
+                                start_image,
+                                from,
+                                to,
+                                angle,
+                                PinMode::Hidden,
+                                dpi,
+                                true,
+                            )
                         })
                     }
                     _ => false,
                 };
                 if launched {
                     self.flight_idle_at = None;
-                    self.note_show_at = Some(win32::now_seconds() + 1.0);
+                    self.note_show_at = Some(win32::now_seconds() + 1.5);
                 } else if let Some(editor) = self.note_editor.as_mut() {
                     editor.show();
                 }
@@ -3686,6 +3765,7 @@ impl App {
             logging::trace("note editor ignored: another editor is open");
             return;
         }
+        logging::trace(format!("note editor requested for card {id}"));
         self.cancel_note_hover();
         // Opening the editor interrupts whatever the flight window was doing.
         self.release_flying_card();
@@ -3699,8 +3779,9 @@ impl App {
         let original = model::normalize(&text);
         let color = item.color;
         let path = item.path.clone();
+        let card_image = item.thumb.clone();
         let from = self.current_card_px(id);
-        let flight_image = item.thumb.clone();
+        let angle = self.current_card_angle(id).unwrap_or(item.tilt);
         let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
             return;
         };
@@ -3720,26 +3801,32 @@ impl App {
                 self.note_committing = false;
                 self.present();
                 self.reveal(true, 0.0);
-                let to = self.note_editor_paper_px();
+                let image = self
+                    .note_editor
+                    .as_mut()
+                    .and_then(NoteEditor::take_flight_image)
+                    .unwrap_or_else(|| card_image.clone());
+                let to = self.note_editor_card_px();
                 let dpi = monitor.dpi;
                 let launched = match (from, to) {
                     (Some(from), Some(to)) => self.ensure_flight().is_some_and(|flight| {
-                        flight.fly(
+                        flight.fly_entry(
                             NOTE_FLIGHT_TOKEN,
-                            flight_image,
+                            FlightImage::Ready(image),
+                            Some(card_image),
                             from,
                             to,
-                            0.0,
-                            0.0,
-                            true,
+                            angle,
+                            PinMode::Leave,
                             dpi,
+                            true,
                         )
                     }),
                     _ => false,
                 };
                 if launched {
                     self.flight_idle_at = None;
-                    self.note_show_at = Some(win32::now_seconds() + 1.0);
+                    self.note_show_at = Some(win32::now_seconds() + 1.5);
                 } else {
                     if let Some(editor) = self.note_editor.as_mut() {
                         editor.show();
@@ -3873,7 +3960,7 @@ impl App {
                     logging::error(format!("note clipboard: {error}"));
                 }
             }
-            NoteEditorEvent::Commit(text) => {
+            NoteEditorEvent::Commit { text, image } => {
                 if self.note_demo {
                     // The visual acceptance run needs the window to stay up
                     // while the desktop is captured; a stray click must not
@@ -3883,6 +3970,7 @@ impl App {
                     }
                     return;
                 }
+                self.note_return_image = image;
                 self.commit_note(text);
             }
         }
@@ -3978,11 +4066,12 @@ impl App {
             self.close_note_editor();
             return;
         };
-        let (image, tilt, card_size) = {
+        let (card_image, tilt, card_size) = {
             let item = &self.items[index];
             (item.thumb.clone(), item.tilt, item.card_size)
         };
-        let from = self.note_editor_paper_px();
+        let image = self.note_return_image.take().unwrap_or(card_image);
+        let from = self.note_editor_card_px();
         let target = self.card_slot_px(index, self.items.len(), card_size);
         let dpi = self.screen_dpi();
         if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
@@ -4001,6 +4090,7 @@ impl App {
         error: Option<String>,
     ) {
         self.note_committing = false;
+        let return_image = self.note_return_image.take();
         if let Some(error) = error {
             logging::error(format!("note save: {error}"));
             // The window keeps the text, flashes its border red and gets its
@@ -4018,7 +4108,7 @@ impl App {
             }
             return;
         };
-        let from = self.note_editor_paper_px();
+        let from = self.note_editor_card_px();
         let dpi = self.screen_dpi();
         match card {
             Some(id) => {
@@ -4047,8 +4137,9 @@ impl App {
                 self.on_thumbnail(id, image.clone());
                 // Fly the committed paper back to its slot; the refreshed card
                 // is hidden under the flight until the hand-off.
+                let flight_image = return_image.unwrap_or(image);
                 if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
-                    self.fly_note_back(id, from, image, tilt, target, dpi);
+                    self.fly_note_back(id, from, flight_image, tilt, target, dpi);
                 }
                 self.sound(Cue::Tink);
             }
@@ -4064,6 +4155,7 @@ impl App {
                 let tilt = pseudo_random(id) * 5.0 - 2.5;
                 let target = self.flight_target_px(index, index + 1, card_size);
                 let mut flying = false;
+                let flight_image = return_image.unwrap_or_else(|| image.clone());
                 if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
                     self.release_flying_card();
                     if let Some(flight) = self.ensure_flight() {
@@ -4072,8 +4164,16 @@ impl App {
                         } else {
                             -layout::SPACING * 0.5
                         };
-                        flying =
-                            flight.fly(id, image.clone(), from, target, tilt, slide_dip, true, dpi);
+                        flying = flight.fly_decorated(
+                            id,
+                            flight_image,
+                            from,
+                            target,
+                            tilt,
+                            slide_dip,
+                            PinMode::Arrive,
+                            dpi,
+                        );
                         if flying {
                             self.flight_idle_at = None;
                             self.flying_card = Some(id);
@@ -4118,7 +4218,7 @@ impl App {
         self.reveal(false, PEEK_SECONDS);
         self.send_scene(Command::SetRehang { id, flying: true });
         if let Some(flight) = self.ensure_flight() {
-            if flight.fly(id, image, from, target, tilt, 0.0, true, dpi) {
+            if flight.fly_decorated(id, image, from, target, tilt, 0.0, PinMode::Arrive, dpi) {
                 self.flight_idle_at = None;
                 self.flying_card = Some(id);
                 self.flying_rehang = true;
@@ -4211,6 +4311,7 @@ impl App {
         self.note_committing = false;
         self.note_tumbling = false;
         self.note_show_at = None;
+        self.note_return_image = None;
         // The card was hidden for the duration of the edit. A return flight
         // that is already carrying it will reveal it on landing; any other
         // close path (a failed save, a failed archive) must put it back here.
@@ -4409,11 +4510,14 @@ impl App {
             return;
         };
         let from = card.and_then(|id| self.current_card_px(id));
-        let (image, tilt) = card
-            .and_then(|id| self.items.iter().find(|item| item.id == id))
-            .map(|item| (Some(item.thumb.clone()), item.tilt))
-            .unwrap_or((None, 0.0));
-        let flight = from.is_some() && image.is_some();
+        let item = card.and_then(|id| self.items.iter().find(|item| item.id == id));
+        let tilt = item.map(|item| item.tilt).unwrap_or(0.0);
+        let angle = card
+            .and_then(|id| self.current_card_angle(id))
+            .unwrap_or(tilt);
+        let fallback = item.map(|item| item.thumb.clone());
+        let flight = from.is_some() && fallback.is_some();
+        let flight_path = path.clone();
         let tx = self.events_tx.clone();
         let notify = Box::new(move |event: EditorEvent| {
             let _ = tx.send(Event::Editor(event));
@@ -4429,7 +4533,7 @@ impl App {
                     card,
                     own,
                     area,
-                    image: image.clone(),
+                    image: fallback.clone(),
                     tilt,
                     card_rect,
                 });
@@ -4437,18 +4541,23 @@ impl App {
                 if flight {
                     self.present();
                     self.reveal(true, 0.0);
-                    let launched = match (from, card_rect, image) {
-                        (Some(from), Some(to), Some(image)) => {
+                    let launched = match (from, card_rect, fallback) {
+                        (Some(from), Some(to), Some(fallback)) => {
                             self.ensure_flight().is_some_and(|flight| {
-                                flight.fly(
+                                flight.fly_entry(
                                     ANNOTATE_OPEN_TOKEN,
-                                    image,
+                                    FlightImage::File {
+                                        path: flight_path,
+                                        max_edge: ANNOTATE_FLIGHT_MAX,
+                                        fallback,
+                                    },
+                                    None,
                                     from,
                                     to,
-                                    tilt,
-                                    0.0,
-                                    true,
+                                    angle,
+                                    PinMode::Full,
                                     monitor.dpi,
+                                    false,
                                 )
                             })
                         }
@@ -4456,7 +4565,7 @@ impl App {
                     };
                     if launched {
                         self.flight_idle_at = None;
-                        self.annotate_show_at = Some(win32::now_seconds() + 1.0);
+                        self.annotate_show_at = Some(win32::now_seconds() + 1.5);
                     } else {
                         if let Some(editor) = self.editor.as_mut() {
                             editor.show();
@@ -4479,7 +4588,13 @@ impl App {
         }
     }
 
-    fn on_editor_saved(&mut self, png: Vec<u8>, preview: ImageData, now: f64) {
+    fn on_editor_saved(
+        &mut self,
+        png: Vec<u8>,
+        preview: ImageData,
+        flight_image: ImageData,
+        now: f64,
+    ) {
         let Some(editing) = self.editing.take() else {
             logging::error("editor saved without an open picture");
             return;
@@ -4505,7 +4620,7 @@ impl App {
                 item.revision = item.revision.wrapping_add(1);
             }
             self.reload_item_picture(id, &target);
-            self.fly_picture_back(id, editing.card_rect, editing.tilt, preview);
+            self.fly_picture_back(id, editing.card_rect, editing.tilt, flight_image);
             return;
         }
         self.recent.retain(|recent| recent.path != target);
@@ -4551,13 +4666,15 @@ impl App {
             });
     }
 
-    fn on_editor_cancelled(&mut self) {
+    fn on_editor_cancelled(&mut self, flight_image: Option<ImageData>) {
         let Some(editing) = self.editing.take() else {
             return;
         };
         if let Some(id) = editing.card {
-            // The file is untouched: the card's own bitmap flies home.
-            if let Some(image) = editing.image {
+            // The file is untouched: the card's own bitmap flies home, at the
+            // sharpest size the editor could render.
+            let image = flight_image.or(editing.image);
+            if let Some(image) = image {
                 self.fly_picture_back(id, editing.card_rect, editing.tilt, image);
                 return;
             }
@@ -4601,14 +4718,14 @@ impl App {
         self.reveal(false, PEEK_SECONDS);
         self.send_scene(Command::SetRehang { id, flying: true });
         if let Some(flight) = self.ensure_flight() {
-            if flight.fly(
+            if flight.fly_decorated(
                 ANNOTATE_CLOSE_TOKEN,
                 image,
                 from,
                 target,
                 tilt,
                 0.0,
-                true,
+                PinMode::Full,
                 dpi,
             ) {
                 self.flight_idle_at = None;
@@ -5740,7 +5857,7 @@ mod tests {
 
         let after = ImageData::new(3, 2, vec![255u8; 3 * 2 * 4]);
         let marked = wic::encode_png_bytes(&after).expect("encode after");
-        app.on_editor_saved(marked, after, 1.0);
+        app.on_editor_saved(marked, after.clone(), after, 1.0);
 
         assert!(app.editing.is_none(), "the edit must finish");
         assert_eq!(app.items.len(), 1, "an annotation must not hang a twin");

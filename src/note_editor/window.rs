@@ -47,6 +47,7 @@ use crate::note_editor::display::PAPER_WIDTH;
 use crate::note_editor::render::{
     Command, EditorState, KeyCode, MARGIN_DIP, Step, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP,
 };
+use crate::types::ImageData;
 use crate::win32::{self, Monitor};
 use crate::window::{self, ComGuard};
 
@@ -59,7 +60,12 @@ const WM_APP_NOTE_EVENT: u32 = WM_APP + 12;
 #[derive(Clone, Debug)]
 pub enum NoteEditorEvent {
     /// Commit was requested; the app must save and then close the editor.
-    Commit(String),
+    /// The image is the paper as the editor painted it, cached at commit time
+    /// for the flight back to the line.
+    Commit {
+        text: String,
+        image: Option<ImageData>,
+    },
     /// Ctrl+C/Ctrl+X produced text for the clipboard.
     Copy(String),
 }
@@ -128,6 +134,8 @@ pub struct NoteEditor {
     hwnd: HWND,
     shared: Arc<Shared>,
     join: Option<JoinHandle<()>>,
+    /// The paper bitmap the opening flight carries, rendered once at open.
+    flight_image: Option<ImageData>,
 }
 
 impl NoteEditor {
@@ -258,7 +266,28 @@ impl NoteEditor {
             }
         };
         match ready_rx.recv() {
-            Ok(Ok(())) => {}
+            Ok(Ok(flight_image)) => {
+                logging::trace(format!(
+                    "note editor open: {}x{} px at {} dpi, flight image {}",
+                    client_width,
+                    client_height,
+                    render_dpi,
+                    flight_image
+                        .as_ref()
+                        .map(|image| format!("{}x{}", image.width, image.height))
+                        .unwrap_or_else(|| "missing".to_string())
+                ));
+                let mut editor = Self {
+                    hwnd,
+                    shared,
+                    join: Some(join),
+                    flight_image,
+                };
+                if visible {
+                    editor.show();
+                }
+                Ok(editor)
+            }
             Ok(Err(error)) => {
                 shared.stopping.store(true, Ordering::Release);
                 let _ = join.join();
@@ -266,7 +295,7 @@ impl NoteEditor {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
-                return Err(error);
+                Err(error)
             }
             Err(_) => {
                 shared.stopping.store(true, Ordering::Release);
@@ -274,23 +303,9 @@ impl NoteEditor {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
-                return Err("note editor render thread died during setup".to_string());
+                Err("note editor render thread died during setup".to_string())
             }
         }
-
-        logging::trace(format!(
-            "note editor open: {}x{} px at {} dpi",
-            client_width, client_height, render_dpi
-        ));
-        let mut editor = Self {
-            hwnd,
-            shared,
-            join: Some(join),
-        };
-        if visible {
-            editor.show();
-        }
-        Ok(editor)
     }
 
     /// Shows the window taken focus. Used directly, or by the app when the
@@ -312,6 +327,13 @@ impl NoteEditor {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    /// Takes the paper bitmap rendered at open for the flight to the centre.
+    /// `None` when the render thread could not produce one; the caller falls
+    /// back to the card thumbnail.
+    pub fn take_flight_image(&mut self) -> Option<ImageData> {
+        self.flight_image.take()
     }
 
     /// Hides the window without destroying it, so the discard animation can
@@ -388,7 +410,7 @@ fn render_thread(
     rx: Receiver<Command>,
     shared: Arc<Shared>,
     hwnd: SendHwnd,
-    ready: Sender<Result<(), String>>,
+    ready: Sender<Result<Option<ImageData>, String>>,
 ) {
     let _com = match ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED) {
         Ok(guard) => guard,
@@ -411,7 +433,17 @@ fn render_thread(
             return;
         }
     };
-    if ready.send(Ok(())).is_err() {
+    // The opening flight carries the editor's own paper, not the card
+    // thumbnail. Rendering it here keeps the cost off the UI thread and makes
+    // it identical to the screen the flight is about to reveal.
+    let flight_image = match state.render_flight_image() {
+        Ok(image) => Some(image),
+        Err(error) => {
+            logging::error(format!("note editor flight image: {error}"));
+            None
+        }
+    };
+    if ready.send(Ok(flight_image)).is_err() {
         return;
     }
     let mut commit_reported = false;
@@ -436,10 +468,10 @@ fn render_thread(
                 }
             }
             Step::Copy(text) => shared.push(NoteEditorEvent::Copy(text), hwnd.0),
-            Step::Commit(text) => {
+            Step::Commit { text, image } => {
                 if !commit_reported {
                     commit_reported = true;
-                    shared.push(NoteEditorEvent::Commit(text), hwnd.0);
+                    shared.push(NoteEditorEvent::Commit { text, image }, hwnd.0);
                 }
             }
         }

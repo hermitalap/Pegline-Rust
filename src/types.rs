@@ -238,9 +238,13 @@ pub struct CardSpec {
 }
 
 /// Which of the two hover buttons a point is over.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ActionKind {
+    /// Copy the note's text; note cards only.
     Copy,
+    /// Open the annotation editor for a picture; picture cards only.
+    Annotate,
+    #[default]
     Open,
 }
 
@@ -252,11 +256,17 @@ pub struct HitCard {
     pub frame: RectF,
     /// The button row below the frame (empty when never hovered).
     pub actions: RectF,
-    /// The copy and open pills inside `actions`; empty when not hovered.
-    pub copy_button: RectF,
+    /// The left pill inside `actions`: Annotate on a picture, Copy on a note.
+    /// Empty when not hovered.
+    pub primary_button: RectF,
+    /// What a click on `primary_button` does.
+    pub primary_action: ActionKind,
     pub open_button: RectF,
     /// True for a sticky note.
     pub note: bool,
+    /// The card's current visual angle, degrees, swing plus its fixed tilt.
+    /// The annotations flight starts from this angle and settles upright.
+    pub angle: f32,
     /// The four colour dots, in colour order; empty unless the note is hovered.
     pub swatches: [RectF; 4],
 }
@@ -300,7 +310,7 @@ impl FrameSnapshot {
                     {
                         return true;
                     }
-                } else if card.copy_button.contains(x_dip, y_dip)
+                } else if card.primary_button.contains(x_dip, y_dip)
                     || card.open_button.contains(x_dip, y_dip)
                 {
                     // A click in the 6 DIP gap between the pills is not a
@@ -321,8 +331,8 @@ impl FrameSnapshot {
     /// swallowed by either of them.
     pub fn action_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, ActionKind)> {
         for card in &self.cards {
-            if card.copy_button.contains(x_dip, y_dip) {
-                return Some((card.id, ActionKind::Copy));
+            if card.primary_button.contains(x_dip, y_dip) {
+                return Some((card.id, card.primary_action));
             }
             if card.open_button.contains(x_dip, y_dip) {
                 return Some((card.id, ActionKind::Open));
@@ -353,9 +363,11 @@ mod tests {
             id,
             frame: RectF::new(100.0, 50.0, 300.0, 200.0),
             actions: RectF::new(120.0, 206.0, 280.0, 232.0),
-            copy_button: RectF::new(120.0, 206.0, 180.0, 232.0),
+            primary_button: RectF::new(120.0, 206.0, 180.0, 232.0),
+            primary_action: ActionKind::Annotate,
             open_button: RectF::new(186.0, 206.0, 280.0, 232.0),
             note: false,
+            angle: 0.0,
             swatches: [RectF::default(); 4],
         }
     }
@@ -385,7 +397,7 @@ mod tests {
         let snapshot = snapshot();
         assert_eq!(
             snapshot.action_at(150.0, 220.0),
-            Some((7, ActionKind::Copy))
+            Some((7, ActionKind::Annotate))
         );
         assert_eq!(
             snapshot.action_at(200.0, 220.0),

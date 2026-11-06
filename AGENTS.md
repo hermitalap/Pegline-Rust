@@ -63,6 +63,11 @@ listening check for the three audio cues; see `PLAN.md` §8. Do not trade featur
 or visual quality for memory to chase the original 60 MB MVP target — the user
 accepted the measured trade-offs in `PLAN.md` §3.2–§3.5.
 
+**2.2.0 was released on 2026-11-06**: it folds in the annotation editor 2.0,
+the WYSIWYG note editor, the card button/click changes and the editor-flight
+round below, plus the removal of the M0 spike binary. The tag is `v2.2.0`; the
+portable package is built with `pwsh tools\package-release.ps1`.
+
 **The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
 `docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the
 entry hotspot and hover note in `src/app.rs` + `src/window/preview.rs`, and atomic
@@ -125,15 +130,35 @@ from Lucide (ISC/MIT, `assets/icons/`): arrow, rectangle, text, eraser and
 (one undo step per drag, Esc cancels); line widths are 4/8/12 dots. The photo
 and marks render into an opaque card bitmap
 (ClearType) composited through a rounded mask; the window itself uses a
-premultiplied swap chain. Opening from a card grows the thumb out of its slot
-and shows the editor on landing; clicking outside the card, losing focus,
-Ctrl+S or Save writes the PNG and flies a marked preview (≤720 px) back to the
-card, while Esc cancels with the untouched thumb. The source card is hidden for
-the whole edit. Restored cards now read their real pixel size (`wic::pixel_size`)
+premultiplied swap chain. Opening from a card first turns its current tilt
+upright with a short damped spring, then grows a source decode (up to 2048 px)
+out of its slot and shows the editor on landing; clicking outside the card,
+losing focus, Ctrl+S or Save writes the PNG and flies a marked 2048 px preview
+back to the card, while Esc cancels with a sharp copy of the untouched picture.
+The source card is hidden for the whole edit. Restored cards now read their real
+pixel size (`wic::pixel_size`)
 instead of the thumbnail size, and the note editor hides the edited note's card
 under the opening flight and restores it with the return. `--annotate-demo`
 drives the card-to-editor round trip without a mouse; the visual evidence is in
 `docs/VISUAL-TESTS.md` §3.12 and `docs/visual/editor-2.0.png` / `editor-flight.png`.
+
+**On 2026-11-06 the card interactions and editor flights changed** (BEHAVIOR
+§5.1, §8, §9.5, §10.1, §11; DECISIONS D10): a picture's left hover pill is now
+**Annotate** (right stays Open), a note keeps Copy / Open, and a single click on
+a note opens its editor while a picture still copies. Editor flights no longer
+carry an enlarged thumbnail: a note flight starts moving at once and cross-fades
+the card paper into a cached WIC render of the editor paper (same
+`paint_paper_on` code, 920×720 at 200 %, 3.7–8.7 ms on the render thread) during
+the first 0.12 s; an annotation flight decodes the source at up to 2048 px on the
+flight thread. The annotation flight turns a swinging card upright with a 0.16 s
+damped angular spring before moving; note flights do that during the travel so
+the click has no fade-then-fly pause. The pin belongs to the rope: a returning
+note shows it only for the last ~0.18 s, and an existing note leaving for the
+editor fades it out during the first 0.12 s. Return flights keep the glass
+frame from the first frame. The annotation editor is
+kept composed after it reports a result and is hidden only when the return
+flight's first frame is up, which removes the exit flicker; its render thread
+waits for `Stop` before dropping the surface.
 
 ## Read first
 
@@ -185,8 +210,8 @@ There is no MSBuild, no .NET, no WPF in the new code. The old build scripts unde
 - The window surface is the expensive thing: keep the line strip at 6016×420 and
   the flight window at the path bounding box, and shrink/hide them when idle.
 - The card thumbnails are decoded at the card's physical size (136 DIP × screen
-  scale, 480 px cap) so the blit is 1:1; the flight image is 1600 px; the twin
-  compare is 2048 px.
+  scale, 480 px cap) so the blit is 1:1; the capture flight image is 1600 px,
+  editor flights up to 2048 px; the twin compare is 2048 px.
 
 ## Workflow
 

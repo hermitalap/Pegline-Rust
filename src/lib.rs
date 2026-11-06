@@ -1,8 +1,7 @@
 //! Pegline library: every module the app and `probe` share.
 //!
 //! The binary crates are `pegline` (the tray app) and `probe` (the measurement
-//! tool); both build on this library. `spike` stays standalone on purpose: it is
-//! M0 evidence, not product code.
+//! tool); both build on this library.
 //!
 //! Phase A is still landing: several helpers are used by the flight window and
 //! the probe, which are the next milestone. Remove this allowance before the

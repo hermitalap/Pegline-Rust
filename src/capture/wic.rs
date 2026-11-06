@@ -250,7 +250,7 @@ fn scale_side(side: u32, longest: u32, limit: u32) -> u32 {
 }
 
 /// Creates a WIC factory, preferring the Windows 8+ factory when available.
-fn imaging_factory() -> Result<IWICImagingFactory, String> {
+pub(crate) fn imaging_factory() -> Result<IWICImagingFactory, String> {
     match create_factory(&CLSID_WICImagingFactory2) {
         Ok(factory) => Ok(factory),
         Err(error) if error.code() == CO_E_NOTINITIALIZED => Err(format!(

@@ -21,11 +21,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
-    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
-    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry,
-    ID2D1Image, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
+    ID2D1Geometry, ID2D1Image, ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -53,6 +54,10 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice,
     IDXGIFactory2, IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
+};
+use windows::Win32::Graphics::Imaging::{
+    GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA, IWICPalette, WICBitmapCacheOnLoad,
+    WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICRect,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -95,8 +100,12 @@ const ACCENT: u32 = 0x0E_63_9C;
 #[derive(Clone, Debug)]
 pub enum Step {
     Continue,
-    /// The document should be committed with this text.
-    Commit(String),
+    /// The document should be committed with this text. `image` is the paper
+    /// as painted, cached for the flight back to the line.
+    Commit {
+        text: String,
+        image: Option<ImageData>,
+    },
     /// Text was copied or cut; the UI thread owns the clipboard.
     Copy(String),
     Stop,
@@ -211,7 +220,7 @@ struct Assets {
 
 impl Assets {
     fn new(
-        context: &ID2D1DeviceContext,
+        context: &ID2D1RenderTarget,
         dwrite: &IDWriteFactory,
         color: usize,
     ) -> Result<Self, String> {
@@ -311,7 +320,7 @@ impl EditorState {
         text: String,
     ) -> Result<Self, String> {
         let surface = Surface::new(hwnd, width_px, height_px, dpi)?;
-        let assets = Assets::new(&surface.context, &surface.dwrite, color)?;
+        let assets = Assets::new(&surface.rt, &surface.dwrite, color)?;
         let mut doc = Doc::new(text);
         doc.set_caret(0, false);
         let display = DisplayDoc::parse(doc.text());
@@ -356,23 +365,7 @@ impl EditorState {
     fn rebuild_scenery(&mut self) -> Result<(), String> {
         let palette = crate::notes::color(self.color);
         let paper = paper_rect(self.scale);
-        let paper_top = mix(palette.paper, palette.edge, 0.45);
-        let stops = [
-            D2D1_GRADIENT_STOP {
-                position: 0.0,
-                color: color_of(palette.paper, 1.0),
-            },
-            D2D1_GRADIENT_STOP {
-                position: 1.0,
-                color: color_of(paper_top, 1.0),
-            },
-        ];
-        self.paper_brush = Some(gradient(
-            &self.surface.context,
-            &stops,
-            (0.0, 0.0),
-            (0.0, PAPER_HEIGHT),
-        )?);
+        self.paper_brush = Some(paper_gradient(&self.surface.rt, palette)?);
         let glass = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
@@ -384,7 +377,7 @@ impl EditorState {
             },
         ];
         self.border_brush = Some(gradient(
-            &self.surface.context,
+            &self.surface.rt,
             &glass,
             (paper.left, paper.top),
             (paper.left, paper.bottom),
@@ -405,25 +398,9 @@ impl EditorState {
             .cast()
             .map_err(|error| format!("RoundedRectangleGeometry -> ID2D1Geometry: {error}"))?,
         );
-        let fold = FOLD_DIP;
-        let right = PAPER_WIDTH;
-        let bottom = PAPER_HEIGHT;
-        self.fold_edge = Some(triangle(
-            &self.surface.factory,
-            [
-                (right - fold, bottom),
-                (right, bottom - fold),
-                (right - fold, bottom - fold),
-            ],
-        )?);
-        self.fold_shade = Some(triangle(
-            &self.surface.factory,
-            [
-                (right - fold, bottom),
-                (right, bottom - fold),
-                (right, bottom),
-            ],
-        )?);
+        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory)?;
+        self.fold_edge = Some(fold_edge);
+        self.fold_shade = Some(fold_shade);
         self.shadow = Some(self.surface.upload(&bake_shadow(
             self.width_px,
             self.height_px,
@@ -518,7 +495,7 @@ impl EditorState {
                 self.key(code, shift, control, now);
                 if self.pending_commit {
                     self.pending_commit = false;
-                    return Step::Commit(self.doc.text().to_string());
+                    return self.commit_step();
                 }
             }
             Command::Composition(composition) => {
@@ -578,7 +555,7 @@ impl EditorState {
                 self.enabled = false;
                 self.composition = None;
                 self.dirty = true;
-                return Step::Commit(self.doc.text().to_string());
+                return self.commit_step();
             }
             Command::Resume => {
                 self.enabled = true;
@@ -596,6 +573,18 @@ impl EditorState {
             Command::Stop => return Step::Stop,
         }
         Step::Continue
+    }
+
+    fn commit_step(&mut self) -> Step {
+        let text = self.doc.text().to_string();
+        let image = match self.render_flight_image() {
+            Ok(image) => Some(image),
+            Err(error) => {
+                logging::error(format!("note editor commit image: {error}"));
+                None
+            }
+        };
+        Step::Commit { text, image }
     }
 
     fn key(&mut self, code: KeyCode, shift: bool, control: bool, now: f64) {
@@ -950,7 +939,8 @@ impl EditorState {
 
     fn paint(&mut self) -> Result<(), String> {
         self.surface.begin_paper()?;
-        self.paint_paper();
+        let target = self.surface.rt.clone();
+        self.paint_paper_on(&target);
         self.surface.end_paper()?;
 
         self.surface.begin_window()?;
@@ -962,8 +952,123 @@ impl EditorState {
         Ok(())
     }
 
-    fn paint_paper(&mut self) {
-        let context = &self.surface.context;
+    /// Renders the paper into a CPU-readable WIC bitmap for the flight to or
+    /// from the line.
+    ///
+    /// This is the same paint code as the screen, not a scaled-up card
+    /// thumbnail, so the text keeps the editor's size and stays sharp while the
+    /// card travels. The editor's GPU paper bitmap is never read back.
+    pub fn render_flight_image(&mut self) -> Result<ImageData, String> {
+        let started = std::time::Instant::now();
+        let scale = self.scale.max(0.5);
+        let width = (PAPER_WIDTH * scale).round().max(1.0) as u32;
+        let height = (PAPER_HEIGHT * scale).round().max(1.0) as u32;
+        let factory = crate::capture::wic::imaging_factory()?;
+        // SAFETY: the factory is live, the size is at least one pixel and the
+        // pixel format is a static WIC GUID.
+        let wic = unsafe {
+            factory.CreateBitmap(
+                width,
+                height,
+                &GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapCacheOnLoad,
+            )
+        }
+        .map_err(|error| format!("CreateBitmap({width}x{height}): {error}"))?;
+        let properties = D2D1_RENDER_TARGET_PROPERTIES {
+            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+        };
+        // SAFETY: the factory and the WIC bitmap are live; the target keeps a
+        // reference to the bitmap for as long as it exists.
+        let rt = unsafe {
+            self.surface
+                .factory
+                .CreateWicBitmapRenderTarget(&wic, &properties)
+        }
+        .map_err(|error| format!("CreateWicBitmapRenderTarget: {error}"))?;
+
+        let assets = Assets::new(&rt, &self.surface.dwrite, self.color)?;
+        let palette = crate::notes::color(self.color);
+        let paper_brush = paper_gradient(&rt, palette)?;
+        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory)?;
+        // The paint routines read the brushes from `self`; swap in the WIC
+        // target's copies for this one render, then put the screen ones back.
+        let screen_assets = std::mem::replace(&mut self.assets, assets);
+        let screen_paper = self.paper_brush.replace(paper_brush);
+        let screen_edge = self.fold_edge.replace(fold_edge);
+        let screen_shade = self.fold_shade.replace(fold_shade);
+        // Text layouts carry the link brush as a D2D drawing effect, and that
+        // brush belongs to the screen target. Rebuild them against the WIC
+        // target before painting, then restore the screen layouts afterwards.
+        self.rebuild();
+
+        let painted = {
+            // SAFETY: the target is a fresh WIC render target on this thread.
+            unsafe {
+                rt.SetDpi(96.0, 96.0);
+                rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                rt.SetTransform(&Matrix3x2::scale(scale, scale));
+                rt.BeginDraw();
+            }
+            self.paint_paper_on(&rt);
+            // SAFETY: `BeginDraw` was called above on this thread.
+            unsafe { rt.EndDraw(None, None) }.map_err(|error| format!("EndDraw: {error}"))
+        };
+
+        self.assets = screen_assets;
+        self.paper_brush = screen_paper;
+        self.fold_edge = screen_edge;
+        self.fold_shade = screen_shade;
+        self.rebuild();
+        painted?;
+
+        // The target holds premultiplied pixels; the flight upload expects
+        // straight BGRA.
+        let converter = unsafe { factory.CreateFormatConverter() }
+            .map_err(|error| format!("CreateFormatConverter: {error}"))?;
+        // SAFETY: the converter is fresh and the WIC bitmap is alive.
+        unsafe {
+            converter.Initialize(
+                &wic,
+                &GUID_WICPixelFormat32bppBGRA,
+                WICBitmapDitherTypeNone,
+                None::<&IWICPalette>,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+        }
+        .map_err(|error| format!("IWICFormatConverter::Initialize: {error}"))?;
+        let stride = width * 4;
+        let mut bgra = vec![0u8; width as usize * height as usize * 4];
+        let rect = WICRect {
+            X: 0,
+            Y: 0,
+            Width: width as i32,
+            Height: height as i32,
+        };
+        // SAFETY: `bgra` is exactly `stride * height` bytes for the size above.
+        unsafe { converter.CopyPixels(&rect, stride, &mut bgra) }
+            .map_err(|error| format!("CopyPixels({width}x{height}): {error}"))?;
+        logging::trace(format!(
+            "note editor flight image {width}x{height} in {:.1} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+        Ok(ImageData::new(width, height, bgra))
+    }
+
+    /// Paints the paper (gradient, dog-ear, text) into `context`. The same code
+    /// renders the on-screen paper bitmap and the cached WIC bitmap a flight
+    /// carries, so the editor can look identical in both.
+    fn paint_paper_on(&mut self, context: &ID2D1RenderTarget) {
         // The paper is opaque, so the whole bitmap can simply be filled.
         let palette = crate::notes::color(self.color);
         // SAFETY: the context is drawing to the paper target.
@@ -1056,6 +1161,7 @@ impl EditorState {
                         number,
                         task,
                     } => self.paint_list_marker(
+                        context,
                         &line.block,
                         ordered,
                         number,
@@ -1094,13 +1200,14 @@ impl EditorState {
                 context.DrawTextLayout(origin, layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
-        self.paint_caret(origin_x);
-        self.paint_placeholder(origin_x);
+        self.paint_caret(context, origin_x);
+        self.paint_placeholder(context, origin_x);
     }
 
     #[allow(clippy::too_many_arguments)]
     fn paint_list_marker(
         &self,
+        context: &ID2D1RenderTarget,
         block: &Block,
         ordered: bool,
         number: u32,
@@ -1110,7 +1217,6 @@ impl EditorState {
         height: f32,
         indent: f32,
     ) {
-        let context = &self.surface.context;
         let center_y = top + height * 0.5;
         // SAFETY: drawing on the paper target with live brushes.
         unsafe {
@@ -1317,7 +1423,7 @@ impl EditorState {
         }
     }
 
-    fn paint_caret(&self, origin_x: f32) {
+    fn paint_caret(&self, context: &ID2D1RenderTarget, origin_x: f32) {
         if !self.focused || !self.enabled || !self.caret_on {
             return;
         }
@@ -1332,11 +1438,11 @@ impl EditorState {
         };
         // SAFETY: drawing on the paper target.
         unsafe {
-            self.surface.context.FillRectangle(&rect, &self.assets.ink);
+            context.FillRectangle(&rect, &self.assets.ink);
         }
     }
 
-    fn paint_placeholder(&self, origin_x: f32) {
+    fn paint_placeholder(&self, context: &ID2D1RenderTarget, origin_x: f32) {
         if !self.doc.is_empty() || self.composition.is_some() {
             return;
         }
@@ -1350,7 +1456,7 @@ impl EditorState {
         };
         // SAFETY: drawing on the paper target with the body format.
         unsafe {
-            self.surface.context.DrawText(
+            context.DrawText(
                 &wide,
                 &self.assets.body,
                 &rect,
@@ -1579,7 +1685,7 @@ fn number_format(dwrite: &IDWriteFactory) -> Result<IDWriteTextFormat, String> {
 }
 
 fn solid(
-    context: &ID2D1DeviceContext,
+    context: &ID2D1RenderTarget,
     rgb: u32,
     alpha: f32,
 ) -> Result<ID2D1SolidColorBrush, String> {
@@ -1589,26 +1695,16 @@ fn solid(
 }
 
 fn gradient(
-    context: &ID2D1DeviceContext,
+    context: &ID2D1RenderTarget,
     stops: &[D2D1_GRADIENT_STOP],
     start: (f32, f32),
     end: (f32, f32),
 ) -> Result<ID2D1LinearGradientBrush, String> {
-    use windows::Win32::Graphics::Direct2D::{
-        D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-        D2D1_COLOR_SPACE_SRGB, D2D1_EXTEND_MODE_CLAMP,
-    };
+    use windows::Win32::Graphics::Direct2D::{D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2};
     // SAFETY: the context is alive and the stop slice is live for the call.
     unsafe {
         let collection = context
-            .CreateGradientStopCollection(
-                stops,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_COLOR_SPACE_SRGB,
-                D2D1_BUFFER_PRECISION_8BPC_UNORM,
-                D2D1_EXTEND_MODE_CLAMP,
-                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-            )
+            .CreateGradientStopCollection(stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
             .map_err(|error| format!("CreateGradientStopCollection: {error}"))?;
         let properties = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
             startPoint: Vector2 {
@@ -1683,6 +1779,50 @@ fn distance(line: &LaidLine, y: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The paper gradient shared by the on-screen paper bitmap and the WIC image
+/// rendered for an editor flight.
+fn paper_gradient(
+    rt: &ID2D1RenderTarget,
+    palette: crate::notes::NoteColor,
+) -> Result<ID2D1LinearGradientBrush, String> {
+    let paper_top = mix(palette.paper, palette.edge, 0.45);
+    let stops = [
+        D2D1_GRADIENT_STOP {
+            position: 0.0,
+            color: color_of(palette.paper, 1.0),
+        },
+        D2D1_GRADIENT_STOP {
+            position: 1.0,
+            color: color_of(paper_top, 1.0),
+        },
+    ];
+    gradient(rt, &stops, (0.0, 0.0), (0.0, PAPER_HEIGHT))
+}
+
+/// The two dog-ear triangles, in paper-local DIP.
+fn fold_geometries(factory: &ID2D1Factory) -> Result<(ID2D1Geometry, ID2D1Geometry), String> {
+    let fold = FOLD_DIP;
+    let right = PAPER_WIDTH;
+    let bottom = PAPER_HEIGHT;
+    let edge = triangle(
+        factory,
+        [
+            (right - fold, bottom),
+            (right, bottom - fold),
+            (right - fold, bottom - fold),
+        ],
+    )?;
+    let shade = triangle(
+        factory,
+        [
+            (right - fold, bottom),
+            (right, bottom - fold),
+            (right, bottom),
+        ],
+    )?;
+    Ok((edge, shade))
 }
 
 fn triangle(factory: &ID2D1Factory, points: [(f32, f32); 3]) -> Result<ID2D1Geometry, String> {
@@ -1831,6 +1971,10 @@ struct Surface {
     swap_chain: IDXGISwapChain1,
     swap_chain3: IDXGISwapChain3,
     context: ID2D1DeviceContext,
+    /// The same context as the base render-target interface, for painting code
+    /// that only needs `ID2D1RenderTarget` (and can therefore also run on a
+    /// WIC target when the editor bitmap is rendered for a flight).
+    rt: ID2D1RenderTarget,
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
     targets: [Option<ID2D1Bitmap1>; 2],
@@ -1864,6 +2008,9 @@ impl Surface {
         let factory: ID2D1Factory = d2d_factory
             .cast()
             .map_err(|error| format!("ID2D1Factory1 -> ID2D1Factory: {error}"))?;
+        let rt: ID2D1RenderTarget = context
+            .cast()
+            .map_err(|error| format!("ID2D1DeviceContext -> ID2D1RenderTarget: {error}"))?;
         let target_props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1890,6 +2037,7 @@ impl Surface {
             swap_chain,
             swap_chain3,
             context,
+            rt,
             factory,
             dwrite,
             targets: [None, None],

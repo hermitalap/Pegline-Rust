@@ -1,6 +1,6 @@
 [package]
 name = "pegline"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Screenshots hanging on a clothesline at the top of the screen"
@@ -14,10 +14,6 @@ path = "src/main.rs"
 [[bin]]
 name = "probe"
 path = "src/bin/probe.rs"
-
-[[bin]]
-name = "spike"
-path = "src/bin/spike.rs"
 
 [dependencies.windows]
 version = "0.62"
