@@ -8,24 +8,29 @@
 
 use crate::types::{CardId, RectI};
 
-/// White frame around the photo, DIP, on each side.
-pub const INSET_DIP: f32 = 6.0;
+/// Glass-card inset around the preview content, DIP, on each side. It is the
+/// same [`crate::layout::PHOTO_INSET`] a picture card wears on the line, so a
+/// preview reads as the card enlarged.
+pub const INSET_DIP: f32 = 4.0;
 /// Gap between the preview and the monitor work-area edge, DIP.
 pub const MARGIN_DIP: f32 = 12.0;
 /// Gap between the preview and the hovered card, DIP.
 pub const GAP_DIP: f32 = 12.0;
-/// Largest preview, DIP.
+/// Largest visible preview card, DIP.
 pub const MAX_WIDTH_DIP: f32 = 900.0;
 pub const MAX_HEIGHT_DIP: f32 = 650.0;
 /// How long the pointer must rest on one photo before decoding it.
 pub const HOVER_DELAY: f64 = 0.35;
 
-/// Where the preview goes, in device pixels, for a source of `source` pixels.
+/// Where the preview card goes, in device pixels, for a source of `source`
+/// pixels.
 ///
-/// The card rectangle and the work area are device pixels; `scale` converts the
-/// DIP margins and caps to this monitor's pixels. Returns an empty rectangle
-/// when the source is invalid or neither side of the card has room, which means
-/// "do not show a preview" (BEHAVIOR §7).
+/// The returned rectangle is the *visible* card (the glass frame around the
+/// picture); [`window_bounds`] adds the transparent room its baked shadow
+/// needs. The anchor rectangle and the work area are device pixels; `scale`
+/// converts the DIP margins and caps to this monitor's pixels. Returns an
+/// empty rectangle when the source is invalid or neither side of the anchor
+/// has room, which means "do not show a preview" (BEHAVIOR §7).
 pub fn bounds(source: (u32, u32), anchor: RectI, work: RectI, scale: f32) -> RectI {
     let (source_w, source_h) = (source.0 as f64, source.1 as f64);
     if source_w <= 0.0
@@ -83,8 +88,9 @@ pub fn decode_max(bounds: RectI, scale: f32) -> u32 {
 
 /// Where a hover preview of a fixed DIP size goes, in device pixels: below the
 /// anchor when it fits, above it otherwise, centred on the anchor and clamped
-/// to the work area. `size` is the whole window in DIP (card plus its shadow
-/// padding). Empty when neither side has room, which means "do not show".
+/// to the work area. `size` is the visible card in DIP; the caller adds the
+/// shadow room with [`window_bounds`]. Empty when neither side has room, which
+/// means "do not show".
 ///
 /// Notes use this: unlike a photo, a note preview is the same size on every
 /// monitor (scaled by the monitor), so it never shrinks to the source.
@@ -125,6 +131,30 @@ pub fn fixed_bounds(size: (f32, f32), anchor: RectI, work: RectI, scale: f32) ->
     let centered = anchor.center_x() as f64 - width * 0.5;
     let x = left.max((right - width).min(centered)).round();
     RectI::new(x as i32, y as i32, (x + width) as i32, (y + height) as i32)
+}
+
+/// The transparent window around a visible preview card, in device pixels.
+///
+/// The card keeps the placement [`bounds`]/[`fixed_bounds`] gave it; this adds
+/// `padding_dip` on every side so the baked card shadow fits. The window may
+/// reach past the work area (the card itself does not), which is fine: the
+/// margin is transparent.
+pub fn window_bounds(card: RectI, padding_dip: f32, scale: f32) -> RectI {
+    if card.is_empty()
+        || !padding_dip.is_finite()
+        || padding_dip < 0.0
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return RectI::default();
+    }
+    let pad = (padding_dip as f64 * scale as f64).round() as i32;
+    RectI::new(
+        card.left - pad,
+        card.top - pad,
+        card.right + pad,
+        card.bottom + pad,
+    )
 }
 
 /// The dwell state for one photo: which card, which revision of it, and when
@@ -212,8 +242,8 @@ mod tests {
     }
 
     fn aspect(bounds: RectI, expected: f64, scale: f64) {
-        let ratio =
-            (bounds.width() as f64 - 12.0 * scale) / (bounds.height() as f64 - 12.0 * scale);
+        let inset = 2.0 * INSET_DIP as f64 * scale;
+        let ratio = (bounds.width() as f64 - inset) / (bounds.height() as f64 - inset);
         assert!(
             (ratio - expected).abs() <= 0.015f64.max(expected * 0.015),
             "preview changed the image aspect ratio: {ratio} vs {expected}"
@@ -296,10 +326,24 @@ mod tests {
             1.0,
         );
         assert!(
-            bounds.width() <= 52 && bounds.height() <= 32,
+            bounds.width() <= 48 && bounds.height() <= 28,
             "small source was enlarged"
         );
         aspect(bounds, 2.0, 1.0);
+    }
+
+    #[test]
+    fn a_capped_preview_keeps_the_source_aspect_inside_its_card() {
+        // A 200 % monitor tall enough to show the full 900x650 DIP cap.
+        let bounds = bounds(
+            (4000, 3000),
+            RectI::new(1800, 100, 2100, 300),
+            RectI::new(0, 0, 3840, 2160),
+            2.0,
+        );
+        // The visible card is capped at 900x650 DIP, minus its 4 DIP inset.
+        assert_eq!((bounds.width(), bounds.height()), (1728, 1300));
+        aspect(bounds, 4.0 / 3.0, 2.0);
     }
 
     #[test]
@@ -375,24 +419,27 @@ mod tests {
             2.0,
         );
         let max = decode_max(bounds, 2.0);
-        assert_eq!(max + 24, bounds.width().max(bounds.height()) as u32);
+        assert_eq!(
+            max + (2.0 * INSET_DIP * 2.0) as u32,
+            bounds.width().max(bounds.height()) as u32
+        );
     }
 
     #[test]
     fn a_note_preview_hangs_below_its_card_at_a_fixed_size() {
-        let size = (476.0, 332.0);
+        let size = (416.0, 272.0);
         let anchor = RectI::new(880, 60, 1040, 218);
         let area = RectI::new(0, 0, 1920, 1040);
         let bounds = fixed_bounds(size, anchor, area, 1.0);
         contained(bounds, area);
-        assert_eq!((bounds.width(), bounds.height()), (476, 332));
+        assert_eq!((bounds.width(), bounds.height()), (416, 272));
         assert!(bounds.top >= 230, "preview overlaps the hovered card");
         assert_eq!(bounds.center_x(), anchor.center_x());
     }
 
     #[test]
     fn a_note_preview_flips_above_or_hides() {
-        let size = (476.0, 400.0);
+        let size = (416.0, 400.0);
         let area = RectI::new(0, 0, 1280, 720);
         // No room below the card: hang it above instead.
         let anchor = RectI::new(500, 500, 650, 640);
@@ -403,7 +450,7 @@ mod tests {
         let anchor = RectI::new(500, 350, 650, 370);
         assert!(fixed_bounds(size, anchor, area, 1.0).is_empty());
         // A card near the left edge still keeps the work-area margin.
-        let bounds = fixed_bounds((476.0, 332.0), RectI::new(-200, 50, -100, 200), area, 1.0);
+        let bounds = fixed_bounds((416.0, 272.0), RectI::new(-200, 50, -100, 200), area, 1.0);
         assert!(bounds.left >= 12);
     }
 
@@ -411,9 +458,9 @@ mod tests {
     fn a_note_preview_scales_with_the_monitor() {
         let area = RectI::new(0, 0, 3840, 2160);
         let anchor = RectI::new(1800, 100, 2100, 300);
-        let bounds = fixed_bounds((476.0, 332.0), anchor, area, 2.0);
+        let bounds = fixed_bounds((416.0, 272.0), anchor, area, 2.0);
         contained(bounds, area);
-        assert_eq!((bounds.width(), bounds.height()), (952, 664));
+        assert_eq!((bounds.width(), bounds.height()), (832, 544));
         assert!(bounds.top >= 324);
     }
 
@@ -427,5 +474,21 @@ mod tests {
         assert!(fixed_bounds((10.0, 10.0), anchor, RectI::default(), 1.0).is_empty());
         assert!(fixed_bounds((10.0, 10.0), anchor, area, f32::NAN).is_empty());
         assert!(fixed_bounds((10.0, 10.0), anchor, area, 0.0).is_empty());
+    }
+
+    #[test]
+    fn the_shadow_room_is_added_around_the_visible_card() {
+        let card = RectI::new(100, 200, 300, 400);
+        assert_eq!(
+            window_bounds(card, 30.0, 1.0),
+            RectI::new(70, 170, 330, 430)
+        );
+        assert_eq!(
+            window_bounds(card, 30.0, 2.0),
+            RectI::new(40, 140, 360, 460)
+        );
+        assert!(window_bounds(RectI::default(), 30.0, 1.0).is_empty());
+        assert!(window_bounds(card, f32::NAN, 1.0).is_empty());
+        assert!(window_bounds(card, 30.0, 0.0).is_empty());
     }
 }

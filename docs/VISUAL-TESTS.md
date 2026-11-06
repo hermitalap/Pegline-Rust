@@ -175,6 +175,8 @@
   `settings.ini` 写入 `noteColor:<文件名>=3`，重启后仍是灰色。
 - **大图预览**：4000×3000 源图悬停 0.35 s，预览白框实测 **1726×1300 物理
   像素**（上限 1800×1300，按 4:3 等比），从按钮行下方开始，不遮挡按钮。
+  （2026-11-06 起预览外框改为玻璃卡片、内衬 4 DIP，同一源图实测 **1728×1300**，
+  见 §3.15；这条是白框时代的记录。）
 - **右键菜单状态**：用真实 PNG 剪贴板触发一次自己的截图（own=true），菜单
   出现“保存到桌面/丢弃”；外部 demo 图只有“取下/移到回收站”。
 
@@ -520,12 +522,34 @@
 | `--note-editor-demo` | `visual/note-editor-lists-centred.png` | 无序列表圆点对齐文字基线以上 0.33 em（文字视觉中心），任务框同一中线；旧版对齐行框中心，因 1.55 行距的空白落在基线下，圆点明显偏低（对比 `visual/note-editor-lists.png`） |
 | `--note-flow-demo`，编辑器出现后立即注入 `- alpha⏎beta⏎⌫1. first⏎second⏎⌫abc⌫⏎- end⏎⏎` | `visual/note-editor-list-continuation.png`；保存的 `.txt` | 回车自动补 `- ` / `2. `；空项回车删除标记并结束列表；一次退格删除整个自动标记。保存文本：`- alpha`、`- beta`、`1. first`、`2. second`、`ab`、`- end`、`Demo note`、`- one`、`[x] two`，BOM 与 CRLF 正确；`ab` 证明一次退格只删一个字符（旧版会删成 `a` 甚至 `- tw`） |
 | `--note-preview-demo` | `visual/note-card-preview.png` | 合成指针停在便签卡片上 0.35 s 后，卡片下方（让开颜色点和按钮行）出现 408×264 DIP 的大纸面，装在和绳上便签一致的玻璃卡片里；文字为 15 DIP 摘要，任务/有序/引用/中英混排都正确；窗口点击穿透、不抢焦点，隐藏后释放位图 |
-| 日志 | `trace.log` | `note content preview 816x528 at RectI { left: 2532, top: 426, right: 3484, bottom: 1090 }`：100% 屏也按 2 px/DIP 渲染，水平居中于卡片并夹在工作区 |
+| 日志 | `trace.log` | `note content preview 816x528 at RectI { left: 2592, top: 425, right: 3424, bottom: 969 }, window RectI { left: 2532, top: 365, right: 3484, bottom: 1029 }`：可见卡片 416×272 DIP，100% 屏也按 2 px/DIP 渲染，水平居中于卡片并夹在工作区；窗口另加 30 DIP 透明阴影边距 |
 
 - 同一轮修掉了编辑器打开时偶发的 `EndDraw(paper): 0x88990001`：渲染飞行位图时，
   行内代码底色和选区原先画在窗口设备上下文而不是传入的 WIC 目标上，破坏了
   设备上下文状态；现在两者都使用传入的渲染目标，打开编辑器不再记录该错误。
 - 未重新做帧率/内存测量；预览位图 816×528×4 ≈ 1.7 MB，隐藏时连同交换链一起释放。
+
+### 3.15 悬停预览外框统一（2026-11-06）
+
+需求：挂图的预览外框与便签预览不一致，统一成便签预览当前的玻璃卡片外框。
+
+本机 6016×3384 @200%，release 构建；`--demo` 用真实指针悬停第一张演示图，
+`--note-preview-demo` 用合成指针悬停演示便签：
+
+| 复现 | 证据 | 结果 |
+|:--|:--|:--|
+| `--demo`，指针停在 480×270 演示图上 | `visual/photo-card-preview.png` | 预览卡片是与便签预览同一套 `paint_preview_card` 的玻璃卡片：4 DIP 内衬（旧版 6 DIP 白框）、16 DIP 圆角、0.75 DIP 玻璃渐变边框、18 % 烘焙阴影；可见卡片与按钮行间距 12 DIP，阴影完整落在窗口四周 30 DIP 透明边距内，不再被窗口裁掉 |
+| `--note-preview-demo` | `visual/note-card-preview.png` | 同一外框；照片和便签只有内容（解码图 / 渲染纸面）不同，边框、圆角、内衬和阴影一致；便签可见卡片与按钮行的间距也从 42 DIP 收回 12 DIP |
+| 日志 | `trace.log` | `preview card 480x270 at RectI { left: 1716, top: 339, right: 2212, bottom: 625 }, window RectI { left: 1656, top: 279, right: 2272, bottom: 685 }`；可见卡片与窗口分开，阴影窗口比卡片四周大 60 px（30 DIP） |
+
+- 实现：`preview::INSET_DIP` 从 6 改为 4（与卡片 `PHOTO_INSET` 一致）；
+  `window/preview.rs` 的照片与便签预览共用 `paint_preview_card`；窗口用
+  `preview::window_bounds` 在可见卡片外扩 30 DIP。位置仍按可见卡片计算：
+  “距卡片 12 DIP、距工作区 12 DIP”，大图上限仍是 900×650 DIP。
+- 4000×3000 @200% 的卡片实测 **1728×1300** 物理像素（单元测试
+  `a_capped_preview_keeps_the_source_aspect_inside_its_card`）；旧白框为
+  1726×1300。
+- 未重新做帧率/内存测量：窗口比卡片大 60 DIP 但透明，阴影仍只在启动时烘焙一次。
 
 ## 4. 逐帧结果
 

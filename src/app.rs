@@ -49,7 +49,7 @@ use crate::win32::{self, Monitor};
 use crate::window::flight::{Flight, FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
-use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_window_dip};
+use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_card_dip};
 use crate::window::{self, WM_APP_QUIT, WM_APP_WAKE, WM_TRAY_CALLBACK};
 
 const CLASS_NAME: PCWSTR = w!("PeglineMessage");
@@ -2842,10 +2842,10 @@ impl App {
     }
 
     fn save_pegged(&mut self) {
-        // `--note-preview-demo` hangs a throw-away note on a line that did not
-        // restore the user's cards; writing it would replace their pegged list
-        // with a demo path.
-        if self.note_preview_demo || self.restore_pending > 0 {
+        // The demo switches hang generated cards on a line that did not restore
+        // the user's own set; writing them would replace the real pegged list
+        // with demo paths. `--note-preview-demo` is the same case.
+        if self.demo || self.note_preview_demo || self.restore_pending > 0 {
             return;
         }
         let paths: Vec<PathBuf> = self.items.iter().map(|item| item.path.clone()).collect();
@@ -3575,7 +3575,7 @@ impl App {
         let bounds = if note {
             // A note is not scaled to a source size: its preview is always the
             // same large sheet, so long notes stay readable.
-            preview::fixed_bounds(note_preview_window_dip(), anchor, screen.work, scale)
+            preview::fixed_bounds(note_preview_card_dip(), anchor, screen.work, scale)
         } else {
             preview::bounds(item.size_px, anchor, screen.work, scale)
         };

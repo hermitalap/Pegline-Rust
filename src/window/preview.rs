@@ -42,9 +42,10 @@ const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
 /// Transparent margin around the hover note, DIP (the shadow lives here).
 pub const NOTE_PADDING_DIP: f32 = 24.0;
-/// Transparent margin around a note-content preview, DIP: the baked card
-/// shadow reaches 24 DIP out and sits 5 DIP lower.
-pub const NOTE_PREVIEW_PADDING_DIP: f32 = 30.0;
+/// Transparent margin around a hover preview card, DIP: the baked card shadow
+/// reaches 24 DIP out and sits 5 DIP lower, so both picture and note previews
+/// use the same room and the same frame.
+pub const PREVIEW_PADDING_DIP: f32 = 30.0;
 /// The blank entry's "add note" icon: the supplied SVG's 24×24 box, DIP.
 const NOTE_ICON_DIP: f32 = 24.0;
 /// Gap between that icon and the label below it, DIP.
@@ -53,12 +54,13 @@ const NOTE_ICON_GAP_DIP: f32 = 4.0;
 /// the eye can see on a 5° tilt, and it lets a settled paper sleep.
 const NOTE_TILT_STEP_DEG: f32 = 0.05;
 
-/// The window size of a note's hover preview, DIP: the large sheet inside the
-/// same glass card as a note on the line, plus the shadow margin.
-pub fn note_preview_window_dip() -> (f32, f32) {
+/// The visible card of a note's hover preview, DIP: the large sheet inside the
+/// same glass card as a note on the line. [`PREVIEW_PADDING_DIP`] is added by
+/// the window painter.
+pub fn note_preview_card_dip() -> (f32, f32) {
     (
-        notes::PREVIEW_WIDTH_DIP + layout::PHOTO_INSET * 2.0 + NOTE_PREVIEW_PADDING_DIP * 2.0,
-        notes::PREVIEW_HEIGHT_DIP + layout::PHOTO_INSET * 2.0 + NOTE_PREVIEW_PADDING_DIP * 2.0,
+        notes::PREVIEW_WIDTH_DIP + layout::PHOTO_INSET * 2.0,
+        notes::PREVIEW_HEIGHT_DIP + layout::PHOTO_INSET * 2.0,
     )
 }
 
@@ -468,6 +470,9 @@ fn preview_thread(
     logging::trace("preview render thread stopped");
 }
 
+/// Shows a picture's hover preview. `bounds` is the visible card; the window
+/// around it is enlarged by [`PREVIEW_PADDING_DIP`] so the baked shadow fits
+/// exactly as on a note preview.
 fn show_frame(
     renderer: &mut Renderer,
     hwnd: HWND,
@@ -476,29 +481,30 @@ fn show_frame(
     dpi: u32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
 ) -> Result<(), String> {
-    let width = bounds.width().max(1) as u32;
-    let height = bounds.height().max(1) as u32;
-    win32::place_window(hwnd, bounds, true);
+    let scale = dpi.max(96) as f32 / 96.0;
+    let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
+    if window.is_empty() {
+        return Err("empty preview window".to_string());
+    }
+    let width = window.width().max(1) as u32;
+    let height = window.height().max(1) as u32;
+    logging::trace(format!(
+        "preview card {}x{} at {bounds:?}, window {window:?}",
+        image.width, image.height
+    ));
+    win32::place_window(hwnd, window, true);
     renderer.resize(width, height, dpi)?;
     let bitmap = renderer.upload(image)?;
-    *texture = Some(bitmap);
-
-    let scale = dpi.max(96) as f32 / 96.0;
-    let frame = RectF::from_xywh(0.0, 0.0, width as f32 / scale, height as f32 / scale);
-    let inset = geometry::INSET_DIP;
-    let photo = RectF::new(
-        frame.left + inset,
-        frame.top + inset,
-        frame.right - inset,
-        frame.bottom - inset,
+    let card = RectF::from_xywh(
+        PREVIEW_PADDING_DIP,
+        PREVIEW_PADDING_DIP,
+        bounds.width() as f32 / scale,
+        bounds.height() as f32 / scale,
     );
     renderer.begin()?;
-    renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Paper);
-    if let Some(bitmap) = texture.as_ref() {
-        renderer.draw_photo(bitmap, photo, layout::CARD_RADIUS - 4.0);
-    }
-    renderer.stroke_card(frame, layout::CARD_RADIUS, 1.0);
+    paint_preview_card(renderer, &bitmap, card);
     renderer.end()?;
+    *texture = Some(bitmap);
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a preview".to_string());
     }
@@ -511,6 +517,28 @@ fn show_frame(
 fn note_card() -> RectF {
     let (width, height) = layout::note_card_size();
     RectF::from_xywh(NOTE_PADDING_DIP, NOTE_PADDING_DIP, width, height)
+}
+
+/// Paints the shared preview frame into the current frame: the baked card
+/// shadow, the glass card, the content inset like a photo card and the
+/// hairline border. Both a picture and a note preview use it, so their frames
+/// are identical (BEHAVIOR §7).
+fn paint_preview_card(
+    renderer: &mut Renderer,
+    bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
+    card: RectF,
+) {
+    let inset = layout::PHOTO_INSET;
+    let content = RectF::new(
+        card.left + inset,
+        card.top + inset,
+        card.right - inset,
+        card.bottom - inset,
+    );
+    renderer.draw_shadow(card, 0.18, false);
+    renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
+    renderer.draw_photo(bitmap, content, layout::PHOTO_RADIUS);
+    renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
 }
 
 /// Paints the card (shadow, glass frame, the note paper inset like a photo and
@@ -527,13 +555,6 @@ fn draw_note(
     degrees: f32,
     label: bool,
 ) -> Result<(), String> {
-    let inset = layout::PHOTO_INSET;
-    let paper = RectF::new(
-        card.left + inset,
-        card.top + inset,
-        card.right - inset,
-        card.bottom - inset,
-    );
     let (center_x, center_y) = card.center();
     renderer.begin()?;
     renderer.set_transform(Matrix3x2::rotation_around(
@@ -543,9 +564,7 @@ fn draw_note(
             Y: center_y,
         },
     ));
-    renderer.draw_shadow(card, 0.18, false);
-    renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
-    renderer.draw_photo(bitmap, paper, layout::PHOTO_RADIUS);
+    paint_preview_card(renderer, bitmap, card);
     if label {
         // The blank note says what it is in the note's own ink: an add-note
         // icon above, and a label at the same size and weight as a short
@@ -568,7 +587,6 @@ fn draw_note(
             Brush::NoteInk,
         );
     }
-    renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
     renderer.reset_transform();
     renderer.end()
 }
@@ -603,7 +621,7 @@ fn show_note_frame(
 
 /// Draws the hover preview of a note that is hanging on the line: the same
 /// glass card and paper as the card, with the larger sheet rendered off the UI
-/// thread.
+/// thread. `bounds` is the visible card; the window adds the shadow room.
 fn show_note_content_frame(
     renderer: &mut Renderer,
     hwnd: HWND,
@@ -612,24 +630,29 @@ fn show_note_content_frame(
     dpi: u32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
 ) -> Result<(), String> {
-    let width = bounds.width().max(1) as u32;
-    let height = bounds.height().max(1) as u32;
+    let scale = dpi.max(96) as f32 / 96.0;
+    let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
+    if window.is_empty() {
+        return Err("empty preview window".to_string());
+    }
+    let width = window.width().max(1) as u32;
+    let height = window.height().max(1) as u32;
     logging::trace(format!(
-        "note content preview {}x{} at {bounds:?}",
+        "note content preview {}x{} at {bounds:?}, window {window:?}",
         image.width, image.height
     ));
-    win32::place_window(hwnd, bounds, true);
+    win32::place_window(hwnd, window, true);
     renderer.resize(width, height, dpi)?;
-    let scale = dpi.max(96) as f32 / 96.0;
-    let window = (width as f32 / scale, height as f32 / scale);
     let card = RectF::from_xywh(
-        NOTE_PREVIEW_PADDING_DIP,
-        NOTE_PREVIEW_PADDING_DIP,
-        window.0 - NOTE_PREVIEW_PADDING_DIP * 2.0,
-        window.1 - NOTE_PREVIEW_PADDING_DIP * 2.0,
+        PREVIEW_PADDING_DIP,
+        PREVIEW_PADDING_DIP,
+        bounds.width() as f32 / scale,
+        bounds.height() as f32 / scale,
     );
     let bitmap = renderer.upload(image)?;
-    draw_note(renderer, &bitmap, card, 0.0, false)?;
+    renderer.begin()?;
+    paint_preview_card(renderer, &bitmap, card);
+    renderer.end()?;
     *texture = Some(bitmap);
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a note preview".to_string());

@@ -4,6 +4,14 @@
 
 ### Changes
 
+- **Picture and note hover previews now share one frame.** A picture's
+  preview wears the same glass card as a note's: a 4 DIP inset (it was a
+  6 DIP white frame), the same 16 DIP radius, hairline border and baked
+  shadow, inside a 30 DIP transparent window margin so the shadow is no
+  longer clipped. The visible card keeps the 12 DIP gap from the card above
+  and the 12 DIP work-area margins, and the 900×650 DIP cap describes the
+  card: a 4000×3000 source at 200 % measures 1728×1300 px. The note preview
+  comes up by the same 30 DIP, so both hang 12 DIP below the hover controls.
 - **The note editor continues Markdown lists.** Enter on a list line starts the
   next item with the same bullet (indentation kept, a task continues unchecked)
   or the following ordered number; Enter on an empty item removes the marker and

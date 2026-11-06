@@ -72,7 +72,7 @@
 
 | # | 项 | 证据 |
 |:--|:--|:--|
-| 6.x | 悬停预览 | `preview::tests` 12 项（位置/负坐标/高 DPI/下方无空间/不放大/无效尺寸/0.35 s/换卡/离开/编辑）全过；真实进程里悬停 0.35 s 后 trace `preview window created`；隐藏时位图与交换链一并释放 |
+| 6.x | 悬停预览 | `preview::tests` 16 项（位置/负坐标/高 DPI/下方无空间/不放大/卡片上限/无效尺寸/阴影窗口/0.35 s/换卡/离开/编辑）全过；真实进程里悬停 0.35 s 后 trace `preview window created`；隐藏时位图与交换链一并释放 |
 | 7.1 | Ctrl+Alt+N | 真实进程：剪贴板文字 → `便签 2026-11-02 222805.txt`（UTF-8 BOM），卡片上绳 |
 | 7.2 | 空剪贴板 | `Tray::show_balloon` + `i18n::clipboard_empty`；路径已接，未见真实气泡 |
 | 7.3 | 重复文字 | 先在已挂卡片里按内容找，再扫描 Notes 目录；不新建 |
@@ -114,7 +114,7 @@
 | 4.11 | 右键菜单 | 自己的 PNG 剪贴板截图（own=true）显示“保存到桌面/丢弃”；外部图显示“取下/移到回收站”；`visual/context-menu-own.png`、`visual/context-menu-external.png` |
 | 5.8 | Ctrl+Alt+S 全链路 | 默认热键被占用，临时改为 `Ctrl+Alt+K`；真实截图工具选 1200×800 → 编辑器 1200×800 → `Ctrl+S` 输出 1200×800 PNG；trace 有 `clipboard duplicate ignored` |
 | 6.1 | 预览位置 | 预览从按钮行下方 12 DIP 开始，不再遮挡复制/打开；`visual/line-hover-preview.png` |
-| 6.6 | 大图尺寸 | 4000×3000 源图 → 预览白框 **1726×1300** 物理像素（≤1800×1300，4:3 等比）；不放大源图 |
+| 6.6 | 大图尺寸 | 4000×3000 源图 → 预览卡片 **1728×1300** 物理像素（≤1800×1300，4:3 等比，`preview::tests` 覆盖）；不放大源图；照片与便签使用同一玻璃外框 |
 | 7.5 | 便签颜色 | 蓝/粉/灰点击后纸面/折角/墨色/勾选同步，`noteColor:` 写入并重启恢复；`visual/line-note-colors.png` |
 | 7.2 | 空剪贴板 | `Ctrl+Alt+N` 后出现系统气泡“剪贴板里没有文字…”和当前快捷键；`visual/clipboard-empty.png` |
 | 7.3 | 重复便签 | 文件夹里已有、线上没有时，挂回原 `.txt`（不新建副本）；`visual/line-note-swatches.png` |
