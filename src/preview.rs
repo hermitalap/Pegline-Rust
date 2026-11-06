@@ -81,6 +81,52 @@ pub fn decode_max(bounds: RectI, scale: f32) -> u32 {
     (longest.ceil() as i64).clamp(1, u32::MAX as i64) as u32
 }
 
+/// Where a hover preview of a fixed DIP size goes, in device pixels: below the
+/// anchor when it fits, above it otherwise, centred on the anchor and clamped
+/// to the work area. `size` is the whole window in DIP (card plus its shadow
+/// padding). Empty when neither side has room, which means "do not show".
+///
+/// Notes use this: unlike a photo, a note preview is the same size on every
+/// monitor (scaled by the monitor), so it never shrinks to the source.
+pub fn fixed_bounds(size: (f32, f32), anchor: RectI, work: RectI, scale: f32) -> RectI {
+    if size.0 <= 0.0
+        || size.1 <= 0.0
+        || !size.0.is_finite()
+        || !size.1.is_finite()
+        || anchor.is_empty()
+        || work.is_empty()
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return RectI::default();
+    }
+
+    let scale = scale as f64;
+    let margin = MARGIN_DIP as f64 * scale;
+    let gap = GAP_DIP as f64 * scale;
+    let left = (work.left as f64 + margin).ceil();
+    let right = (work.right as f64 - margin).floor();
+    let top = (work.top as f64 + margin).ceil();
+    let bottom = (work.bottom as f64 - margin).floor();
+    let width = (size.0 as f64 * scale).round();
+    let height = (size.1 as f64 * scale).round();
+    if width > right - left || height > bottom - top {
+        return RectI::default();
+    }
+    let below = (anchor.bottom as f64 + gap).ceil().max(top);
+    let above = (anchor.top as f64 - gap).floor().min(bottom);
+    let y = if below + height <= bottom {
+        below
+    } else if above - height >= top {
+        above - height
+    } else {
+        return RectI::default();
+    };
+    let centered = anchor.center_x() as f64 - width * 0.5;
+    let x = left.max((right - width).min(centered)).round();
+    RectI::new(x as i32, y as i32, (x + width) as i32, (y + height) as i32)
+}
+
 /// The dwell state for one photo: which card, which revision of it, and when
 /// the pointer arrived. A generation number invalidates results that were
 /// decoded for a card or an image that is no longer under the pointer.
@@ -330,5 +376,56 @@ mod tests {
         );
         let max = decode_max(bounds, 2.0);
         assert_eq!(max + 24, bounds.width().max(bounds.height()) as u32);
+    }
+
+    #[test]
+    fn a_note_preview_hangs_below_its_card_at_a_fixed_size() {
+        let size = (476.0, 332.0);
+        let anchor = RectI::new(880, 60, 1040, 218);
+        let area = RectI::new(0, 0, 1920, 1040);
+        let bounds = fixed_bounds(size, anchor, area, 1.0);
+        contained(bounds, area);
+        assert_eq!((bounds.width(), bounds.height()), (476, 332));
+        assert!(bounds.top >= 230, "preview overlaps the hovered card");
+        assert_eq!(bounds.center_x(), anchor.center_x());
+    }
+
+    #[test]
+    fn a_note_preview_flips_above_or_hides() {
+        let size = (476.0, 400.0);
+        let area = RectI::new(0, 0, 1280, 720);
+        // No room below the card: hang it above instead.
+        let anchor = RectI::new(500, 500, 650, 640);
+        let bounds = fixed_bounds(size, anchor, area, 1.0);
+        contained(bounds, area);
+        assert!(bounds.bottom <= 488);
+        // Neither side has room: no preview at all.
+        let anchor = RectI::new(500, 350, 650, 370);
+        assert!(fixed_bounds(size, anchor, area, 1.0).is_empty());
+        // A card near the left edge still keeps the work-area margin.
+        let bounds = fixed_bounds((476.0, 332.0), RectI::new(-200, 50, -100, 200), area, 1.0);
+        assert!(bounds.left >= 12);
+    }
+
+    #[test]
+    fn a_note_preview_scales_with_the_monitor() {
+        let area = RectI::new(0, 0, 3840, 2160);
+        let anchor = RectI::new(1800, 100, 2100, 300);
+        let bounds = fixed_bounds((476.0, 332.0), anchor, area, 2.0);
+        contained(bounds, area);
+        assert_eq!((bounds.width(), bounds.height()), (952, 664));
+        assert!(bounds.top >= 324);
+    }
+
+    #[test]
+    fn invalid_fixed_previews_are_suppressed() {
+        let area = RectI::new(0, 0, 1280, 720);
+        let anchor = RectI::new(100, 50, 200, 150);
+        assert!(fixed_bounds((0.0, 10.0), anchor, area, 1.0).is_empty());
+        assert!(fixed_bounds((10.0, f32::NAN), anchor, area, 1.0).is_empty());
+        assert!(fixed_bounds((10.0, 10.0), RectI::default(), area, 1.0).is_empty());
+        assert!(fixed_bounds((10.0, 10.0), anchor, RectI::default(), 1.0).is_empty());
+        assert!(fixed_bounds((10.0, 10.0), anchor, area, f32::NAN).is_empty());
+        assert!(fixed_bounds((10.0, 10.0), anchor, area, 0.0).is_empty());
     }
 }

@@ -382,7 +382,7 @@
 | 同上 + 鼠标点击便签 | 点击进入中央飞行 | `visual/note-center-flight.png`：便签沿曲线飞向中央（旧版带夹子；2026-11-05 起新便签的这次飞行不画挂夹，见上面 `--note-hover-demo --note-flow-demo` 一行） |
 | `--note-editor-demo` | 打开示例文档，滚轮下滚 | `visual/note-editor-lists.png`（标题/列表/任务）、`visual/note-editor-code.png`（引用/行内代码/链接/代码块/中文） |
 | 同一模式的空文档 | 点击空白便签 | `visual/note-editor-empty.png`：460×360 DIP 纸面、占位符“写点什么…” |
-| `--note-flow-demo` | 自动输入 25 字节并提交 | `visual/note-card.png`：新卡片，有夹子、摘要为 `Demo note / • one / [x] two` |
+| `--note-flow-demo` | 自动输入 23 字节并提交 | `visual/note-card.png`：新卡片，有夹子、摘要为 `Demo note / • one / [x] two`（回车继续列表后，任务行只输入 `[x] two`） |
 | `PEGLINE_LANG=es` + 空编辑器 | 西语占位符 | `visual/note-editor-es.png`：“Escribe algo…” |
 | 双击标题词 | 双击选中 `Pegline` | `visual/note-word-select.png`：选区在字形下方，`#` 标记保持淡化 |
 | 中文 IME 组合 | Microsoft Pinyin 输入 `nihao` | `visual/note-editor-ime-composition.png`：活跃行内 `ni'hao` 带下划线，候选窗贴光标 |
@@ -506,6 +506,26 @@
 
 - 未重新做 60/120 Hz 帧率与内存测量；本轮是 debug 构建，数字只用于确认缓存图像
   的生成成本。
+
+### 3.14 便签列表输入、圆点对齐与便签悬停预览（2026-11-06）
+
+需求：列表回车自动续行/退格删除自动标记；一次退格只删一个字符；无序列表圆点与
+文字垂直居中；绳上便签悬停显示预览。
+
+本机 6016×3384 @200%，release 构建；输入用 `PostMessageW` 的 `WM_CHAR` /
+`WM_KEYDOWN` 直接送进编辑器窗口（不依赖前台窗口），截图用 `CopyFromScreen`：
+
+| 复现 | 证据 | 结果 |
+|:--|:--|:--|
+| `--note-editor-demo` | `visual/note-editor-lists-centred.png` | 无序列表圆点对齐文字基线以上 0.33 em（文字视觉中心），任务框同一中线；旧版对齐行框中心，因 1.55 行距的空白落在基线下，圆点明显偏低（对比 `visual/note-editor-lists.png`） |
+| `--note-flow-demo`，编辑器出现后立即注入 `- alpha⏎beta⏎⌫1. first⏎second⏎⌫abc⌫⏎- end⏎⏎` | `visual/note-editor-list-continuation.png`；保存的 `.txt` | 回车自动补 `- ` / `2. `；空项回车删除标记并结束列表；一次退格删除整个自动标记。保存文本：`- alpha`、`- beta`、`1. first`、`2. second`、`ab`、`- end`、`Demo note`、`- one`、`[x] two`，BOM 与 CRLF 正确；`ab` 证明一次退格只删一个字符（旧版会删成 `a` 甚至 `- tw`） |
+| `--note-preview-demo` | `visual/note-card-preview.png` | 合成指针停在便签卡片上 0.35 s 后，卡片下方（让开颜色点和按钮行）出现 408×264 DIP 的大纸面，装在和绳上便签一致的玻璃卡片里；文字为 15 DIP 摘要，任务/有序/引用/中英混排都正确；窗口点击穿透、不抢焦点，隐藏后释放位图 |
+| 日志 | `trace.log` | `note content preview 816x528 at RectI { left: 2532, top: 426, right: 3484, bottom: 1090 }`：100% 屏也按 2 px/DIP 渲染，水平居中于卡片并夹在工作区 |
+
+- 同一轮修掉了编辑器打开时偶发的 `EndDraw(paper): 0x88990001`：渲染飞行位图时，
+  行内代码底色和选区原先画在窗口设备上下文而不是传入的 WIC 目标上，破坏了
+  设备上下文状态；现在两者都使用传入的渲染目标，打开编辑器不再记录该错误。
+- 未重新做帧率/内存测量；预览位图 816×528×4 ≈ 1.7 MB，隐藏时连同交换链一起释放。
 
 ## 4. 逐帧结果
 

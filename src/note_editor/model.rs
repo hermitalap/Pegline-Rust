@@ -210,6 +210,22 @@ impl Doc {
         self.anchor = self.caret;
     }
 
+    /// Removes `range` as one edit and puts the caret at its start.
+    ///
+    /// The list commands use this to drop a whole marker (`- `, `2. `) with one
+    /// Backspace or by pressing Enter on an empty item.
+    pub fn delete_range(&mut self, range: Range<usize>, now: f64) {
+        let start = floor_boundary(&self.text, range.start.min(self.text.len()));
+        let end = floor_boundary(&self.text, range.end.min(self.text.len()));
+        if start >= end {
+            return;
+        }
+        self.snapshot(EditKind::Delete, now);
+        self.text.replace_range(start..end, "");
+        self.caret = start;
+        self.anchor = start;
+    }
+
     /// The selected source text, or `None` when nothing is selected.
     pub fn selected_text(&self) -> Option<String> {
         self.selection().map(|range| self.text[range].to_string())
@@ -664,6 +680,25 @@ mod tests {
         assert_eq!(doc.text(), "hello ");
         doc.paste("a\r\nb", 1.0);
         assert_eq!(doc.text(), "hello a\nb");
+    }
+
+    #[test]
+    fn delete_range_removes_one_span_and_undo_brings_it_back() {
+        let mut doc = make("- one\n- two");
+        // Drop the second marker: "- one\n- two" -> "- one\ntwo".
+        doc.delete_range(6..8, 0.0);
+        assert_eq!(doc.text(), "- one\ntwo");
+        assert_eq!(doc.caret(), 6);
+        assert!(!doc.has_selection());
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "- one\n- two");
+        // Undo restores the state before the edit, caret included.
+        assert_eq!(doc.caret(), doc.len());
+        // An empty or out-of-range span is a no-op.
+        let before = doc.text().to_string();
+        doc.delete_range(3..3, 1.0);
+        doc.delete_range(100..120, 1.0);
+        assert_eq!(doc.text(), before);
     }
 
     #[test]

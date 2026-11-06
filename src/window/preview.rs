@@ -42,6 +42,9 @@ const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
 /// Transparent margin around the hover note, DIP (the shadow lives here).
 pub const NOTE_PADDING_DIP: f32 = 24.0;
+/// Transparent margin around a note-content preview, DIP: the baked card
+/// shadow reaches 24 DIP out and sits 5 DIP lower.
+pub const NOTE_PREVIEW_PADDING_DIP: f32 = 30.0;
 /// The blank entry's "add note" icon: the supplied SVG's 24×24 box, DIP.
 const NOTE_ICON_DIP: f32 = 24.0;
 /// Gap between that icon and the label below it, DIP.
@@ -49,6 +52,15 @@ const NOTE_ICON_GAP_DIP: f32 = 4.0;
 /// Smallest lean change, in degrees, that is worth a repaint. Well below what
 /// the eye can see on a 5° tilt, and it lets a settled paper sleep.
 const NOTE_TILT_STEP_DEG: f32 = 0.05;
+
+/// The window size of a note's hover preview, DIP: the large sheet inside the
+/// same glass card as a note on the line, plus the shadow margin.
+pub fn note_preview_window_dip() -> (f32, f32) {
+    (
+        notes::PREVIEW_WIDTH_DIP + layout::PHOTO_INSET * 2.0 + NOTE_PREVIEW_PADDING_DIP * 2.0,
+        notes::PREVIEW_HEIGHT_DIP + layout::PHOTO_INSET * 2.0 + NOTE_PREVIEW_PADDING_DIP * 2.0,
+    )
+}
 
 /// True while the window shows a note rather than a photo: the note is a real
 /// hover target, so it stops being click-through and uses the hand cursor.
@@ -68,6 +80,12 @@ enum PreviewCommand {
         /// Initial lean, degrees; the entry starts tilted with only one corner
         /// above the screen and straightens as it falls.
         tilt: f32,
+    },
+    /// The rendered sheet of a note whose card is hovered (BEHAVIOR §7).
+    ShowNoteContent {
+        image: ImageData,
+        bounds: RectI,
+        dpi: u32,
     },
     /// Repaint the note at the latest lean; the window is already placed.
     Turn,
@@ -241,6 +259,24 @@ impl Preview {
         win32::place_window(self.hwnd, bounds, true);
     }
 
+    /// Shows a rendered note sheet in `bounds` (the sheet plus its glass card
+    /// and shadow padding): the hover preview of a note on the line.
+    ///
+    /// Like a photo preview it is click-through and never takes focus, so the
+    /// card's own buttons stay usable while it hangs below them.
+    pub fn show_note_content(&mut self, image: ImageData, bounds: RectI, dpi: u32) {
+        if bounds.is_empty() {
+            self.hide();
+            return;
+        }
+        self.visible = true;
+        NOTE_MODE.store(false, Ordering::Release);
+        win32::set_click_through(self.hwnd, true);
+        let _ = self
+            .tx
+            .send(PreviewCommand::ShowNoteContent { image, bounds, dpi });
+    }
+
     /// Leans the visible note by `degrees` (positive = clockwise).
     ///
     /// The window cannot rotate, so the paper is repainted in place. Requests
@@ -385,6 +421,31 @@ fn preview_thread(
                     }
                 }
             }
+            PreviewCommand::ShowNoteContent { image, bounds, dpi } => {
+                let outcome = show_note_content_frame(
+                    &mut renderer,
+                    hwnd.0,
+                    &image,
+                    bounds,
+                    dpi,
+                    &mut texture,
+                );
+                match outcome {
+                    Ok(()) => {
+                        if !shown {
+                            win32::show_no_activate(hwnd.0);
+                            shown = true;
+                        }
+                    }
+                    Err(error) => {
+                        logging::error(format!("note preview: {error}"));
+                        if shown {
+                            win32::hide_window(hwnd.0);
+                            shown = false;
+                        }
+                    }
+                }
+            }
             PreviewCommand::Turn => {
                 // Clear the flag before reading the slot: a lean that lands
                 // after this point either shows up here or queues a new Turn,
@@ -454,16 +515,18 @@ fn note_card() -> RectF {
 
 /// Paints the card (shadow, glass frame, the note paper inset like a photo and
 /// the hairline border), leaning by `degrees` (positive = clockwise) about the
-/// card's centre.
+/// card's centre. `label` draws the blank entry's add-note icon and caption;
+/// the content preview carries its text in the paper bitmap instead.
 ///
 /// The lean stays inside [`NOTE_PADDING_DIP`], so the window keeps its size and
 /// the render thread can repaint without resizing or re-placing it.
 fn draw_note(
     renderer: &mut Renderer,
     bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
+    card: RectF,
     degrees: f32,
+    label: bool,
 ) -> Result<(), String> {
-    let card = note_card();
     let inset = layout::PHOTO_INSET;
     let paper = RectF::new(
         card.left + inset,
@@ -483,25 +546,28 @@ fn draw_note(
     renderer.draw_shadow(card, 0.18, false);
     renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
     renderer.draw_photo(bitmap, paper, layout::PHOTO_RADIUS);
-    // The blank note says what it is in the note's own ink: an add-note icon
-    // above, and a label at the same size and weight as a short note's body
-    // text, so it reads as something already written on the paper.
-    let (text_w, text_h) = renderer.text_size(TextId::NewNote);
-    let content_h = NOTE_ICON_DIP + NOTE_ICON_GAP_DIP + text_h;
-    let top = center_y - content_h * 0.5;
-    renderer.draw_note_add_icon(
-        (center_x, top + NOTE_ICON_DIP * 0.5),
-        NOTE_ICON_DIP,
-        Brush::NoteInk,
-    );
-    renderer.draw_text(
-        TextId::NewNote,
-        (
-            center_x - text_w * 0.5,
-            top + NOTE_ICON_DIP + NOTE_ICON_GAP_DIP,
-        ),
-        Brush::NoteInk,
-    );
+    if label {
+        // The blank note says what it is in the note's own ink: an add-note
+        // icon above, and a label at the same size and weight as a short
+        // note's body text, so it reads as something already written on the
+        // paper.
+        let (text_w, text_h) = renderer.text_size(TextId::NewNote);
+        let content_h = NOTE_ICON_DIP + NOTE_ICON_GAP_DIP + text_h;
+        let top = center_y - content_h * 0.5;
+        renderer.draw_note_add_icon(
+            (center_x, top + NOTE_ICON_DIP * 0.5),
+            NOTE_ICON_DIP,
+            Brush::NoteInk,
+        );
+        renderer.draw_text(
+            TextId::NewNote,
+            (
+                center_x - text_w * 0.5,
+                top + NOTE_ICON_DIP + NOTE_ICON_GAP_DIP,
+            ),
+            Brush::NoteInk,
+        );
+    }
     renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
     renderer.reset_transform();
     renderer.end()
@@ -526,12 +592,48 @@ fn show_note_frame(
     renderer.resize(width, height, dpi)?;
     let image = notes::render("", color).ok_or_else(|| "note render failed".to_string())?;
     let bitmap = renderer.upload(&image)?;
-    draw_note(renderer, &bitmap, tilt)?;
+    draw_note(renderer, &bitmap, note_card(), tilt, true)?;
     *texture = Some(bitmap);
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a note preview".to_string());
     }
     logging::trace("note preview frame presented");
+    Ok(())
+}
+
+/// Draws the hover preview of a note that is hanging on the line: the same
+/// glass card and paper as the card, with the larger sheet rendered off the UI
+/// thread.
+fn show_note_content_frame(
+    renderer: &mut Renderer,
+    hwnd: HWND,
+    image: &ImageData,
+    bounds: RectI,
+    dpi: u32,
+    texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+) -> Result<(), String> {
+    let width = bounds.width().max(1) as u32;
+    let height = bounds.height().max(1) as u32;
+    logging::trace(format!(
+        "note content preview {}x{} at {bounds:?}",
+        image.width, image.height
+    ));
+    win32::place_window(hwnd, bounds, true);
+    renderer.resize(width, height, dpi)?;
+    let scale = dpi.max(96) as f32 / 96.0;
+    let window = (width as f32 / scale, height as f32 / scale);
+    let card = RectF::from_xywh(
+        NOTE_PREVIEW_PADDING_DIP,
+        NOTE_PREVIEW_PADDING_DIP,
+        window.0 - NOTE_PREVIEW_PADDING_DIP * 2.0,
+        window.1 - NOTE_PREVIEW_PADDING_DIP * 2.0,
+    );
+    let bitmap = renderer.upload(image)?;
+    draw_note(renderer, &bitmap, card, 0.0, false)?;
+    *texture = Some(bitmap);
+    if renderer.present(true) == Present::DeviceLost {
+        return Err("device lost while showing a note preview".to_string());
+    }
     Ok(())
 }
 
@@ -541,7 +643,7 @@ fn turn_note_frame(
     bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
     degrees: f32,
 ) -> Result<(), String> {
-    draw_note(renderer, bitmap, degrees)?;
+    draw_note(renderer, bitmap, note_card(), degrees, true)?;
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while leaning the note".to_string());
     }

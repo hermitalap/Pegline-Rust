@@ -27,8 +27,8 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_A, VK_B, VK_BACK, VK_CONTROL, VK_DELETE,
-    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_I, VK_LEFT, VK_OEM_3, VK_RIGHT, VK_S, VK_SHIFT, VK_UP,
-    VK_V, VK_X, VK_Y, VK_Z,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_I, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_S,
+    VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
@@ -830,27 +830,8 @@ fn position_ime(hwnd: HWND, shared: &Shared) {
 
 fn forward_char(shared: &Shared, wparam: WPARAM) {
     let unit = (wparam.0 as u32) & 0xFFFF;
-    match unit {
-        0x08 => shared.send(Command::Key {
-            code: KeyCode::Backspace,
-            shift: false,
-            control: false,
-        }),
-        0x09 => shared.send(Command::Key {
-            code: KeyCode::Tab,
-            shift: false,
-            control: false,
-        }),
-        0x0A | 0x0D => shared.send(Command::Key {
-            code: KeyCode::Enter,
-            shift: false,
-            control: false,
-        }),
-        _ => {
-            if let Some(character) = char::from_u32(unit).filter(|c| !c.is_control()) {
-                shared.send(Command::Char(character));
-            }
-        }
+    if let Some(character) = char::from_u32(unit).filter(|c| !c.is_control()) {
+        shared.send(Command::Char(character));
     }
 }
 
@@ -864,6 +845,12 @@ fn key_code(key: u32) -> Option<KeyCode> {
         k if k == VK_END.0 as u32 => KeyCode::End,
         k if k == VK_BACK.0 as u32 => KeyCode::Backspace,
         k if k == VK_DELETE.0 as u32 => KeyCode::Delete,
+        // Tab and Enter must be handled here, not through `WM_CHAR`: the
+        // system also turns their key-down into a character message, and
+        // handling both deleted two characters per Backspace and would
+        // insert two lines per Enter.
+        k if k == VK_TAB.0 as u32 => KeyCode::Tab,
+        k if k == VK_RETURN.0 as u32 => KeyCode::Enter,
         k if k == VK_ESCAPE.0 as u32 => KeyCode::Escape,
         k if k == VK_A.0 as u32 => KeyCode::A,
         k if k == VK_B.0 as u32 => KeyCode::B,
@@ -961,6 +948,11 @@ mod tests {
         assert_eq!(key_code(VK_LEFT.0 as u32), Some(KeyCode::Left));
         assert_eq!(key_code(VK_END.0 as u32), Some(KeyCode::End));
         assert_eq!(key_code(VK_OEM_3.0 as u32), Some(KeyCode::Backtick));
+        // Backspace, Tab and Enter are key-down commands only: `WM_CHAR`
+        // carries printable text, never these, or every edit would run twice.
+        assert_eq!(key_code(VK_BACK.0 as u32), Some(KeyCode::Backspace));
+        assert_eq!(key_code(VK_TAB.0 as u32), Some(KeyCode::Tab));
+        assert_eq!(key_code(VK_RETURN.0 as u32), Some(KeyCode::Enter));
         assert_eq!(key_code(0x99), None);
     }
 

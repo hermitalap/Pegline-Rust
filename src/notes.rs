@@ -37,6 +37,17 @@ pub const CARD_HEIGHT: f32 = 88.0;
 /// Font size of a short note, DIP. The blank entry's "New note" label uses the
 /// same size so it reads as text that has already been typed on the paper.
 pub const BRIEF_FONT_DIP: f32 = 16.0;
+/// The hover preview's paper, DIP: three times the card, big enough to read a
+/// note without opening the editor (BEHAVIOR §7).
+pub const PREVIEW_WIDTH_DIP: f32 = 408.0;
+pub const PREVIEW_HEIGHT_DIP: f32 = 264.0;
+/// Body size on that sheet, DIP.
+pub const PREVIEW_FONT_DIP: f32 = 15.0;
+/// Text padding on the preview sheet, DIP.
+const PREVIEW_MARGIN_DIP: (f32, f32, f32, f32) = (20.0, 18.0, 20.0, 18.0);
+/// Characters kept on the preview sheet. The card crops earlier; the larger
+/// sheet is the place to read the rest of a long note.
+const PREVIEW_CHARS: usize = 4000;
 /// Supersampling factor; the card shows the note at 136×88 DIP.
 const SCALE: u32 = 3;
 /// Width of the dog-eared corner, DIP.
@@ -291,6 +302,48 @@ pub fn render(text: &str, color_index: usize) -> Option<ImageData> {
     render_checked(text, color_index)
 }
 
+/// Renders the note as the large sheet the hover preview shows, at `scale`
+/// pixels per DIP (clamped to at least 2 so the sheet stays crisp).
+///
+/// It is the same paper and the same summary as the card, only larger: the
+/// preview reads like a magnified note, not like a second editor (BEHAVIOR §7).
+pub fn render_preview(text: &str, color_index: usize, scale: f32) -> Option<ImageData> {
+    let scale = if scale.is_finite() {
+        scale.max(2.0)
+    } else {
+        2.0
+    };
+    let width = (PREVIEW_WIDTH_DIP * scale).round() as u32;
+    let height = (PREVIEW_HEIGHT_DIP * scale).round() as u32;
+    if width < 2 || height < 2 {
+        return None;
+    }
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    paint_paper(&mut pixels, width, height, color_index, scale);
+    let summary = summary(text);
+    let text: String = summary.chars().take(PREVIEW_CHARS).collect();
+    let text = text.trim();
+    if !text.is_empty() {
+        draw_text(
+            &mut pixels,
+            width,
+            height,
+            text,
+            false,
+            false,
+            PREVIEW_FONT_DIP,
+            PREVIEW_MARGIN_DIP,
+            color(color_index).ink,
+            scale,
+        );
+    }
+    // Same as the card: the sheet is opaque so the upload needs alpha 255.
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    Some(ImageData::new(width, height, pixels))
+}
+
 /// Renders only the blank paper (gradient and dog-ear) at `width_dip` x
 /// `height_dip`.
 ///
@@ -404,6 +457,7 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
             font_height,
             margin,
             palette.ink,
+            SCALE as f32,
         );
     }
 
@@ -431,6 +485,7 @@ fn draw_text(
     font_dip: f32,
     margin_dip: (f32, f32, f32, f32),
     ink: u32,
+    scale: f32,
 ) {
     // SAFETY: GDI calls below create and release their own objects. The DIB
     // pixel pointer is owned by the bitmap until DeleteObject.
@@ -478,11 +533,11 @@ fn draw_text(
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-        // The 3x supersampled bitmap is downscaled on the GPU. ClearType
-        // subpixel fringes would be resampled into colour noise, so grayscale
+        // A supersampled bitmap is downscaled on the GPU. ClearType subpixel
+        // fringes would be resampled into colour noise, so grayscale
         // antialiasing is the correct choice here even on an opaque sheet.
         let font = CreateFontW(
-            -((font_dip * SCALE as f32).round() as i32),
+            -((font_dip * scale).round() as i32),
             0,
             0,
             0,
@@ -508,10 +563,10 @@ fn draw_text(
         let _ = SetTextColor(dc, COLORREF(color_ref));
 
         let (left, top, right, bottom) = (
-            (margin_dip.0 * SCALE as f32) as i32,
-            (margin_dip.1 * SCALE as f32) as i32,
-            width as i32 - (margin_dip.2 * SCALE as f32) as i32,
-            height as i32 - (margin_dip.3 * SCALE as f32) as i32,
+            (margin_dip.0 * scale) as i32,
+            (margin_dip.1 * scale) as i32,
+            width as i32 - (margin_dip.2 * scale) as i32,
+            height as i32 - (margin_dip.3 * scale) as i32,
         );
         let mut rect = RECT {
             left,
@@ -588,6 +643,32 @@ mod tests {
     fn a_blank_note_renders_for_the_entry_hover() {
         let image = render("", 0).expect("a blank note bitmap");
         assert_eq!((image.width, image.height), (408, 264));
+        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn the_hover_preview_is_a_large_opaque_sheet_with_text() {
+        // At least two pixels per DIP, even on a 100 % monitor.
+        let image = render_preview("- one\n- two\n\n中文预览", 0, 1.0).expect("a preview sheet");
+        assert_eq!((image.width, image.height), (816, 528));
+        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let blank = render_preview("", 0, 1.0).expect("a blank preview sheet");
+        let drawn = image
+            .bgra
+            .chunks_exact(4)
+            .zip(blank.bgra.chunks_exact(4))
+            .filter(|(in_with_text, in_blank)| in_with_text != in_blank)
+            .count();
+        assert!(drawn > 100, "the preview sheet has no text ({drawn} px)");
+        // A 200 % monitor renders the sheet at its native size.
+        let image = render_preview("x", 1, 2.0).expect("a preview sheet");
+        assert_eq!((image.width, image.height), (816, 528));
+    }
+
+    #[test]
+    fn an_empty_preview_is_still_a_sheet() {
+        let image = render_preview("", 3, 2.0).expect("a blank preview sheet");
+        assert_eq!((image.width, image.height), (816, 528));
         assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 

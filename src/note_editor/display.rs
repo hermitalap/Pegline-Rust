@@ -505,6 +505,75 @@ struct ListItem {
     content: usize,
 }
 
+/// What Enter does on a Markdown list line (NOTE-EDITOR.md §5.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ListEnter {
+    /// The item has content: insert a newline plus this prefix, so the next
+    /// line continues the list.
+    Continue(String),
+    /// The item is empty: remove `marker` instead of adding a line, ending the
+    /// list. Offsets are relative to the line start.
+    End { marker: Range<usize> },
+}
+
+/// The action Enter takes on `raw`, the caret's source line in `block`:
+/// continue a list item, or end the list on an empty item. `None` for a line
+/// that is not a list item (or is inside a code block, where a leading `- ` is
+/// literal), which means a plain newline.
+pub fn list_enter(block: Block, raw: &str) -> Option<ListEnter> {
+    if matches!(block, Block::Code { .. }) {
+        return None;
+    }
+    let item = list_item(raw)?;
+    if raw[item.content..].trim().is_empty() {
+        // The marker and its whitespace go away, leaving a blank line: Enter
+        // once to finish the item, twice to leave the list.
+        return Some(ListEnter::End {
+            marker: 0..raw.len(),
+        });
+    }
+    Some(ListEnter::Continue(next_list_prefix(raw, &item)))
+}
+
+/// The prefix the line after `raw` starts with: the same bullet (a task item
+/// continues unchecked) or the next ordered number.
+fn next_list_prefix(raw: &str, item: &ListItem) -> String {
+    let leading = raw.len() - raw.trim_start_matches(' ').len();
+    let indent = " ".repeat(leading);
+    if item.ordered {
+        return format!("{indent}{}. ", item.number.saturating_add(1));
+    }
+    // Keep the bullet character exactly as written (`-`, `*` or `+`); the
+    // task box is part of the content, not of the marker, and comes back
+    // unchecked so the next item starts undone.
+    let marker = match item.task {
+        Some(_) => &raw[leading..item.content - 4],
+        None => &raw[leading..item.content],
+    };
+    match item.task {
+        Some(_) => format!("{indent}{marker}[ ] "),
+        None => format!("{indent}{marker}"),
+    }
+}
+
+/// The marker Backspace removes when the caret sits at `caret_in_line` on an
+/// item whose content is empty: one Backspace ends the list instead of
+/// nibbling at the auto-inserted `- `. Offsets are relative to the line start.
+pub fn list_backspace_marker(
+    block: Block,
+    raw: &str,
+    caret_in_line: usize,
+) -> Option<Range<usize>> {
+    if matches!(block, Block::Code { .. }) {
+        return None;
+    }
+    let item = list_item(raw)?;
+    if caret_in_line != item.content || raw.len() != item.content {
+        return None;
+    }
+    Some(0..item.content)
+}
+
 fn list_item(raw: &str) -> Option<ListItem> {
     let leading = raw.len() - raw.trim_start_matches(' ').len();
     if leading > 3 {
@@ -917,5 +986,111 @@ mod tests {
         assert_eq!(text_of(line, false), "中文");
         assert_eq!(line.display_to_source(0, false), 2);
         assert_eq!(line.display_to_source(6, false), 10);
+    }
+
+    #[test]
+    fn enter_continues_unordered_and_ordered_lists() {
+        assert_eq!(
+            list_enter(Block::Paragraph, "- one"),
+            Some(ListEnter::Continue("- ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "* two"),
+            Some(ListEnter::Continue("* ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "+ three"),
+            Some(ListEnter::Continue("+ ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "   - indented"),
+            Some(ListEnter::Continue("   - ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "1. one"),
+            Some(ListEnter::Continue("2. ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "9. nine"),
+            Some(ListEnter::Continue("10. ".to_string()))
+        );
+        // Tasks continue as an unticked box, keeping the bullet and indent.
+        assert_eq!(
+            list_enter(Block::Paragraph, "- [x] done"),
+            Some(ListEnter::Continue("- [ ] ".to_string()))
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "  - [ ] todo"),
+            Some(ListEnter::Continue("  - [ ] ".to_string()))
+        );
+        // Plain lines and prose with a dash are not lists.
+        assert_eq!(list_enter(Block::Paragraph, "word - more"), None);
+        assert_eq!(list_enter(Block::Paragraph, ""), None);
+    }
+
+    #[test]
+    fn enter_on_an_empty_item_removes_the_marker_instead() {
+        assert_eq!(
+            list_enter(Block::Paragraph, "- "),
+            Some(ListEnter::End { marker: 0..2 })
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "1. "),
+            Some(ListEnter::End { marker: 0..3 })
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, "  - [ ] "),
+            Some(ListEnter::End { marker: 0..8 })
+        );
+        // Trailing whitespace also ends the item.
+        assert_eq!(
+            list_enter(Block::Paragraph, "-   "),
+            Some(ListEnter::End { marker: 0..4 })
+        );
+        assert_eq!(
+            list_enter(Block::Paragraph, " 10. "),
+            Some(ListEnter::End { marker: 0..5 })
+        );
+    }
+
+    #[test]
+    fn backspace_at_the_marker_end_removes_the_auto_marker() {
+        assert_eq!(list_backspace_marker(Block::Paragraph, "- ", 2), Some(0..2));
+        assert_eq!(
+            list_backspace_marker(Block::Paragraph, "  1. ", 5),
+            Some(0..5)
+        );
+        assert_eq!(
+            list_backspace_marker(Block::Paragraph, "- [ ] ", 6),
+            Some(0..6)
+        );
+        assert_eq!(
+            list_backspace_marker(Block::Paragraph, "1. ", 3),
+            Some(0..3)
+        );
+    }
+
+    #[test]
+    fn backspace_inside_or_after_content_deletes_one_character() {
+        // Caret inside the marker, or after typed content: a normal delete.
+        assert_eq!(list_backspace_marker(Block::Paragraph, "- text", 1), None);
+        assert_eq!(list_backspace_marker(Block::Paragraph, "- text", 2), None);
+        assert_eq!(list_backspace_marker(Block::Paragraph, "- text", 6), None);
+        // A space after the marker means the line is not the auto-inserted one.
+        assert_eq!(list_backspace_marker(Block::Paragraph, "-  ", 2), None);
+        // Not a list at all.
+        assert_eq!(list_backspace_marker(Block::Paragraph, "text", 4), None);
+    }
+
+    #[test]
+    fn code_block_lines_keep_a_leading_dash_literal() {
+        let code = Block::Code { fence: false };
+        assert_eq!(list_enter(code, "- one"), None);
+        assert_eq!(list_enter(code, "1. one"), None);
+        assert_eq!(list_enter(code, "- "), None);
+        assert_eq!(list_backspace_marker(code, "- ", 2), None);
+        // Plus a rule and a quote only look like lists from outside.
+        assert_eq!(list_enter(Block::Paragraph, "---"), None);
+        assert_eq!(list_enter(Block::Paragraph, "> - one"), None);
     }
 }

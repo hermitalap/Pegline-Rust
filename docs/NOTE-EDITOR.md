@@ -13,6 +13,12 @@
 > 中央飞行与挂上后的飞回复用 `window/flight.rs`。中文 IME 已在 200% DPI 用
 > Microsoft Pinyin 实测（组合串下划线、候选窗、提交）；尚未实测：DPI 改变后的
 > 重新居中、三语菜单/气泡、按键到像素延迟。
+>
+> 2026-11-06 的输入/渲染修正：列表回车自动续行与空项退出（§5.4、§6.4），
+> Backspace/Enter 只经 `WM_KEYDOWN` 处理（原先 `WM_CHAR` 再走一遍，一次退格删两个
+> 字符、一次回车插两行），无序列表圆点按文字基线居中（§6.5），以及悬停绳上
+> 便签 0.35 s 后显示大尺寸便签预览（BEHAVIOR §7，代码在 `notes::render_preview`
+> 和 `window/preview.rs` 的 `ShowNoteContent`）。
 
 ---
 
@@ -179,7 +185,7 @@
 
 ### 4.1 位置
 
-以线带的目标布局（不是弹簧当前值）计算，避免卡片滑动时热点跟着漂：
+槽位的左边界、顶部和尺寸按线带的目标布局计算：
 
 ```
 last_slot_center = slot_x(count - 1, count, width)        // 有卡片
@@ -189,7 +195,12 @@ hotspot.top      = card_top(last_slot_center, width, 0)
 hotspot.height   = slot_height(card_height, note)
 ```
 
-- 空线带：热点以 `width / 2 + SPACING * 0.5` 为中心，尺寸同上。
+- 实际水平中心由场景保存的一条水平弹簧给出，参数与卡片行的弹簧完全相同
+  （0.55 s / 0.78）：删除或新增卡片使整行重排时，屏幕上露出的那一角沿同一条
+  曲线滑到新槽位，不会瞬移。UI 从 `FrameSnapshot.note_entry_x` 读取这个值，
+  所以命中区始终跟着画出来的露角。悬停便签的落点仍取上面的目标槽位，飞行终点
+  不跟着弹簧漂移。
+- 空线带：目标槽位以 `width / 2 + SPACING * 0.5` 为中心，尺寸同上。
 - 右边界 clamp 到工作区；可用宽度 < 80 DIP 时隐藏热点（仍可用托盘入口）。
 - 热点与卡片保持 12 DIP 间隙，不与卡片 10 DIP 悬停宽容区重叠。
 - 线带收起时不参与命中。
@@ -337,8 +348,8 @@ hotspot.height   = slot_height(card_height, note)
 | 字符 | 插入；替换选区；走 `WM_CHAR` / IME 提交 |
 | 方向键 | 按源码字符移动；Ctrl 按词；Home/End 行首/行尾；Ctrl+Home/End 文档首尾 |
 | Shift+方向 | 扩展选区 |
-| Backspace/Delete | 删除字符/选区；Ctrl 按词 |
-| Enter | 插入换行；v1 不做列表自动续行（v1.1 可加） |
+| Backspace/Delete | 删除字符/选区；Ctrl 按词。在自动补充的空列表项上，一次 Backspace 删除整个标记（`- ` / `2. ` / `- [ ] `），不必逐字符退 |
+| Enter | 插入换行。列表行自动续行：无序列表重复原标记符（`-`/`*`/`+`，保留缩进，任务项续为未勾选），有序列表序号 +1；空列表项上按 Enter 删除该行标记并结束列表（不留空行） |
 | Tab | 插入 4 个空格；v1 不做焦点遍历 |
 | Ctrl+A | 全选 |
 | Ctrl+C/X/V | 复制/剪切/粘贴（CF_UNICODETEXT；复制的是 Markdown 源码） |
@@ -493,7 +504,8 @@ Run   { text, source_range, style, visible }
 - 撤销：快照式（`text + caret + selection`），连续输入 500 ms 内合并；最多 100 步；笔记体积小，内存可接受。
 - 输入法组合串：见 §6.6。
 - 链接/复选框不响应鼠标点击（v1）；点击它们等同点击文本。
-- 列表自动续行、复选框点击切换、代码块缩进辅助：v1.1 可选，不阻塞 v1。
+- 列表自动续行（§5.4）已实现：回车续标记、空项回车结束列表、空项一次退格删除整个标记。
+  复选框点击切换、代码块缩进辅助仍是 v1.1 可选，不阻塞 v1。
 
 ### 6.5 渲染细节
 
@@ -504,7 +516,7 @@ Run   { text, source_range, style, visible }
 | 粗体/斜体 | DWrite `SetFontWeight` / `SetFontStyle` 按 run 设置 |
 | 行内代码 | Consolas 13.5 DIP；背景 ink 4%；圆角 3 DIP；左右 3 DIP padding |
 | 代码块 | Consolas 13.5 DIP；背景 ink 4%；左侧 2 DIP 竖线；块内行距 1.4 |
-| 列表 | 缩进 18 DIP/级；圆点 4 DIP；有序列表数字右对齐 |
+| 列表 | 缩进 18 DIP/级；圆点 4 DIP，圆心对齐正文基线以上 0.33 em（文字视觉中心，不是行框中心）；有序列表数字右对齐 |
 | 引用 | 左侧 2 DIP 竖线（ink 25%）；内容缩进 12 DIP；ink 80% |
 | 链接 | 下划线；强调蓝 `#0E639C`（纸色上可读） |
 | 分隔线 | 1 DIP，ink 20%，上下 8 DIP |

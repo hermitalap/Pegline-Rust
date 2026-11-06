@@ -280,6 +280,11 @@ pub struct FrameSnapshot {
     pub slide: f32,
     pub width_dip: f32,
     pub cards: Vec<HitCard>,
+    /// Horizontal centre of the note entry's corner, in window DIP, from the
+    /// scene's row spring. `None` when the entry does not fit. The UI uses it
+    /// so the invisible hotspot glides with the drawn corner while the row
+    /// reflows.
+    pub note_entry_x: Option<f32>,
 }
 
 impl FrameSnapshot {
@@ -378,6 +383,7 @@ mod tests {
             slide: 0.0,
             width_dip: 3008.0,
             cards: vec![card(7)],
+            note_entry_x: Some(3008.0 * 0.5 + 87.0),
         }
     }
 

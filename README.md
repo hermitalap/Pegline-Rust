@@ -67,8 +67,10 @@ swapped back and forth without losing the line.
 
 Development switches: `--demo` hangs three generated cards, `--editor-demo`
 opens the annotation editor on a generated picture for four seconds
-(`--editor-hold` keeps it open for interactive checks), and `--panic-test`
-proves the crash log and the process survive a panic. `PEGLINE_LANG=en|es|zh`
+(`--editor-hold` keeps it open for interactive checks), `--note-preview-demo`
+hangs one note with the pointer parked on it so the note hover preview can be
+captured, and `--panic-test` proves the crash log and the process survive a
+panic. `PEGLINE_LANG=en|es|zh`
 forces a UI language for the three-language layout checks. Stress the capture
 pipeline with `pwsh tools\stress.ps1 -Count 200` while the release build is
 running.

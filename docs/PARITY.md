@@ -260,6 +260,7 @@ release 构建在真实桌面上复验，证据只在本机 `target\verify\`（�
 | 6.5 | 不抢焦点 | 预览出现时前台应用仍能打字 |
 | 6.6 | 大图尺寸 | 按屏幕适配，不放大源图，不超出工作区 |
 | 6.7 | 内存 | 预览隐藏后图片释放（probe 的私有内存回落） |
+| 6.8 | 便签预览 | 悬停便签卡片 0.35 s 后，卡片下方出现 408×264 DIP 的放大纸面（玻璃卡片 + 15 DIP 摘要），让开色点/按钮行，点击穿透、不抢焦点；隐藏后释放 |
 
 ## 7. 便签
 
@@ -281,6 +282,7 @@ release 构建在真实桌面上复验，证据只在本机 `target\verify\`（�
 | 7.14 | 中文 IME | 组合串在活跃行内显示并带下划线；候选窗贴光标；提交“你好”插入源码（200% DPI 实测） |
 | 7.15 | DPI 改变 | 窗口按新 DPI 重排并重新居中（待实测） |
 | 7.16 | 内存 | 编辑器打开 +46.0 MB（设备+位图+交换链），关闭后释放；见 PLAN §9 |
+| 7.17 | 列表输入 | 回车自动续 `- ` / `2. `（保留缩进，任务项续为未勾选）；空项回车删除标记并结束列表；空项一次退格删除整个自动标记；一次退格只删一个字符 |
 
 7.7–7.12 已实现并用 `--note-hover-demo` / `--note-editor-demo` /
 `--note-flow-demo` 在真实桌面上截图验证；7.7 的露角与快速展开、7.12 的
@@ -289,6 +291,12 @@ release 构建在真实桌面上复验，证据只在本机 `target\verify\`（�
 （`visual/note-entry-editor-image.png`）；7.12 用 `--note-flow-demo` 逐帧确认返回
 也显示编辑界面（`visual/note-return-editor-image.png`）。7.8 的倾斜另用
 `PEGLINE_NOTE_DEMO_POINTER` 在四个象限逐格截帧测量（`VISUAL-TESTS` §3.11）；
+**7.17 与 6.8（同日追加）**：7.17 用 `--note-flow-demo` 向编辑器注入
+`- alpha⏎beta⏎⌫1. first⏎second⏎⌫abc⌫⏎- end⏎⏎`，保存的 `.txt` 为
+`- alpha / - beta / 1. first / 2. second / ab / - end / Demo note / - one / [x] two`
+（BOM、CRLF 正确；`ab` 证明一次退格只删一个字符，空项退格删掉整个自动标记）；
+圆点基线对齐见 `visual/note-editor-lists-centred.png`；6.8 用
+`--note-preview-demo` 在 200% 桌面截图（`visual/note-card-preview.png`）；
 7.13 的 `discard` 归档路径已用
 `--note-storage-demo` 实测（临时便签编辑、保存、归档、清理），叉/右键/全部取下/
 容量淘汰共用 `archive_note`，但没有逐一点击；7.14 已用 Microsoft Pinyin 在

@@ -20,6 +20,11 @@ const COPIED_SECONDS: f64 = 1.2;
 const FADE_SECONDS: f32 = 0.16;
 /// Delay for the hide animation, seconds.
 const HIDE_SECONDS: f32 = 0.22;
+/// Response of the row's horizontal spring, seconds.
+const ROW_RESPONSE: f32 = 0.55;
+/// Damping ratio of the row's horizontal spring. The note entry uses the same
+/// curve, so it reflows exactly with the last hanging card.
+const ROW_DAMPING: f32 = 0.78;
 
 /// What the UI thread asks the line to do.
 #[derive(Debug)]
@@ -135,7 +140,7 @@ impl Card {
             id: spec.id,
             card_size: spec.card_size,
             tilt: spec.tilt,
-            x: Spring::new(0.55, 0.78, slot_x),
+            x: Spring::new(ROW_RESPONSE, ROW_DAMPING, slot_x),
             drop: Spring::new(0.42, 0.72, -46.0),
             swing: Spring::new(1.0, 1.0, 0.0),
             press: Spring::new(0.3, 0.6, 1.0),
@@ -319,6 +324,10 @@ pub struct Scene {
     hide_from: f32,
     /// 0 = the entry note is hidden, 1 = its 16 DIP top corner is showing.
     note_peek: Spring,
+    /// Horizontal centre of the entry's peeking corner, in window DIP. It
+    /// follows the row on the same spring, so removing a card slides the
+    /// corner instead of teleporting it to the new slot.
+    note_peek_x: Spring,
     cards: Vec<Card>,
     hover: Option<CardId>,
     hover_action: Option<(CardId, ActionKind)>,
@@ -349,6 +358,11 @@ impl Scene {
     ) -> Self {
         let scale = dpi as f32 / 96.0;
         let width_dip = width_px as f32 / scale;
+        // The entry starts at the empty line's slot, right of the centre where
+        // the first card will hang.
+        let note_peek_x = layout::note_hotspot(0, width_dip, layout::NOTE_CARD_HEIGHT, true)
+            .map(|hotspot| hotspot.center().0)
+            .unwrap_or(width_dip * 0.5 + layout::SPACING * 0.5);
         let mut scene = Self {
             width_dip,
             scale,
@@ -358,6 +372,7 @@ impl Scene {
             hide_t: -1.0,
             hide_from: layout::HIDDEN_SLIDE,
             note_peek: Spring::new(0.22, 1.0, 0.0),
+            note_peek_x: Spring::new(ROW_RESPONSE, ROW_DAMPING, note_peek_x),
             cards: Vec::new(),
             hover: None,
             hover_action: None,
@@ -622,6 +637,28 @@ impl Scene {
         for (card, target) in self.cards.iter_mut().zip(targets) {
             card.x.target = target;
         }
+        // The entry hangs off the last card: when the row re-centres after a
+        // removal, its corner must glide on the same spring, not jump. While
+        // the corner is hidden there is nothing to see, so snap to the new
+        // slot and keep the frame loop asleep.
+        if let Some(center) = self.note_entry_center() {
+            self.note_peek_x.target = center;
+            if self.note_peek.value <= 0.001 {
+                self.note_peek_x.snap(center);
+            }
+        }
+    }
+
+    /// Horizontal centre of the invisible note entry in its target slot, in
+    /// window DIP. `None` when the entry is clamped off the screen.
+    fn note_entry_center(&self) -> Option<f32> {
+        let (card_height, note) = self
+            .cards
+            .last()
+            .map(|card| (card.card_size.1, card.note))
+            .unwrap_or((layout::NOTE_CARD_HEIGHT, true));
+        layout::note_hotspot(self.cards.len(), self.width_dip, card_height, note)
+            .map(|hotspot| hotspot.center().0)
     }
 
     /// Hides an existing card under the flight that is bringing it back, or
@@ -673,6 +710,19 @@ impl Scene {
         animating |= !self.note_peek.settled();
         if (self.note_peek.value - peek_before).abs() > 0.0001 {
             self.dirty = true;
+        }
+        if self.note_peek.value > 0.001 {
+            // The corner is visible (or still retracting): let it glide along
+            // with the row instead of snapping to the new slot.
+            let x_before = self.note_peek_x.value;
+            self.note_peek_x.step(dt);
+            if (self.note_peek_x.value - x_before).abs() > 0.0001 {
+                self.dirty = true;
+            }
+            animating |= !self.note_peek_x.settled();
+        } else {
+            // Nothing is drawn; start the next peek from the right slot.
+            self.note_peek_x.snap(self.note_peek_x.target);
         }
 
         // Slide: a spring when opening, a 0.22 s quadratic ease when closing.
@@ -813,6 +863,9 @@ impl Scene {
         snapshot.scale = self.scale;
         snapshot.slide = self.slide.value;
         snapshot.width_dip = self.width_dip;
+        // The UI keeps the entry hotspot under the drawn corner; the corner
+        // glides with the row while a card is removed or added.
+        snapshot.note_entry_x = self.note_entry_center().map(|_| self.note_peek_x.value);
         snapshot.cards.clear();
         snapshot.cards.reserve(self.cards.len());
         for card in &self.cards {
@@ -882,17 +935,8 @@ impl Scene {
         ));
         renderer.draw_rope(self.width_dip);
 
-        if self.note_peek.value > 0.001 {
-            let (card_height, note) = self
-                .cards
-                .last()
-                .map(|card| (card.card_size.1, card.note))
-                .unwrap_or((layout::NOTE_CARD_HEIGHT, true));
-            if let Some(hotspot) =
-                layout::note_hotspot(self.cards.len(), self.width_dip, card_height, note)
-            {
-                self.draw_note_peek(renderer, hotspot);
-            }
+        if self.note_peek.value > 0.001 && self.note_entry_center().is_some() {
+            self.draw_note_peek(renderer, self.note_peek_x.value);
         }
 
         if self.hint_alpha > 0.01 && self.cards.is_empty() {
@@ -928,14 +972,15 @@ impl Scene {
     ///
     /// The line strip's window starts at the top edge, so the target clips the
     /// rest of the card without a bitmap mask. The spring slides the card down
-    /// from fully hidden to [`layout::NOTE_PEEK_VISIBLE_DIP`].
-    fn draw_note_peek(&self, renderer: &mut Renderer, hotspot: RectF) {
+    /// from fully hidden to [`layout::NOTE_PEEK_VISIBLE_DIP`], and `entry_x`
+    /// is the animated slot centre that lets it reflow with the row.
+    fn draw_note_peek(&self, renderer: &mut Renderer, entry_x: f32) {
         let reveal = self.note_peek.value.clamp(0.0, 1.0);
         if reveal <= 0.001 {
             return;
         }
         let (card_w, card_h) = layout::note_card_size();
-        let (cx, base_cy) = layout::note_peek_center(hotspot.center().0);
+        let (cx, base_cy) = layout::note_peek_center(entry_x);
         let cy = base_cy - (1.0 - reveal) * layout::NOTE_PEEK_VISIBLE_DIP;
         // `Matrix3x2::rotation` takes degrees, like the rest of the scene.
         let angle = layout::NOTE_PEEK_ANGLE_DEG;
@@ -1222,6 +1267,108 @@ mod tests {
         for corner in &screen[..3] {
             assert!(corner.1 < 0.0, "corner {corner:?} is above the top edge");
         }
+    }
+
+    #[test]
+    fn a_removed_card_glides_the_entry_instead_of_teleporting_it() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            crate::render::ActionsLayout::default(),
+            32.0,
+            std::sync::Arc::clone(&snapshot),
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.snap(0.0);
+        for id in 1..=3 {
+            let mut item = card();
+            item.id = id;
+            scene.cards.push(item);
+        }
+        for (index, item) in scene.cards.iter_mut().enumerate() {
+            item.x.snap(layout::slot_x(index, 3, 1920.0));
+        }
+        scene.relayout_cards();
+        scene.note_peek.snap(1.0); // the pointer is over the strip
+        let old_entry = layout::note_hotspot(3, 1920.0, 112.0, false)
+            .expect("entry")
+            .center()
+            .0;
+        assert!((scene.note_peek_x.value - old_entry).abs() < 0.01);
+
+        // Removing the leading card re-centres the row: the last card and its
+        // entry move half a spacing to the left.
+        scene.cards.retain(|item| item.id != 1);
+        scene.relayout_cards();
+        let new_entry = layout::note_hotspot(2, 1920.0, 112.0, false)
+            .expect("entry")
+            .center()
+            .0;
+        assert!((scene.note_peek_x.target - new_entry).abs() < 0.01);
+        assert!(
+            (scene.note_peek_x.value - old_entry).abs() < 0.01,
+            "relayout teleported the visible corner"
+        );
+
+        scene.update(1.0 / 60.0, 0.0);
+        let value = scene.note_peek_x.value;
+        assert!(
+            value < old_entry - 0.01,
+            "the corner did not start gliding: {value}"
+        );
+        assert!(
+            value > new_entry,
+            "the corner snapped to the new slot: {value} vs {new_entry}"
+        );
+        assert_eq!(
+            snapshot.lock().expect("snapshot").note_entry_x,
+            Some(value),
+            "the UI hotspot must follow the animated corner"
+        );
+
+        // Both run the same spring from the same offset, so the entry keeps
+        // exactly the last card's distance for the whole reflow.
+        let offset = old_entry - layout::slot_x(2, 3, 1920.0);
+        for _ in 0..180 {
+            scene.update(1.0 / 60.0, 0.0);
+            let last = scene.cards.last().expect("last card").x.value;
+            assert!(
+                (scene.note_peek_x.value - last - offset).abs() < 0.01,
+                "entry lagged the row: {} vs {}",
+                scene.note_peek_x.value,
+                last
+            );
+        }
+        assert!((scene.note_peek_x.value - new_entry).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_hidden_entry_snaps_to_the_new_slot() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            crate::render::ActionsLayout::default(),
+            32.0,
+            snapshot,
+        );
+        for id in 1..=3 {
+            let mut item = card();
+            item.id = id;
+            scene.cards.push(item);
+        }
+        scene.relayout_cards();
+        let old_entry = scene.note_peek_x.value;
+        scene.cards.retain(|item| item.id != 1);
+        scene.relayout_cards();
+        assert!(scene.note_peek_x.value < old_entry);
+        assert_eq!(scene.note_peek_x.value, scene.note_peek_x.target);
     }
 
     #[test]

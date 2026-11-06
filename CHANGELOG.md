@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- **The note editor continues Markdown lists.** Enter on a list line starts the
+  next item with the same bullet (indentation kept, a task continues unchecked)
+  or the following ordered number; Enter on an empty item removes the marker and
+  ends the list, and one Backspace deletes the whole auto-inserted marker.
+- **Hovering a note on the line shows a preview, like a picture.** After the
+  same 0.35 s dwell, the note's summary is rendered as a 408×264 DIP sheet
+  inside the note's glass card and hangs below the card's controls. It is
+  rendered on a worker, is click-through like a photo preview, and is released
+  when hidden. `--note-preview-demo` parks a synthetic pointer on one demo note
+  for the visual acceptance run.
+
+### Fixes
+
+- The note editor no longer deletes two characters per Backspace (and inserts
+  two lines per Enter): Tab, Enter and Backspace are handled from the key-down
+  message only, not again through `WM_CHAR`.
+- The unordered-list bullet is centred on the text's optical middle (0.33 em
+  above the baseline, measured with Microsoft YaHei UI) instead of on the line
+  box, whose spare 1.55 line spacing sits below the baseline and dropped the
+  dot onto the descenders. The task checkbox follows the same line.
+- The note editor no longer logs `EndDraw(paper): D2DERR_WRONG_STATE` when it
+  opens. The paper image cached for editor flights painted its inline-code
+  backgrounds and selection into the window's device context instead of the
+  WIC target it was drawing into, which corrupted the context state; both now
+  use the target passed to the paint routine.
+- The new-note entry no longer jumps sideways when a picture or note in front of
+  it is removed. The peeking corner and its hit area ride the same horizontal
+  spring as the row, so the entry slides to its new slot with the rest of the
+  line instead of snapping there.
+
 ## 2.2.0 — 2026-11-06
 
 ### Changes

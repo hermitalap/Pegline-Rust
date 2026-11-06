@@ -192,6 +192,9 @@ struct LaidLine {
     text_height: f32,
     box_height: f32,
     indent: f32,
+    /// Font size of the block, DIP. The first baseline sits at 0.8 of it, which
+    /// is how the list markers find the text they belong to.
+    font_size: f32,
     text: String,
     layout: Option<IDWriteTextLayout>,
     /// Composition range in `text`, display bytes.
@@ -623,9 +626,9 @@ impl EditorState {
             }
             KeyCode::Up => self.vertical(-1, shift),
             KeyCode::Down => self.vertical(1, shift),
-            KeyCode::Backspace => self.doc.backspace(now),
+            KeyCode::Backspace => self.backspace(now),
             KeyCode::Delete => self.doc.delete_forward(now),
-            KeyCode::Enter => self.doc.insert("\n", now),
+            KeyCode::Enter => self.enter(now),
             KeyCode::Tab => self.doc.insert("    ", now),
             KeyCode::Escape => {
                 self.enabled = false;
@@ -663,6 +666,55 @@ impl EditorState {
         self.blink_at = now + BLINK_SECONDS;
         self.caret_on = true;
         self.dirty = true;
+    }
+
+    /// The Markdown block of the line the caret is on, from the current
+    /// projection. The list commands use it to keep fenced code literal.
+    fn caret_block(&self) -> Block {
+        self.display
+            .line_at(self.doc.caret())
+            .map(|line| line.block)
+            .unwrap_or(Block::Paragraph)
+    }
+
+    /// Enter continues a Markdown list: the next line repeats the bullet or the
+    /// following number, so a list can be typed without writing every marker.
+    /// On an empty item the marker is removed instead of adding a line, which
+    /// both deletes the auto-inserted `- ` and ends the list on the second
+    /// Enter (NOTE-EDITOR.md §5.4).
+    fn enter(&mut self, now: f64) {
+        let line = self.doc.caret_line();
+        let action = display::list_enter(self.caret_block(), &self.doc.text()[line.clone()]);
+        match action {
+            Some(display::ListEnter::Continue(prefix)) => {
+                self.doc.insert(&format!("\n{prefix}"), now);
+            }
+            Some(display::ListEnter::End { marker }) => {
+                self.doc
+                    .delete_range(line.start + marker.start..line.start + marker.end, now);
+            }
+            None => self.doc.insert("\n", now),
+        }
+    }
+
+    /// Backspace removes a whole auto-inserted list marker when the item is
+    /// empty; anywhere else it deletes one character.
+    fn backspace(&mut self, now: f64) {
+        if !self.doc.has_selection() {
+            let line = self.doc.caret_line();
+            let caret_in_line = self.doc.caret().saturating_sub(line.start);
+            let marker = display::list_backspace_marker(
+                self.caret_block(),
+                &self.doc.text()[line.clone()],
+                caret_in_line,
+            );
+            if let Some(marker) = marker {
+                self.doc
+                    .delete_range(line.start + marker.start..line.start + marker.end, now);
+                return;
+            }
+        }
+        self.doc.backspace(now);
     }
 
     fn vertical(&mut self, delta: i32, extend: bool) {
@@ -841,6 +893,7 @@ impl EditorState {
                 text_height,
                 box_height,
                 indent,
+                font_size: metrics.font_size,
                 text,
                 layout,
                 composition,
@@ -1162,13 +1215,13 @@ impl EditorState {
                         task,
                     } => self.paint_list_marker(
                         context,
-                        &line.block,
                         ordered,
                         number,
                         task,
                         origin_x,
                         top,
                         height,
+                        line.font_size,
                         line.indent,
                     ),
                     _ => {}
@@ -1176,11 +1229,11 @@ impl EditorState {
             }
             // Inline code background.
             if !line.active {
-                self.paint_inline_code(line, origin_x, top);
+                self.paint_inline_code(context, line, origin_x, top);
             }
         }
         // Selection goes behind the glyphs.
-        self.paint_selection(origin_x);
+        self.paint_selection(context, origin_x);
         // Text.
         for line in &self.lines {
             let Some(layout) = line.layout.as_ref() else {
@@ -1208,16 +1261,22 @@ impl EditorState {
     fn paint_list_marker(
         &self,
         context: &ID2D1RenderTarget,
-        block: &Block,
         ordered: bool,
         number: u32,
         task: Option<bool>,
         origin_x: f32,
         top: f32,
         height: f32,
+        font_size: f32,
         indent: f32,
     ) {
-        let center_y = top + height * 0.5;
+        // Centre the bullet and the task box on the glyphs, not on the line
+        // box. The first baseline sits at 0.8 em (see [`Assets::layout`]) and
+        // the spare room of the 1.55 line spacing lies below it, so the box
+        // centre would drop the bullet onto the descenders. 0.33 em above the
+        // baseline is the optical centre of the bullet glyph and of mixed
+        // CJK/Latin text (measured with Microsoft YaHei UI).
+        let center_y = top + font_size * (0.8 - 0.33);
         // SAFETY: drawing on the paper target with live brushes.
         unsafe {
             match (ordered, task) {
@@ -1307,10 +1366,15 @@ impl EditorState {
                 }
             }
         }
-        let _ = block;
     }
 
-    fn paint_inline_code(&self, line: &LaidLine, origin_x: f32, top: f32) {
+    fn paint_inline_code(
+        &self,
+        context: &ID2D1RenderTarget,
+        line: &LaidLine,
+        origin_x: f32,
+        top: f32,
+    ) {
         let Some(layout) = line.layout.as_ref() else {
             return;
         };
@@ -1351,9 +1415,7 @@ impl EditorState {
                                 radiusX: 3.0,
                                 radiusY: 3.0,
                             };
-                            self.surface
-                                .context
-                                .FillRoundedRectangle(&rect, &self.assets.code_background);
+                            context.FillRoundedRectangle(&rect, &self.assets.code_background);
                         }
                     }
                 }
@@ -1362,7 +1424,7 @@ impl EditorState {
         }
     }
 
-    fn paint_selection(&self, origin_x: f32) {
+    fn paint_selection(&self, context: &ID2D1RenderTarget, origin_x: f32) {
         let Some(selection) = self.doc.selection() else {
             return;
         };
@@ -1414,9 +1476,7 @@ impl EditorState {
                                 + metric.top
                                 + metric.height,
                         };
-                        self.surface
-                            .context
-                            .FillRectangle(&rect, &self.assets.selection);
+                        context.FillRectangle(&rect, &self.assets.selection);
                     }
                 }
             }

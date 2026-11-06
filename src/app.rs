@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, VK_LBUTTON,
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, VK_LBUTTON, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, HHOOK, IDYES,
@@ -24,7 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
     SetTimer, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     UnhookWindowsHookEx, WH_MOUSE_LL, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{PCWSTR, w};
 
@@ -49,7 +49,7 @@ use crate::win32::{self, Monitor};
 use crate::window::flight::{Flight, FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
-use crate::window::preview::{NOTE_PADDING_DIP, Preview};
+use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_window_dip};
 use crate::window::{self, WM_APP_QUIT, WM_APP_WAKE, WM_TRAY_CALLBACK};
 
 const CLASS_NAME: PCWSTR = w!("PeglineMessage");
@@ -589,6 +589,11 @@ struct App {
     note_storage_id: Option<CardId>,
     note_storage_path: Option<PathBuf>,
     note_storage_archived: Option<PathBuf>,
+    /// `--note-preview-demo`: hang one note, park a synthetic pointer on its
+    /// card and keep the line down, so the note hover preview can be captured
+    /// deterministically without restoring the user's cards.
+    note_preview_demo: bool,
+    note_preview_demo_card: Option<CardId>,
     /// How many restored cards are still decoding; `pegged.txt` is not
     /// rewritten until they are all back.
     restore_pending: usize,
@@ -695,6 +700,8 @@ impl App {
             note_discard_stage: 0,
             note_discard_at: 0.0,
             note_storage_demo: std::env::args().any(|arg| arg == "--note-storage-demo"),
+            note_preview_demo: std::env::args().any(|arg| arg == "--note-preview-demo"),
+            note_preview_demo_card: None,
             note_storage_stage: 0,
             note_storage_at: 0.0,
             note_storage_id: None,
@@ -762,7 +769,12 @@ impl App {
             Err(error) => logging::error(format!("watcher: {error}")),
         }
 
-        self.restore_pegged();
+        // `--note-preview-demo` deliberately starts from an empty line: the
+        // user's pegged cards would sit around the demo note and make the
+        // captured preview depend on their number.
+        if !self.note_preview_demo {
+            self.restore_pegged();
+        }
 
         // Drop the line on every launch so a start is visible instead of just
         // a tray icon appearing. The first run keeps the longer welcome with
@@ -787,6 +799,7 @@ impl App {
         // user's call, never ours.
         if !self.settings.catch_offered()
             && !self.demo
+            && !self.note_preview_demo
             && !std::env::args().any(|arg| arg == "--editor-demo")
         {
             self.catch_offer_at = Some(self.start_time + 1.2);
@@ -794,6 +807,9 @@ impl App {
 
         if self.demo {
             self.install_demo_cards();
+        }
+        if self.note_preview_demo {
+            self.start_note_preview_demo();
         }
         if std::env::args().any(|arg| arg == "--editor-demo") {
             self.install_editor_demo();
@@ -1206,6 +1222,18 @@ impl App {
                 self.reveal(false, 0.0);
             }
         }
+        if self.note_preview_demo {
+            // Same idea: a synthetic pointer sits on the demo note, so the
+            // strip has to stay down while the real mouse is elsewhere.
+            self.keep_open = true;
+            self.pinned = true;
+            if !self.is_present {
+                self.present();
+            }
+            if !self.is_revealed {
+                self.reveal(false, 0.0);
+            }
+        }
         if self.note_flow_demo {
             self.keep_open = true;
             if !self.is_present {
@@ -1222,18 +1250,9 @@ impl App {
                 }
                 1 if now - self.note_flow_at > 0.8 => {
                     if let Some(editor) = self.note_editor.as_ref() {
-                        for character in "Demo note\n- one\n- [x] two".chars() {
-                            // SAFETY: our own editor window; the message is a
-                            // plain WM_CHAR with the character in wParam.
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(editor.hwnd()),
-                                    WM_CHAR,
-                                    WPARAM(character as usize),
-                                    LPARAM(0),
-                                );
-                            }
-                        }
+                        // The list line's newline now continues "- " by itself,
+                        // so the task line must not repeat the bullet.
+                        post_note_text(editor.hwnd(), "Demo note\n- one\n[x] two");
                     }
                     self.note_flow_stage = 2;
                     self.note_flow_at = now;
@@ -1293,17 +1312,7 @@ impl App {
                 }
                 1 if now - self.note_storage_at > 1.2 => {
                     if let Some(editor) = self.note_editor.as_ref() {
-                        for character in " edited".chars() {
-                            // SAFETY: our own editor window; a plain WM_CHAR.
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(editor.hwnd()),
-                                    WM_CHAR,
-                                    WPARAM(character as usize),
-                                    LPARAM(0),
-                                );
-                            }
-                        }
+                        post_note_text(editor.hwnd(), " edited");
                     }
                     self.note_storage_stage = 2;
                     self.note_storage_at = now;
@@ -1867,7 +1876,19 @@ impl App {
     }
 
     fn update_pointer(&mut self, now: f64) {
-        let Some((x, y)) = win32::cursor_pos() else {
+        let pointer = win32::cursor_pos();
+        // `--note-preview-demo`: the parked demo note's card is the pointer, so
+        // the hover preview appears while the real mouse stays put.
+        let demo_pointer = self
+            .note_preview_demo_card
+            .and_then(|id| self.current_card_px(id))
+            .map(|card| {
+                (
+                    card.center_x().round() as i32,
+                    card.center_y().round() as i32,
+                )
+            });
+        let Some((x, y)) = demo_pointer.or(pointer) else {
             return;
         };
         let Some(screen) = win32::monitor_at(x, y) else {
@@ -2821,7 +2842,10 @@ impl App {
     }
 
     fn save_pegged(&mut self) {
-        if self.restore_pending > 0 {
+        // `--note-preview-demo` hangs a throw-away note on a line that did not
+        // restore the user's cards; writing it would replace their pegged list
+        // with a demo path.
+        if self.note_preview_demo || self.restore_pending > 0 {
             return;
         }
         let paths: Vec<PathBuf> = self.items.iter().map(|item| item.path.clone()).collect();
@@ -2990,18 +3014,26 @@ impl App {
     // ---- hover preview ----------------------------------------------------
 
     /// The invisible note entry to the right of the last card, in window DIP
-    /// (NOTE-EDITOR.md §4.1). Uses the target layout, not the spring values.
+    /// (NOTE-EDITOR.md §4.1). The slot, top and height use the target layout;
+    /// the horizontal position comes from the scene's row spring so the
+    /// hotspot glides with the drawn corner while a removal re-centres the row.
     fn note_entry_hotspot(&self) -> Option<RectF> {
         let mut hotspot = self.note_entry_hotspot_layout()?;
         let overlay = self.overlay.as_ref()?;
         let snapshot = overlay.snapshot();
         let snapshot = snapshot.lock().ok()?;
+        if let Some(center_x) = snapshot.note_entry_x {
+            let width = hotspot.width();
+            hotspot.left = center_x - width * 0.5;
+            hotspot.right = hotspot.left + width;
+        }
         hotspot.top += snapshot.slide;
         Some(hotspot)
     }
 
-    /// The hotspot at the line's target layout (slide 0), used as the hover
-    /// note's home so it does not inherit a mid-reveal spring offset.
+    /// The hotspot at the line's target layout (slide 0). It supplies the slot
+    /// and size, and is the hover note's home so the note lands on the
+    /// theoretical slot instead of chasing the row spring.
     fn note_entry_hotspot_layout(&self) -> Option<RectF> {
         let overlay = self.overlay.as_ref()?;
         let width_dip = overlay.width_px() as f32 / overlay.scale().max(0.1);
@@ -3365,8 +3397,10 @@ impl App {
     /// Where the peeking corner starts, in screen pixels: the tilted card's
     /// centre, almost entirely above the line strip. The visible corner is at
     /// the entry's x, [`layout::NOTE_PEEK_VISIBLE_DIP`] below the top edge.
+    /// Uses the same animated x as the drawn corner, so entering the entry
+    /// during a reflow starts the full note where the corner already is.
     fn note_entry_peek_center_px(&self, scale: f32) -> Option<(f32, f32)> {
-        let hotspot = self.note_entry_hotspot_layout()?;
+        let hotspot = self.note_entry_hotspot()?;
         let overlay = self.overlay.as_ref()?;
         let rect = win32::window_rect(overlay.hwnd())?;
         let (center_x, center_y) = layout::note_peek_center(hotspot.center().0);
@@ -3494,8 +3528,9 @@ impl App {
         }
     }
 
-    /// Dwells on the hovered photo, decodes it at display size and shows the
-    /// preview. Notes are excluded, exactly like the WPF line (BEHAVIOR §7).
+    /// Dwells on the hovered card and shows its large preview: the decoded
+    /// photo for a picture, or a much larger copy of the note's paper for a
+    /// sticky note (BEHAVIOR §7).
     fn update_preview(&mut self, now: f64) {
         // The entry hover owns the pooled preview window while it is visible.
         if self.note_hover.is_some() {
@@ -3506,7 +3541,7 @@ impl App {
                 && self.is_revealed
                 && self.pressed.is_none()
                 && !self.menu_open
-                && self.items.iter().any(|item| item.id == *id && !item.note)
+                && self.items.iter().any(|item| item.id == *id)
         });
         let Some(id) = wanted else {
             self.hide_preview();
@@ -3536,14 +3571,48 @@ impl App {
         // did the same). Without this the big image covers the buttons.
         let below = (layout::below(item.note) * scale).round() as i32;
         let anchor = RectI::new(card.left, card.top, card.right, card.bottom + below);
-        let bounds = preview::bounds(item.size_px, anchor, screen.work, scale);
+        let note = item.note;
+        let bounds = if note {
+            // A note is not scaled to a source size: its preview is always the
+            // same large sheet, so long notes stay readable.
+            preview::fixed_bounds(note_preview_window_dip(), anchor, screen.work, scale)
+        } else {
+            preview::bounds(item.size_px, anchor, screen.work, scale)
+        };
         if bounds.is_empty() {
+            return;
+        }
+        let dpi = screen.dpi;
+        let tx = self.events_tx.clone();
+        if note {
+            let text = item.text.clone();
+            let path = item.path.clone();
+            let color = item.color;
+            // At least two pixels per DIP, so a 100 % monitor still gets a
+            // crisp sheet when it is drawn at its DIP size.
+            let render_scale = scale.max(2.0);
+            let _ = std::thread::Builder::new()
+                .name("pegline-note-preview".to_string())
+                .spawn(move || {
+                    let text = text.or_else(|| notes::read(&path)).unwrap_or_default();
+                    match notes::render_preview(&text, color, render_scale) {
+                        Some(image) => {
+                            let _ = tx.send(Event::PreviewReady {
+                                id,
+                                version,
+                                image,
+                                bounds,
+                                dpi,
+                            });
+                            window::wake(HWND::default());
+                        }
+                        None => logging::error("note preview render failed"),
+                    }
+                });
             return;
         }
         let decode = preview::decode_max(bounds, scale);
         let path = item.path.clone();
-        let dpi = screen.dpi;
-        let tx = self.events_tx.clone();
         let _ = std::thread::Builder::new()
             .name("pegline-preview".to_string())
             .spawn(move || match wic::decode_scaled(&path, decode) {
@@ -3585,9 +3654,10 @@ impl App {
         let Some(item) = self.items.iter().find(|item| item.id == id) else {
             return;
         };
-        if item.note || !item.path.exists() || !self.is_present || !self.is_revealed {
+        if !item.path.exists() || !self.is_present || !self.is_revealed {
             return;
         }
+        let note = item.note;
         if self.preview.is_none() {
             match Preview::create() {
                 Ok(preview) => {
@@ -3601,7 +3671,11 @@ impl App {
             }
         }
         if let Some(preview) = self.preview.as_mut() {
-            preview.show(image, bounds, dpi);
+            if note {
+                preview.show_note_content(image, bounds, dpi);
+            } else {
+                preview.show(image, bounds, dpi);
+            }
             self.preview_idle_at = None;
         }
     }
@@ -3875,6 +3949,46 @@ impl App {
         self.note_storage_path = Some(path.clone());
         logging::trace(format!("storage demo: created {}", path.display()));
         self.open_note_editor(id);
+    }
+
+    /// `--note-preview-demo`: one note on an otherwise empty line, with a
+    /// synthetic pointer parked on its card. It makes the note hover preview of
+    /// BEHAVIOR §7 reproducible by hand and by the visual acceptance run.
+    fn start_note_preview_demo(&mut self) {
+        let directory = win32::local_dir().join("demo");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            logging::error(format!("note preview demo dir: {error}"));
+            return;
+        }
+        let text = "# 便签预览\n\n- 第一项\n- [x] 已完成\n- [ ] 待办\n\n1. 有序一项\n2. 有序二项\n\n> 引用 `代码` 和 **粗体**。\n\nA longer line of English text so the preview wraps inside the sheet."
+            .to_string();
+        let path = directory.join("note-preview-demo.txt");
+        if let Err(error) = std::fs::write(&path, text.as_bytes()) {
+            logging::error(format!("note preview demo write: {error}"));
+            return;
+        }
+        let Some(image) = notes::render(&text, 0) else {
+            logging::error("note preview demo render failed");
+            return;
+        };
+        let id = self.alloc_id();
+        self.note_preview_demo_card = Some(id);
+        self.add_item(
+            id,
+            path,
+            false,
+            (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
+            image,
+            None,
+            false,
+            false,
+            true,
+            0,
+            Some(text),
+        );
+        self.present();
+        self.reveal(true, 0.0);
+        logging::trace("note preview demo: card hung");
     }
 
     fn verify_note_storage_save(&self) {
@@ -5504,6 +5618,28 @@ fn shortcut_label(key: &str, registered: bool) -> String {
         key.to_string()
     } else {
         format!("{key}{}", i18n::s().in_use_by_another_app)
+    }
+}
+
+/// Types `text` into the note editor the way the keyboard does: printable
+/// characters as `WM_CHAR`, a newline as a Return key-down. The scripted note
+/// demos drive the real input path this way.
+fn post_note_text(hwnd: HWND, text: &str) {
+    for character in text.chars() {
+        // SAFETY: our own editor window; both messages carry their payload in
+        // wParam and are handled by its window procedure.
+        unsafe {
+            if character == '\n' {
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_KEYDOWN,
+                    WPARAM(VK_RETURN.0 as usize),
+                    LPARAM(0),
+                );
+            } else {
+                let _ = PostMessageW(Some(hwnd), WM_CHAR, WPARAM(character as usize), LPARAM(0));
+            }
+        }
     }
 }
 
