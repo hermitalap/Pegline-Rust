@@ -55,6 +55,27 @@ pub enum Mark {
     },
 }
 
+/// An IME composition in progress: the pinyin shown inside the text box while
+/// the input method has not produced a result yet. It never enters `marks`, the
+/// undo history or the saved PNG — it lives only as long as the IME is
+/// composing, and only [`Doc::commit_composition`] turns it into text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Composition {
+    text: String,
+    /// Caret offset inside `text`, in bytes.
+    cursor: usize,
+}
+
+impl Composition {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
 /// Squared distance from `point` to the segment `from`–`to`.
 pub fn segment_distance_squared(from: (f32, f32), to: (f32, f32), point: (f32, f32)) -> f32 {
     let dx = to.0 - from.0;
@@ -122,6 +143,8 @@ pub struct Doc {
     redo: Vec<Vec<Mark>>,
     /// The text mark currently being typed, if any.
     typing: Option<usize>,
+    /// The IME composition shown in that text mark, if any.
+    composition: Option<Composition>,
 }
 
 /// Undo steps kept; older snapshots are dropped.
@@ -135,6 +158,7 @@ impl Doc {
             undo: Vec::new(),
             redo: Vec::new(),
             typing: None,
+            composition: None,
         }
     }
 
@@ -192,6 +216,7 @@ impl Doc {
     /// Undoes the last change; returns whether anything changed.
     pub fn undo(&mut self) -> bool {
         self.typing = None;
+        self.composition = None;
         match self.undo.pop() {
             Some(previous) => {
                 let current = std::mem::replace(&mut self.marks, previous);
@@ -205,6 +230,7 @@ impl Doc {
     /// Re-applies the last undone change.
     pub fn redo(&mut self) -> bool {
         self.typing = None;
+        self.composition = None;
         match self.redo.pop() {
             Some(next) => {
                 let current = std::mem::replace(&mut self.marks, next);
@@ -225,6 +251,7 @@ impl Doc {
 
     /// Starts a text mark at `origin` (source pixels) and returns its index.
     pub fn begin_text(&mut self, origin: (f32, f32), color: u32, size: f32) -> usize {
+        self.composition = None;
         self.snapshot();
         self.marks.push(Mark::Text {
             origin,
@@ -236,8 +263,14 @@ impl Doc {
         self.marks.len() - 1
     }
 
-    /// Appends a character to the text mark being typed.
+    /// Appends a character to the text mark being typed. Ignored while an IME
+    /// composition is open: the input method owns the keyboard, and the result
+    /// arrives through [`Doc::commit_composition`], so a stray `WM_CHAR` must
+    /// not slip in between the pinyin and its result.
     pub fn type_char(&mut self, character: char) -> bool {
+        if self.composition.is_some() {
+            return false;
+        }
         let Some(index) = self.typing else {
             return false;
         };
@@ -251,6 +284,9 @@ impl Doc {
     }
 
     pub fn backspace(&mut self) -> bool {
+        if self.composition.is_some() {
+            return false;
+        }
         let Some(index) = self.typing else {
             return false;
         };
@@ -265,7 +301,9 @@ impl Doc {
 
     /// Ends text entry; an empty text mark is removed together with the undo
     /// step taken when it began, so an empty tap is not an undoable change.
+    /// An open composition is dropped: uncommitted pinyin is never baked in.
     pub fn finish_text(&mut self) {
+        self.composition = None;
         if let Some(index) = self.typing.take() {
             if let Some(Mark::Text { text, .. }) = self.marks.get(index) {
                 if text.trim().is_empty() {
@@ -278,6 +316,63 @@ impl Doc {
 
     pub fn is_typing(&self) -> bool {
         self.typing.is_some()
+    }
+
+    pub fn is_composing(&self) -> bool {
+        self.composition.is_some()
+    }
+
+    pub fn composition(&self) -> Option<&Composition> {
+        self.composition.as_ref()
+    }
+
+    /// Starts or updates the IME composition drawn in the text box. `cursor` is
+    /// a byte offset inside `text`; an empty string closes the composition.
+    /// Only a text mark being typed can compose.
+    pub fn set_composition(&mut self, text: &str, cursor: usize) -> bool {
+        if !self.is_typing() {
+            return false;
+        }
+        if text.is_empty() {
+            return self.clear_composition();
+        }
+        let mut cursor = cursor.min(text.len());
+        while cursor > 0 && !text.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        let next = Composition {
+            text: text.to_string(),
+            cursor,
+        };
+        if self.composition.as_ref() == Some(&next) {
+            return false;
+        }
+        self.composition = Some(next);
+        true
+    }
+
+    pub fn clear_composition(&mut self) -> bool {
+        self.composition.take().is_some()
+    }
+
+    /// Commits the input method's result string into the text mark and closes
+    /// the composition. This is the only path IME text takes into the picture;
+    /// `WM_IME_CHAR` is not also handled.
+    pub fn commit_composition(&mut self, text: &str) -> bool {
+        let closed = self.composition.take().is_some();
+        let Some(index) = self.typing else {
+            return closed;
+        };
+        if text.is_empty() {
+            return closed;
+        }
+        match self.marks.get_mut(index) {
+            Some(Mark::Text { text: mark, .. }) => {
+                mark.push_str(text);
+                true
+            }
+            _ => closed,
+        }
     }
 
     /// The text mark currently being typed, for the on-screen text box.
@@ -359,6 +454,56 @@ mod tests {
         doc.finish_text();
         assert!(doc.marks().is_empty());
         assert!(!doc.can_undo(), "an empty tap is not an undo step");
+    }
+
+    #[test]
+    fn composition_stays_out_of_the_mark_until_the_ime_commits() {
+        let mut doc = doc();
+        doc.begin_text((5.0, 6.0), 0x00FF00, 32.0);
+        assert!(doc.set_composition("ni'hao", 6));
+        assert!(doc.is_composing());
+        assert_eq!(doc.composition().map(Composition::text), Some("ni'hao"));
+        // The input method owns the keyboard: a stray character or backspace
+        // must not slip in between the pinyin and its result.
+        assert!(!doc.type_char('X'));
+        assert!(!doc.backspace());
+        assert!(doc.commit_composition("你好"));
+        assert!(!doc.is_composing());
+        doc.finish_text();
+        match &doc.marks()[0] {
+            Mark::Text { text, .. } => assert_eq!(text, "你好"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composition_needs_a_text_mark_and_never_survives_finish() {
+        let mut doc = doc();
+        assert!(!doc.set_composition("ni", 2), "nothing is being typed");
+        doc.begin_text((5.0, 6.0), 0x00FF00, 32.0);
+        assert!(doc.set_composition("ni", 2));
+        assert!(doc.set_composition("", 0), "an empty string closes it");
+        assert!(!doc.is_composing());
+        assert!(doc.set_composition("hao", 3));
+        doc.finish_text();
+        assert!(!doc.is_composing(), "finishing drops the pinyin");
+        assert!(doc.marks().is_empty());
+    }
+
+    #[test]
+    fn composition_cursor_is_clamped_and_undo_drops_it() {
+        let mut doc = doc();
+        doc.push(rect());
+        doc.begin_text((0.0, 0.0), 0, 32.0);
+        // A cursor inside a multi-byte character falls back to its start.
+        assert!(doc.set_composition("你好", 2));
+        assert_eq!(doc.composition().map(Composition::cursor), Some(0));
+        assert!(doc.set_composition("你好", 99));
+        assert_eq!(doc.composition().map(Composition::cursor), Some(6));
+        // Undo closes the text entry, so the composition cannot outlive it.
+        assert!(doc.undo());
+        assert!(!doc.is_composing());
+        assert!(!doc.is_typing());
     }
 
     #[test]

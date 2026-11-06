@@ -52,7 +52,8 @@ use windows::Win32::Graphics::DirectComposition::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_HIT_TEST_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWriteCreateFactory,
+    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -73,9 +74,11 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, Co
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, ImmAssociateContext,
-    ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
-    ImmSetCompositionWindow, ImmSetOpenStatus,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, GCS_COMPSTR,
+    GCS_CURSORPOS, GCS_RESULTSTR, HIMC, IME_COMPOSITION_STRING, ISC_SHOWUICOMPOSITIONWINDOW,
+    ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
+    ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+    ImmSetOpenStatus, NI_COMPOSITIONSTR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -87,9 +90,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
     WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -124,6 +127,10 @@ pub enum EditorEvent {
 const CLASS_NAME: PCWSTR = w!("PeglineEditor");
 /// Private notification: a result is waiting in `Shared::event`.
 const WM_APP_EDITOR_DONE: u32 = WM_APP + 10;
+/// Private notification: the text caret moved, so the IME's composition and
+/// candidate windows must be re-anchored. Sent by the render thread only while
+/// a composition is open.
+const WM_APP_IME_CARET: u32 = WM_APP + 11;
 /// `WM_MOUSELEAVE` lives in `Win32_UI_Controls`, a feature this crate does not
 /// otherwise need.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -251,8 +258,11 @@ impl Editor {
             commit_requested: AtomicBool::new(false),
             text_tool: AtomicBool::new(false),
             ime: AtomicIsize::new(0),
+            composing: AtomicBool::new(false),
             caret_x: AtomicI32::new(-1),
             caret_y: AtomicI32::new(-1),
+            candidate_x: AtomicI32::new(-1),
+            candidate_y: AtomicI32::new(-1),
         });
         // SAFETY: the pointer stays valid while the window exists: `Editor`
         // holds the `Arc` and `shutdown` destroys the window before that `Arc`
@@ -473,9 +483,18 @@ struct Shared {
     text_tool: AtomicBool,
     /// IME context associated with the editor window (0 when unavailable).
     ime: AtomicIsize,
-    /// Last text caret position in client pixels, for the IME candidate window.
+    /// An IME composition is open. Set on `WM_IME_STARTCOMPOSITION`, cleared on
+    /// `WM_IME_ENDCOMPOSITION` and whenever the app ends the text box: Esc and
+    /// the save paths consult it before they touch the label.
+    composing: AtomicBool,
+    /// Insertion point in client pixels: where `COMPOSITIONFORM` puts the
+    /// composition window of input methods that still draw their own.
     caret_x: AtomicI32,
     caret_y: AtomicI32,
+    /// Where the candidate list should hang, in client pixels: under the text
+    /// box rather than on top of the glyphs.
+    candidate_x: AtomicI32,
+    candidate_y: AtomicI32,
 }
 
 impl Shared {
@@ -528,6 +547,16 @@ enum Command {
     HoverClear,
     Char(char),
     Backspace,
+    /// The IME's in-progress string and its caret offset in bytes. Drawn inside
+    /// the text box, underlined, and never part of the picture.
+    Composition {
+        text: String,
+        cursor: usize,
+    },
+    /// The IME's result string; the only path composed text takes into a mark.
+    CommitComposition(String),
+    /// `WM_IME_ENDCOMPOSITION`: drop the composition without committing.
+    EndComposition,
     FinishText,
     Escape,
     Undo,
@@ -598,6 +627,9 @@ unsafe extern "system" fn editor_wndproc(
             let active = (wparam.0 as u32) & 0xFFFF;
             logging::trace(format!("editor activate {active}"));
             if active == 0 && shared.focus_ready.load(Ordering::Acquire) {
+                // Uncommitted pinyin is never baked into the picture: finish
+                // the composition before the save is requested.
+                cancel_composition(hwnd, shared);
                 request_save(shared);
             }
             return LRESULT(0);
@@ -610,16 +642,25 @@ unsafe extern "system" fn editor_wndproc(
         WM_KILLFOCUS => {
             logging::trace("editor focus lost");
             if shared.focus_ready.load(Ordering::Acquire) {
+                cancel_composition(hwnd, shared);
                 request_save(shared);
             }
             return LRESULT(0);
         }
         WM_CLOSE => {
+            cancel_composition(hwnd, shared);
             request_save(shared);
             return LRESULT(0);
         }
         WM_APP_EDITOR_DONE => {
             deliver_pending(shared, hwnd);
+            return LRESULT(0);
+        }
+        WM_APP_IME_CARET => {
+            // The render thread just published a new caret after painting the
+            // composition; this is the only point where the caret and the IME
+            // windows agree, because the caret is measured from the layout.
+            position_ime(hwnd, shared);
             return LRESULT(0);
         }
         WM_DESTROY => {
@@ -667,6 +708,10 @@ unsafe extern "system" fn editor_wndproc(
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_xy(lparam);
+            // A click ends the text mark it lands on (or the whole edit, on
+            // Save/Cancel), so the input method must stop composing first; a
+            // composition left open would keep feeding a mark that is gone.
+            cancel_composition(hwnd, shared);
             // The render thread owns the tool state and decides what the click
             // hit; it publishes the Text-tool flag that drives the I-beam and
             // the IME caret. Keeping the hit math in one place means the
@@ -753,16 +798,59 @@ unsafe extern "system" fn editor_wndproc(
             forward_char(shared, wparam);
             return LRESULT(0);
         }
-        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
+        WM_IME_SETCONTEXT => {
+            // The editor draws the composition itself (inside its white box),
+            // so the input method must not also paint the default floating
+            // composition window over the picture. The candidate list stays the
+            // IME's own window; only the composition bit is cleared.
+            let flags = lparam.0 & !(ISC_SHOWUICOMPOSITIONWINDOW as isize);
+            // SAFETY: default handling for the rest of the flags.
+            return unsafe { DefWindowProcW(hwnd, message, wparam, LPARAM(flags)) };
+        }
+        WM_IME_STARTCOMPOSITION => {
+            shared.composing.store(true, Ordering::Release);
             position_ime(hwnd, shared);
+            // Returning 0 claims the composition: the IME hands over the
+            // string instead of drawing a window of its own.
+            return LRESULT(0);
+        }
+        WM_IME_COMPOSITION => {
+            let flags = lparam.0 as u32;
+            if flags & GCS_RESULTSTR.0 != 0 {
+                if let Some(text) = ime_string(hwnd, GCS_RESULTSTR) {
+                    shared.send(Command::CommitComposition(text));
+                }
+                // The pinyin is done; an IME that skips ENDCOMPOSITION must not
+                // leave the Esc guard armed.
+                shared.composing.store(false, Ordering::Release);
+            }
+            if flags & GCS_COMPSTR.0 != 0 {
+                let text = ime_string(hwnd, GCS_COMPSTR).unwrap_or_default();
+                let cursor = ime_cursor(hwnd, &text);
+                if !text.is_empty() {
+                    shared.composing.store(true, Ordering::Release);
+                }
+                shared.send(Command::Composition { text, cursor });
+            }
+            position_ime(hwnd, shared);
+            return LRESULT(0);
+        }
+        WM_IME_ENDCOMPOSITION => {
+            shared.composing.store(false, Ordering::Release);
+            shared.send(Command::EndComposition);
+            return LRESULT(0);
         }
         WM_IME_CHAR => {
-            // A composing IME (e.g. Microsoft Pinyin) commits the chosen
-            // characters as WM_IME_CHAR, not WM_CHAR. Without this the text
-            // tool silently dropped Chinese/Japanese input.
-            let code = (wparam.0 as u32) & 0xFFFF;
-            if let Some(character) = char::from_u32(code) {
-                shared.send(Command::Char(character));
+            // With an IME context the result string is the single commit path
+            // (see `Command::CommitComposition`); handling this too would
+            // insert every committed character twice. It stays only as a
+            // fallback for a window that never got a context, where no
+            // composition can be read at all.
+            if shared.ime.load(Ordering::Acquire) == 0 {
+                let code = (wparam.0 as u32) & 0xFFFF;
+                if let Some(character) = char::from_u32(code) {
+                    shared.send(Command::Char(character));
+                }
             }
             return LRESULT(0);
         }
@@ -771,8 +859,20 @@ unsafe extern "system" fn editor_wndproc(
             let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
             let key = (wparam.0 as u32) & 0xFFFF;
             if key == VK_ESCAPE.0 as u32 {
+                // Esc cancels the pinyin, not the text box: the second Esc,
+                // with no composition open, ends the text entry.
+                if shared.composing.load(Ordering::Acquire) {
+                    cancel_composition(hwnd, shared);
+                    return LRESULT(0);
+                }
                 shared.send(Command::Escape);
                 return LRESULT(0);
+            }
+            if shared.composing.load(Ordering::Acquire) {
+                // The input method owns undo/redo while it is composing.
+                if control && (key == VK_Z.0 as u32 || key == VK_Y.0 as u32) {
+                    return LRESULT(0);
+                }
             }
             if control && key == VK_Z.0 as u32 {
                 shared.send(Command::Undo);
@@ -783,6 +883,7 @@ unsafe extern "system" fn editor_wndproc(
                 return LRESULT(0);
             }
             if control && key == VK_S.0 as u32 {
+                cancel_composition(hwnd, shared);
                 request_save(shared);
                 return LRESULT(0);
             }
@@ -805,6 +906,89 @@ fn request_save(shared: &Shared) {
     if !shared.send(Command::Save) {
         shared.commit_requested.store(false, Ordering::Release);
     }
+}
+
+/// Stops an open IME composition without committing it.
+///
+/// Called whenever the app is about to end the text mark (Esc, a click, Save,
+/// focus loss). Cancelling rather than committing is deliberate: uncommitted
+/// pinyin never becomes part of the picture, and a composition left open would
+/// keep feeding a mark that is already gone.
+fn cancel_composition(hwnd: HWND, shared: &Shared) {
+    if !shared.composing.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    logging::trace("IME composition cancelled");
+    // SAFETY: our own window; the context is released below.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.0.is_null() {
+            return;
+        }
+        let _ = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        let _ = ImmReleaseContext(hwnd, context);
+    }
+}
+
+/// Reads one composition string from the window's input context.
+fn ime_string(hwnd: HWND, flag: IME_COMPOSITION_STRING) -> Option<String> {
+    // SAFETY: the context belongs to our window and is released below.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.0.is_null() {
+            return None;
+        }
+        let length = ImmGetCompositionStringW(context, flag, None, 0);
+        if length <= 0 {
+            let _ = ImmReleaseContext(hwnd, context);
+            return Some(String::new());
+        }
+        let mut buffer = vec![0u16; length as usize / 2];
+        let read = ImmGetCompositionStringW(
+            context,
+            flag,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            length as u32,
+        );
+        let _ = ImmReleaseContext(hwnd, context);
+        if read <= 0 {
+            return Some(String::new());
+        }
+        buffer.truncate(read as usize / 2);
+        Some(String::from_utf16_lossy(&buffer))
+    }
+}
+
+/// The composition caret, in bytes inside `text`. `GCS_CURSORPOS` returns the
+/// position in UTF-16 units as the call's value, not as a buffer.
+fn ime_cursor(hwnd: HWND, text: &str) -> usize {
+    // SAFETY: our own window; the context is released below.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.0.is_null() {
+            return text.len();
+        }
+        let units = ImmGetCompositionStringW(context, GCS_CURSORPOS, None, 0);
+        let _ = ImmReleaseContext(hwnd, context);
+        // Zero is a valid position (the caret at the start of the composition);
+        // only a negative result means the query failed.
+        if units < 0 {
+            return text.len();
+        }
+        utf16_to_byte(text, units as usize)
+    }
+}
+
+/// Byte offset in `text` for a UTF-16 code-unit offset.
+fn utf16_to_byte(text: &str, units: usize) -> usize {
+    let mut seen = 0;
+    for (index, character) in text.char_indices() {
+        if seen >= units {
+            return index;
+        }
+        seen += character.len_utf16();
+    }
+    text.len()
 }
 
 /// Hands the queued result to the app, then destroys the window.
@@ -858,13 +1042,21 @@ fn report(shared: &Shared, hwnd: HWND, event: EditorEvent) {
     }
 }
 
-/// Moves the IME composition/candidate windows to the text caret published by
-/// the render thread. `COMPOSITIONFORM` and `CANDIDATEFORM` take client-area
-/// coordinates relative to `hwnd`, not screen coordinates.
+/// Points the input method at the text caret.
+///
+/// `COMPOSITIONFORM` gets the insertion point, so input methods that still draw
+/// their own composition window put it at the caret instead of at a box corner.
+/// `CANDIDATEFORM` gets the bottom of the white box, so the candidate list
+/// opens under the line instead of on top of the glyphs. Both take client-area
+/// coordinates relative to `hwnd`, in physical pixels, never screen ones.
 fn position_ime(hwnd: HWND, shared: &Shared) {
     let x = shared.caret_x.load(Ordering::Relaxed);
     let y = shared.caret_y.load(Ordering::Relaxed);
-    logging::trace(format!("IME position {x},{y}"));
+    let candidate_x = shared.candidate_x.load(Ordering::Relaxed);
+    let candidate_y = shared.candidate_y.load(Ordering::Relaxed);
+    logging::trace(format!(
+        "IME position {x},{y} candidate {candidate_x},{candidate_y}"
+    ));
     if x < 0 || y < 0 {
         return;
     }
@@ -881,7 +1073,10 @@ fn position_ime(hwnd: HWND, shared: &Shared) {
     let candidate = CANDIDATEFORM {
         dwIndex: 0,
         dwStyle: CFS_CANDIDATEPOS,
-        ptCurrentPos: POINT { x, y },
+        ptCurrentPos: POINT {
+            x: if candidate_x < 0 { x } else { candidate_x },
+            y: if candidate_y < 0 { y } else { candidate_y },
+        },
         rcArea: RECT::default(),
     };
     // SAFETY: both forms are live for the calls; the HIMC came from
@@ -1111,6 +1306,19 @@ struct TextEntry {
     layout: IDWriteTextLayout,
 }
 
+/// The text mark being typed, laid out together with the IME composition, with
+/// the composition run underlined. The box, its caret and the IME anchors all
+/// come from this layout while a composition is open, so the pinyin sits inside
+/// the white box and pushes it wider as it grows.
+struct ComposedText {
+    /// Committed text and composition, for the cache key.
+    committed: String,
+    composition: String,
+    layout: IDWriteTextLayout,
+    width: f32,
+    height: f32,
+}
+
 /// A drag in progress, in source pixels.
 #[derive(Clone, Copy)]
 struct Drag {
@@ -1126,6 +1334,8 @@ struct EditorState {
     labels: Labels,
     text_format: IDWriteTextFormat,
     texts: Vec<TextEntry>,
+    /// Laid-out composition, present only while the IME is composing.
+    composing: Option<ComposedText>,
     doc: Option<Doc>,
     tool: Tool,
     color: u32,
@@ -1187,6 +1397,7 @@ impl EditorState {
             labels,
             text_format,
             texts: Vec::new(),
+            composing: None,
             doc: None,
             tool: Tool::Arrow,
             color: COLORS[0].0,
@@ -1267,6 +1478,7 @@ impl EditorState {
         self.doc = Some(Doc::new(image));
         self.relayout();
         self.texts.clear();
+        self.composing = None;
         self.texts_dirty = true;
         self.dirty = true;
         logging::trace(format!(
@@ -1318,6 +1530,7 @@ impl EditorState {
         self.chrome = chrome;
         self.assets = assets;
         self.texts.clear();
+        self.composing = None;
         self.texts_dirty = true;
         self.relayout();
         self.dirty = true;
@@ -1358,6 +1571,29 @@ impl EditorState {
                     self.dirty = true;
                 }
             }
+            Command::Composition { text, cursor } => {
+                if self
+                    .doc
+                    .as_mut()
+                    .map(|doc| doc.set_composition(&text, cursor))
+                    == Some(true)
+                {
+                    self.texts_dirty = true;
+                    self.dirty = true;
+                }
+            }
+            Command::CommitComposition(text) => {
+                if self.doc.as_mut().map(|doc| doc.commit_composition(&text)) == Some(true) {
+                    self.texts_dirty = true;
+                    self.dirty = true;
+                }
+            }
+            Command::EndComposition => {
+                if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
+                    self.texts_dirty = true;
+                    self.dirty = true;
+                }
+            }
             Command::FinishText => {
                 if let Some(doc) = self.doc.as_mut() {
                     if doc.is_typing() {
@@ -1374,6 +1610,13 @@ impl EditorState {
                     self.cancel_gesture();
                     return Step::Continue;
                 }
+                // A composition Esc that slipped past the UI thread's guard
+                // still only cancels the pinyin: the text box stays open.
+                if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
+                    self.texts_dirty = true;
+                    self.dirty = true;
+                    return Step::Continue;
+                }
                 if self.doc.as_ref().map(|doc| doc.is_typing()) == Some(true) {
                     if let Some(doc) = self.doc.as_mut() {
                         doc.finish_text();
@@ -1385,12 +1628,19 @@ impl EditorState {
                 return self.cancel_event();
             }
             Command::Undo => {
+                // The IME owns the document while it is composing.
+                if self.doc.as_ref().map(|doc| doc.is_composing()) == Some(true) {
+                    return Step::Continue;
+                }
                 if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
                     self.texts_dirty = true;
                     self.dirty = true;
                 }
             }
             Command::Redo => {
+                if self.doc.as_ref().map(|doc| doc.is_composing()) == Some(true) {
+                    return Step::Continue;
+                }
                 if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
                     self.texts_dirty = true;
                     self.dirty = true;
@@ -1774,6 +2024,50 @@ impl EditorState {
             }
         }
         self.texts = next;
+        self.rebuild_composition();
+    }
+
+    /// Lays out the text mark being typed together with the IME composition.
+    /// The cache key is the pair of strings, so each pinyin keystroke rebuilds
+    /// exactly one layout and every other frame reuses it.
+    fn rebuild_composition(&mut self) {
+        let key = self.doc.as_ref().and_then(|doc| {
+            let composition = doc.composition()?;
+            let committed = match doc.typing_mark() {
+                Some(Mark::Text { text, .. }) => text.clone(),
+                _ => return None,
+            };
+            Some((committed, composition.text().to_string()))
+        });
+        let Some((committed, composition)) = key else {
+            self.composing = None;
+            return;
+        };
+        if self.composing.as_ref().is_some_and(|current| {
+            current.committed == committed && current.composition == composition
+        }) {
+            return;
+        }
+        self.composing = None;
+        let text = format!("{committed}{composition}");
+        match create_composed_layout(
+            &self.surface.dwrite,
+            &self.text_format,
+            &text,
+            committed.len(),
+        ) {
+            Ok(layout) => {
+                let metrics = text_metrics(&layout);
+                self.composing = Some(ComposedText {
+                    committed,
+                    composition,
+                    layout,
+                    width: metrics.width,
+                    height: metrics.height,
+                });
+            }
+            Err(error) => logging::error(format!("editor composition layout: {error}")),
+        }
     }
 
     /// Uploads the mosaic textures the document needs, once per mark.
@@ -2117,20 +2411,45 @@ impl EditorState {
                     }),
                 ) => {
                     painter.marks_except(doc.marks(), &self.texts, index);
-                    let (text_w, text_h) = self
-                        .texts
-                        .iter()
-                        .find(|entry| entry.text == *text)
-                        .map(|entry| {
-                            let metrics = text_metrics(&entry.layout);
-                            (metrics.width, metrics.height)
+                    // While the IME is composing, the box, the text and the
+                    // caret all follow `committed + composition`: the pinyin is
+                    // drawn inside the white box, underlined, instead of by the
+                    // input method in a transparent floating window.
+                    let composed = self
+                        .composing
+                        .as_ref()
+                        .filter(|composed| composed.committed == *text);
+                    let (text_w, text_h) = match composed {
+                        Some(composed) => (composed.width, composed.height),
+                        None => self
+                            .texts
+                            .iter()
+                            .find(|entry| entry.text == *text)
+                            .map(|entry| {
+                                let metrics = text_metrics(&entry.layout);
+                                (metrics.width, metrics.height)
+                            })
+                            .unwrap_or((8.0, 38.0)),
+                    };
+                    // The caret sits after the composition cursor, not after
+                    // the committed text, so an IME that edits inside its
+                    // composition keeps the caret where the pinyin is.
+                    let caret_x = composed
+                        .and_then(|composed| {
+                            let composition = doc.composition()?;
+                            composition_caret_x(
+                                &composed.layout,
+                                text,
+                                composition.text(),
+                                composition.cursor(),
+                            )
                         })
-                        .unwrap_or((8.0, 38.0));
+                        .unwrap_or(text_w);
                     let pad = 4.0;
                     let box_rect = RectF::from_xywh(
                         origin.0 - pad,
                         origin.1 - pad,
-                        text_w.max(8.0) + pad * 2.0,
+                        text_w.max(caret_x).max(8.0) + pad * 2.0,
                         text_h.max(24.0) + pad * 2.0,
                     );
                     let rounded_box = rounded(box_rect, 3.0);
@@ -2141,7 +2460,7 @@ impl EditorState {
                         if let Some(pen) = pen {
                             rt.DrawRoundedRectangle(&rounded_box, pen, 1.0, None);
                             let caret = d2d_rect(RectF::from_xywh(
-                                origin.0 + text_w.max(0.0) + 1.0,
+                                origin.0 + caret_x.max(0.0) + 1.0,
                                 origin.1,
                                 2.0,
                                 text_h.max(18.0),
@@ -2149,15 +2468,50 @@ impl EditorState {
                             rt.FillRectangle(&caret, pen);
                         }
                     }
-                    // Publish the bottom of the caret in client pixels so the
-                    // IME composition and candidate windows open right below
-                    // the text box instead of at (0, 0).
-                    let (caret_x, caret_y) =
-                        ime_caret_client_px(self.canvas, *origin, text_w, text_h, self.dpi);
-                    self.shared.caret_x.store(caret_x, Ordering::Relaxed);
-                    self.shared.caret_y.store(caret_y, Ordering::Relaxed);
-                    if let Some(mark) = doc.marks().get(index) {
-                        painter.mark(mark, &self.texts);
+                    // Publish the insertion point and the box bottom in client
+                    // pixels: the composition window of input methods that draw
+                    // their own sits at the caret, and the candidate list opens
+                    // under the box instead of on top of the glyphs.
+                    let (caret_px, candidate_px) =
+                        ime_client_px(self.canvas, *origin, caret_x + 1.0, text_h, self.dpi);
+                    let previous = (
+                        self.shared.caret_x.load(Ordering::Relaxed),
+                        self.shared.caret_y.load(Ordering::Relaxed),
+                        self.shared.candidate_x.load(Ordering::Relaxed),
+                        self.shared.candidate_y.load(Ordering::Relaxed),
+                    );
+                    let next = (caret_px.0, caret_px.1, candidate_px.0, candidate_px.1);
+                    if previous != next {
+                        self.shared.caret_x.store(next.0, Ordering::Relaxed);
+                        self.shared.caret_y.store(next.1, Ordering::Relaxed);
+                        self.shared.candidate_x.store(next.2, Ordering::Relaxed);
+                        self.shared.candidate_y.store(next.3, Ordering::Relaxed);
+                        // The composition string changes faster than a frame:
+                        // each pinyin key widens the caret before the IME asks
+                        // for its position. Re-anchor it once the layout has
+                        // been measured, while the composition is still open.
+                        if self.shared.composing.load(Ordering::Acquire) {
+                            // SAFETY: posting to the window this editor owns;
+                            // a failed post only leaves the list a frame late.
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(self.surface.hwnd),
+                                    WM_APP_IME_CARET,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    }
+                    match composed {
+                        Some(composed) => {
+                            painter.text_layout(*origin, &composed.layout, *color);
+                        }
+                        None => {
+                            if let Some(mark) = doc.marks().get(index) {
+                                painter.mark(mark, &self.texts);
+                            }
+                        }
                     }
                 }
                 _ => painter.marks(doc.marks(), &self.texts),
@@ -2586,24 +2940,46 @@ fn drag_rect(start: (f32, f32), end: (f32, f32)) -> (f32, f32, f32, f32) {
     )
 }
 
-/// Converts a text mark's caret and box bottom into client physical pixels for
+/// Converts a text mark's anchors into client physical pixels for
 /// `COMPOSITIONFORM` / `CANDIDATEFORM` (which expect client coordinates, never
-/// screen coordinates).
-fn ime_caret_client_px(
+/// screen coordinates): the insertion point first, then the point the candidate
+/// list hangs from, at the bottom of the white box.
+fn ime_client_px(
     canvas: CanvasLayout,
     origin: (f32, f32),
-    text_w: f32,
+    caret_dx: f32,
     text_h: f32,
     dpi: f32,
-) -> (i32, i32) {
+) -> ((i32, i32), (i32, i32)) {
     let pad = 4.0;
     let pixel_scale = (dpi / 96.0).max(1.0);
-    let client_x = canvas.image.left + (origin.0 + text_w.max(0.0) + 1.0) * canvas.scale;
-    let client_y = canvas.image.top + (origin.1 + text_h.max(24.0) + pad + 2.0) * canvas.scale;
+    let client_x = canvas.image.left + (origin.0 + caret_dx.max(0.0)) * canvas.scale;
+    let client_top = canvas.image.top + origin.1 * canvas.scale;
+    let client_bottom = canvas.image.top + (origin.1 + text_h.max(24.0) + pad + 2.0) * canvas.scale;
+    let x = (client_x * pixel_scale).round().max(0.0) as i32;
     (
-        (client_x * pixel_scale).round().max(0.0) as i32,
-        (client_y * pixel_scale).round().max(0.0) as i32,
+        (x, (client_top * pixel_scale).round().max(0.0) as i32),
+        (x, (client_bottom * pixel_scale).round().max(0.0) as i32),
     )
+}
+
+/// X offset, in DIP from the text origin, of the composition caret: the width
+/// of the committed text plus the part of the composition before its cursor.
+fn composition_caret_x(
+    layout: &IDWriteTextLayout,
+    committed: &str,
+    composition: &str,
+    cursor: usize,
+) -> Option<f32> {
+    let cursor = cursor.min(composition.len());
+    let units = committed.encode_utf16().count() + composition[..cursor].encode_utf16().count();
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+    // SAFETY: live layout and out-params; the offset is inside the text.
+    unsafe { layout.HitTestTextPosition(units as u32, false, &mut x, &mut y, &mut metrics) }
+        .ok()?;
+    Some(x)
 }
 
 fn rect_of(rect: (f32, f32, f32, f32)) -> RectF {
@@ -2778,21 +3154,29 @@ impl<'a> Painter<'a> {
     }
 
     fn text(&self, origin: (f32, f32), text: &str, color: u32, texts: &[TextEntry]) {
-        let brush = self.assets.brush(color);
-        let entry = texts.iter().find(|entry| entry.text == text);
-        if let (Some(brush), Some(entry)) = (brush, entry) {
-            // SAFETY: the layout, the brush and the target are alive.
-            unsafe {
-                self.rt.DrawTextLayout(
-                    Vector2 {
-                        X: origin.0,
-                        Y: origin.1,
-                    },
-                    &entry.layout,
-                    brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
+        let Some(entry) = texts.iter().find(|entry| entry.text == text) else {
+            return;
+        };
+        self.text_layout(origin, &entry.layout, color);
+    }
+
+    /// Draws an already laid-out run. The composing text uses the same call;
+    /// only its layout carries the composition underline.
+    fn text_layout(&self, origin: (f32, f32), layout: &IDWriteTextLayout, color: u32) {
+        let Some(brush) = self.assets.brush(color) else {
+            return;
+        };
+        // SAFETY: the layout, the brush and the target are alive.
+        unsafe {
+            self.rt.DrawTextLayout(
+                Vector2 {
+                    X: origin.0,
+                    Y: origin.1,
+                },
+                layout,
+                brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
         }
     }
 
@@ -3629,6 +4013,34 @@ fn create_text_layout(
         .map_err(|error| format!("CreateTextLayout: {error}"))
 }
 
+/// Lays out `text` with the range starting at `underline_from` underlined: the
+/// IME composition. The run keeps the mark's font and colour; only the
+/// underline marks it as not yet committed.
+fn create_composed_layout(
+    dwrite: &IDWriteFactory,
+    format: &IDWriteTextFormat,
+    text: &str,
+    underline_from: usize,
+) -> Result<IDWriteTextLayout, String> {
+    let layout = create_text_layout(dwrite, format, text)?;
+    let start = underline_from.min(text.len());
+    let start_position = text[..start].encode_utf16().count() as u32;
+    let length = text[start..].encode_utf16().count() as u32;
+    if length > 0 {
+        // SAFETY: the layout is live and the range lies inside its text.
+        unsafe {
+            let _ = layout.SetUnderline(
+                true,
+                DWRITE_TEXT_RANGE {
+                    startPosition: start_position,
+                    length,
+                },
+            );
+        }
+    }
+    Ok(layout)
+}
+
 fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
     let mut metrics = DWRITE_TEXT_METRICS::default();
     // SAFETY: writes one struct owned by this stack frame.
@@ -3782,25 +4194,83 @@ mod tests {
     }
 
     #[test]
-    fn ime_caret_is_below_the_text_box_in_client_pixels() {
+    fn ime_anchors_put_the_composition_at_the_caret_and_the_list_below_the_box() {
         let (width, height) = layout::window_size((697, 584), (1920.0, 1040.0));
         let fitted = layout::fit(width, height, (697, 584));
         let canvas = CanvasLayout {
             image: fitted.photo,
             scale: fitted.scale,
         };
-        // The text box bottom is at source y = 120 + 38, the IME anchor two
-        // DIPs below it (the four DIP box padding plus the two DIP gap).
-        let (x96, y96) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 96.0);
-        let (x192, y192) = ime_caret_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 192.0);
+        let ((x96, y96), (cx96, cy96)) = ime_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 96.0);
+        let ((x192, y192), (cx192, cy192)) =
+            ime_client_px(canvas, (100.0, 120.0), 96.0, 38.0, 192.0);
         assert!(x96 < pixels(width, 96));
         assert!(y96 < pixels(height, 96));
         assert!(
             (x192 - x96 * 2).abs() <= 1,
-            "the anchor must follow the DPI"
+            "the anchors must follow the DPI"
         );
         assert!((y192 - y96 * 2).abs() <= 1);
+        assert!((cx192 - cx96 * 2).abs() <= 1);
+        assert!((cy192 - cy96 * 2).abs() <= 1);
+        // The composition point is the top of the text line; the candidate
+        // point is the bottom of the white box: four DIP of padding plus a two
+        // DIP gap below the 38 DIP line.
         let top_px = ((canvas.image.top + 120.0 * canvas.scale) * 2.0).round() as i32;
-        assert!(y192 > top_px + 70, "IME anchor must sit below the text box");
+        let bottom_px =
+            ((canvas.image.top + (120.0 + 38.0 + 6.0) * canvas.scale) * 2.0).round() as i32;
+        assert!((y192 - top_px).abs() <= 1);
+        assert!((cy192 - bottom_px).abs() <= 1);
+        assert_eq!(cx96, x96, "the list hangs from the caret's column");
+        assert!(
+            cy96 > y96 + 30,
+            "the list must clear the 38 DIP text line (got {} vs {})",
+            cy96,
+            y96
+        );
+    }
+
+    #[test]
+    fn a_composition_widens_the_box_and_moves_the_caret_with_it() {
+        // DirectWrite lays text out without a window or a GPU device.
+        let dwrite: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("DWrite factory");
+        let format = create_format(
+            &dwrite,
+            font::UI_FAMILY,
+            TEXT_SIZE,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        )
+        .expect("text format");
+        let plain = create_text_layout(&dwrite, &format, "ab").expect("plain layout");
+        let composed = create_composed_layout(&dwrite, &format, "abni'hao", 2).expect("layout");
+        let plain_w = text_metrics(&plain).width;
+        let composed_w = text_metrics(&composed).width;
+        assert!(
+            composed_w > plain_w + 10.0,
+            "the pinyin must widen the box ({plain_w} -> {composed_w})"
+        );
+        // The caret sits after the part of the composition before its cursor.
+        let at_end = composition_caret_x(&composed, "ab", "ni'hao", 6).expect("caret");
+        let at_start = composition_caret_x(&composed, "ab", "ni'hao", 0).expect("caret");
+        assert!((at_end - composed_w).abs() < 1.0);
+        assert!(at_start < at_end);
+        assert!(
+            (at_start - plain_w).abs() < 1.0,
+            "the caret starts on the committed text"
+        );
+    }
+
+    #[test]
+    fn utf16_offsets_land_on_byte_boundaries() {
+        assert_eq!(utf16_to_byte("abc", 0), 0);
+        assert_eq!(utf16_to_byte("abc", 2), 2);
+        assert_eq!(utf16_to_byte("abc", 9), 3);
+        // One CJK character is three bytes but one UTF-16 unit.
+        assert_eq!(utf16_to_byte("测试", 1), 3);
+        assert_eq!(utf16_to_byte("测试", 2), 6);
+        // A surrogate pair is two UTF-16 units and four bytes.
+        assert_eq!(utf16_to_byte("😀x", 0), 0);
+        assert_eq!(utf16_to_byte("😀x", 2), 4);
     }
 }

@@ -25,6 +25,20 @@
 
 ### Fixes
 
+- **The annotation text tool draws the IME composition itself.** Pinyin used to
+  be painted by the input method in its own transparent floating window, hanging
+  off the white box's bottom-right corner and drifting right with every committed
+  character, because the tool only read `WM_IME_CHAR` and let `WM_IME_*` fall
+  through to `DefWindowProc`. It now handles the composition messages, reads
+  `GCS_RESULTSTR` (the single commit path) and `GCS_COMPSTR`/`GCS_CURSORPOS`,
+  clears `ISC_SHOWUICOMPOSITIONWINDOW`, and lays out `text + composition` with
+  the pinyin underlined inside the box; the box grows with it and the caret sits
+  after the composition cursor. The candidate list is anchored under the box and
+  re-anchored once the render thread has measured the new composition, so it no
+  longer lags a keystroke. Esc cancels the pinyin and keeps the text box; a
+  click, save or focus loss cancels an open composition instead of baking raw
+  pinyin into the PNG. Verified with Microsoft Pinyin at 200% DPI; see
+  `docs/VISUAL-TESTS.md` §3.16.
 - The note editor no longer deletes two characters per Backspace (and inserts
   two lines per Enter): Tab, Enter and Backspace are handled from the key-down
   message only, not again through `WM_CHAR`.

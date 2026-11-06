@@ -551,6 +551,34 @@
   1726×1300。
 - 未重新做帧率/内存测量：窗口比卡片大 60 DIP 但透明，阴影仍只在启动时烘焙一次。
 
+### 3.16 标注文字的内联输入法组合（2026-11-06）
+
+用户报告：文字工具里打拼音时，组合串和候选列表挂在文字框的右下角、压在照片上，
+框里只看到已上屏的字。原因是文字工具只接 `WM_IME_CHAR`，从不读 `GCS_COMPSTR`，
+`WM_IME_*` 又落给 `DefWindowProc`，等于让输入法画默认组合窗；程序给它的锚点还是
+`ime_caret_client_px` 算出的**框右下角**（`docs/VISUAL-TESTS.md` §3.8 那轮只是把
+这个点从屏幕左上角挪到了框角）。改法是让组合串进入程序自己画（BEHAVIOR §11）。
+
+本机 6016×3384 @200%，debug 构建，真实微软拼音（`LoadKeyboardLayout` 未介入，
+系统默认输入法即中文）；`--editor-demo --editor-hold` 用真实鼠标点击文字工具和画布，
+键盘用 `keybd_event` 送 `nihao`，截图用 DPI-aware `PrintWindow`（窗口 1920×1568）：
+
+| 复现 | 证据 | 结果 |
+|:--|:--|:--|
+| 文字工具 + 画布点击 + `nihao` | `visual/editor-ime-inline.png`；`EnumWindows` 本进程窗口 | 组合串 `ni'hao` 画在白框**里面**，与标记同色、带下划线；框随拼音变宽，光标在组合串之后。组合期间本进程只有 `PeglineEditor` / `PeglineOverlay` 可见，`MSCTFIME UI` 与 `IME` 都是 `vis=False`：输入法不再开自己的组合窗 |
+| 同上，按空格上屏 | `visual/editor-ime-commit.png` | 框里变成 `你好`，下划线消失，框宽不变（拼音与汉字同高），光标仍在末尾 |
+| 同上，按 Esc | `trace.log`：`IME position 896,621` → `744,621` | 只取消这一段拼音：组合串消失、框和光标还在；再按一次 Esc 才结束文字 |
+| 逐键 | `trace.log` | 每键两条 `IME position x,621 candidate x,714`：一条来自 `WM_IME_COMPOSITION`（用上一帧的锚点），一条来自 `WM_APP_IME_CARET`（渲染线程量完组合布局后重锚），候选窗因此贴住当前光标而不是落后一个字母 |
+| 保存 | 保存后的 `editor-demo.png` | 只有已上屏的字（`你好` 和回车原样上屏的 `ceshi`），没有下划线、没有白框、没有组合串 |
+
+- 组合串在模型里是临时的：`Doc::set_composition/commit_composition` 不进 `marks`、
+  不进撤销；单元测试 `composition_stays_out_of_the_mark_until_the_ime_commits` 和
+  `a_composition_widens_the_box_and_moves_the_caret_with_it` 覆盖插入、宽度和光标。
+- 组合期间按 Ctrl+S 由输入法吞掉（与其他编辑器一致），未单独截图；点击保存按钮
+  会先取消组合再保存，这一点由 `WM_LBUTTONDOWN` 的 `cancel_composition` 保证。
+- 未重新做帧率/内存测量：组合布局只在每个拼音键重建一次（和文字布局同一套
+  DWrite 缓存），没有新增常驻资源。
+
 ## 4. 逐帧结果
 
 - **放下**：0.3 s 悬停后开始，约 0.65 s 内从 -222 DIP 弹到 0，轻微过冲

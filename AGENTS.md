@@ -55,13 +55,14 @@ Every launch now drops the line for 2.5 s (5 s on the first run) so a start is
 visible; the landing hand-off mirrors the real card's row spring and 2.2° sway
 while the flight window fades over an opaque copy, so the two images never
 separate. The IME candidate window is also fixed and verified with Microsoft
-Pinyin at 200% DPI (`docs/VISUAL-TESTS.md` §3.8). The 2.0.0 release build,
-checksum and known limitations are in `docs/RELEASE-2.0.0.md`; rebuild the
-portable package with `pwsh tools\package-release.ps1`. The only open items are
-hardware specific (120 Hz, a second monitor, sleep/wake) and the subjective
-listening check for the three audio cues; see `PLAN.md` §8. Do not trade features
-or visual quality for memory to chase the original 60 MB MVP target — the user
-accepted the measured trade-offs in `PLAN.md` §3.2–§3.5.
+Pinyin at 200% DPI (`docs/VISUAL-TESTS.md` §3.8); the composition itself is now
+drawn inline in the text box — see the 2026-11-06 paragraph below. The 2.0.0
+release build, checksum and known limitations are in `docs/RELEASE-2.0.0.md`;
+rebuild the portable package with `pwsh tools\package-release.ps1`. The only
+open items are hardware specific (120 Hz, a second monitor, sleep/wake) and the
+subjective listening check for the three audio cues; see `PLAN.md` §8. Do not
+trade features or visual quality for memory to chase the original 60 MB MVP
+target — the user accepted the measured trade-offs in `PLAN.md` §3.2–§3.5.
 
 **2.2.0 was released on 2026-11-06**: it folds in the annotation editor 2.0,
 the WYSIWYG note editor, the card button/click changes and the editor-flight
@@ -141,6 +142,25 @@ instead of the thumbnail size, and the note editor hides the edited note's card
 under the opening flight and restores it with the return. `--annotate-demo`
 drives the card-to-editor round trip without a mouse; the visual evidence is in
 `docs/VISUAL-TESTS.md` §3.12 and `docs/visual/editor-2.0.png` / `editor-flight.png`.
+
+**On 2026-11-06 the annotation text tool draws the IME composition itself**
+(BEHAVIOR §11): it handles `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION` /
+`WM_IME_ENDCOMPOSITION`, reads `GCS_RESULTSTR` (the single commit path;
+`WM_IME_CHAR` is a fallback only for a window with no IME context) and
+`GCS_COMPSTR` / `GCS_CURSORPOS`, clears `ISC_SHOWUICOMPOSITIONWINDOW` in
+`WM_IME_SETCONTEXT`, and lays out `text + composition` with the pinyin underlined
+inside the white box. The box width and the caret follow that composed layout;
+`COMPOSITIONFORM` points at the insertion point and `CANDIDATEFORM` at the bottom
+of the box, and a `WM_APP_IME_CARET` post from the render thread re-anchors the
+candidate list once the new composition has been measured (the IME asks before
+the frame is painted). Esc, a click, Save, Ctrl+S or focus loss cancel an open
+composition instead of baking pinyin into the picture; a composition never enters
+`marks`, the undo history or the saved PNG. Verified with Microsoft Pinyin at
+200% DPI on `--editor-demo --editor-hold`; screenshots
+`docs/visual/editor-ime-inline.png` / `editor-ime-commit.png`, details in
+`docs/VISUAL-TESTS.md` §3.16. IMEs with their own skin (Sogou and friends) still
+draw their own composition window; the app can only give them the right insertion
+point.
 
 **On 2026-11-06 the card interactions and editor flights changed** (BEHAVIOR
 §5.1, §8, §9.5, §10.1, §11; DECISIONS D10): a picture's left hover pill is now
