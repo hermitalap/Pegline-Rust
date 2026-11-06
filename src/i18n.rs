@@ -279,15 +279,6 @@ pub fn s() -> &'static Strings {
     })
 }
 
-/// Installs a fixed language. Used by tests; the app calls `s()` directly.
-pub fn set_lang(lang: Lang) -> &'static Strings {
-    match lang {
-        Lang::En => &EN,
-        Lang::Es => &ES,
-        Lang::Zh => &ZH,
-    }
-}
-
 /// Windows UI language, mapped to the three supported languages.
 pub fn detect() -> Lang {
     // Test hook: lets the visual acceptance runs exercise all three layouts

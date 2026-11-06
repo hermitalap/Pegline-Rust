@@ -26,42 +26,34 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
-    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
+    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB, D2D1_DRAW_TEXT_OPTIONS,
+    D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
     D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1Geometry, ID2D1Layer, ID2D1LinearGradientBrush,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
+    ID2D1Factory1, ID2D1Geometry, ID2D1Layer, ID2D1LinearGradientBrush,
     ID2D1RoundedRectangleGeometry, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
-};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, IDWriteFactory,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGIOutput,
-    IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
+    IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::font;
+use crate::gfx::{
+    create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
+};
 use crate::i18n;
 use crate::types::{ImageData, RectF};
 
@@ -309,7 +301,6 @@ struct Palette {
     cross_ink: ID2D1SolidColorBrush,
     note_paper: ID2D1SolidColorBrush,
     note_ink: ID2D1SolidColorBrush,
-    pin_slot: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
     /// Vertical gradient from (0,0) to (0,1); scaled per card.
@@ -350,7 +341,6 @@ impl Palette {
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
             note_paper: solid(context, split(crate::notes::PALETTE[0].paper), 1.0)?,
             note_ink: solid(context, split(crate::notes::PALETTE[0].ink), 1.0)?,
-            pin_slot: solid(context, [0, 0, 0], 0x52 as f32 / 255.0)?,
             metal,
             metal_edge,
             border,
@@ -387,7 +377,6 @@ pub struct Renderer {
     targets: [Option<ID2D1Bitmap1>; 2],
     target_props: D2D1_BITMAP_PROPERTIES1,
     d2d_factory: ID2D1Factory1,
-    dwrite: IDWriteFactory,
     palette: Palette,
     border_scale: f32,
     shadow: Shadow,
@@ -428,7 +417,8 @@ impl Renderer {
         let (factory, dcomp, target, visual) = create_composition(&dxgi_device, hwnd)?;
         let (swap_chain, swap_chain3) = create_swap_chain(&factory, &device, width_px, height_px)?;
         let dpi_f = dpi as f32;
-        let (d2d_factory, d2d_device, context) = create_d2d(&dxgi_device, dpi_f)?;
+        let (d2d_factory, d2d_device, context) =
+            create_d2d(&dxgi_device, dpi_f, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE)?;
 
         let target_props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -480,7 +470,6 @@ impl Renderer {
             targets: [None, None],
             target_props,
             d2d_factory,
-            dwrite,
             palette,
             border_scale: 1.0,
             shadow,
@@ -554,6 +543,10 @@ impl Renderer {
         if width_px == self.width_px && height_px == self.height_px && dpi as f32 == self.dpi {
             return Ok(());
         }
+        // Baking a shadow is a per-pixel CPU Gaussian. It depends only on the
+        // DPI, not on the window size, so a size-only resize must not pay for it
+        // again — the flight and preview windows resize on every flight.
+        let rebake_scenery = dpi as f32 != self.dpi;
         // SAFETY: release the D2D targets before resizing their buffers.
         unsafe {
             self.context
@@ -574,31 +567,33 @@ impl Renderer {
         self.width_px = width_px;
         self.height_px = height_px;
         self.dpi = dpi as f32;
-        // SAFETY: the context is ours; DPI changes must be pushed down.
-        unsafe {
-            self.context.SetDpi(self.dpi, self.dpi);
+        if rebake_scenery {
+            // SAFETY: the context is ours; DPI changes must be pushed down.
+            unsafe {
+                self.context.SetDpi(self.dpi, self.dpi);
+            }
+            self.target_props.dpiX = self.dpi;
+            self.target_props.dpiY = self.dpi;
+            self.shadow.idle =
+                bake_card_shadow(&self.context, self.dpi, SHADOW_BLUR_DIP, SHADOW_OFFSET_DIP)?;
+            self.shadow.hover = bake_card_shadow(
+                &self.context,
+                self.dpi,
+                SHADOW_HOVER_BLUR_DIP,
+                SHADOW_HOVER_OFFSET_DIP,
+            )?;
+            self.pin_shadow = create_blurred_rect(
+                &self.context,
+                self.dpi,
+                self.dpi,
+                crate::layout::PIN_WIDTH,
+                crate::layout::PIN_HEIGHT,
+                3.5,
+                1.6,
+                8.0,
+                0.3,
+            )?;
         }
-        self.target_props.dpiX = self.dpi;
-        self.target_props.dpiY = self.dpi;
-        self.shadow.idle =
-            bake_card_shadow(&self.context, self.dpi, SHADOW_BLUR_DIP, SHADOW_OFFSET_DIP)?;
-        self.shadow.hover = bake_card_shadow(
-            &self.context,
-            self.dpi,
-            SHADOW_HOVER_BLUR_DIP,
-            SHADOW_HOVER_OFFSET_DIP,
-        )?;
-        self.pin_shadow = create_blurred_rect(
-            &self.context,
-            self.dpi,
-            self.dpi,
-            crate::layout::PIN_WIDTH,
-            crate::layout::PIN_HEIGHT,
-            3.5,
-            1.6,
-            8.0,
-            0.3,
-        )?;
         self.rope = None;
         Ok(())
     }
@@ -1172,6 +1167,11 @@ impl Renderer {
     }
 
     fn mask_geometry(&mut self, rect: RectF, radius: f32) -> Option<ID2D1Geometry> {
+        // One geometry per distinct (size, radius). The flight window animates
+        // its size, so this key changes every frame; without a bound the map
+        // grew without limit (a 0.4 s flight adds roughly 48 entries). Clearing
+        // costs at most one rebuilt geometry per entry.
+        const MASK_CACHE: usize = 24;
         let key = (
             (rect.width() * 8.0).round().max(1.0) as u32,
             (rect.height() * 8.0).round().max(1.0) as u32,
@@ -1179,6 +1179,9 @@ impl Renderer {
         );
         if let Some(geometry) = self.masks.get(&key) {
             return Some(geometry.clone());
+        }
+        if self.masks.len() >= MASK_CACHE {
+            self.masks.clear();
         }
         let rounded = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
@@ -1197,150 +1200,6 @@ impl Renderer {
         self.masks.insert(key, geometry.clone());
         Some(geometry)
     }
-}
-
-fn create_composition(
-    dxgi_device: &IDXGIDevice,
-    hwnd: HWND,
-) -> Result<
-    (
-        IDXGIFactory2,
-        IDCompositionDevice,
-        IDCompositionTarget,
-        IDCompositionVisual,
-    ),
-    String,
-> {
-    // SAFETY: `dxgi_device` is a live DXGI device owned by this thread, and the
-    // DComp objects are created from it and kept alive together.
-    unsafe {
-        let adapter = dxgi_device
-            .GetAdapter()
-            .map_err(|e| format!("GetAdapter: {e}"))?;
-        let factory: IDXGIFactory2 = adapter.GetParent().map_err(|e| format!("GetParent: {e}"))?;
-        let dcomp: IDCompositionDevice = DCompositionCreateDevice(dxgi_device)
-            .map_err(|e| format!("DCompositionCreateDevice: {e}"))?;
-        let target = dcomp
-            .CreateTargetForHwnd(hwnd, true)
-            .map_err(|e| format!("CreateTargetForHwnd: {e}"))?;
-        let visual = dcomp
-            .CreateVisual()
-            .map_err(|e| format!("CreateVisual: {e}"))?;
-        target
-            .SetRoot(&visual)
-            .map_err(|e| format!("SetRoot: {e}"))?;
-        dcomp.Commit().map_err(|e| format!("Commit: {e}"))?;
-        Ok((factory, dcomp, target, visual))
-    }
-}
-
-fn create_swap_chain(
-    factory: &IDXGIFactory2,
-    device: &ID3D11Device,
-    width_px: u32,
-    height_px: u32,
-) -> Result<(IDXGISwapChain1, IDXGISwapChain3), String> {
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
-        Width: width_px,
-        Height: height_px,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
-    };
-    // SAFETY: the factory and device are alive; a composition swap chain takes
-    // no output adapter.
-    unsafe {
-        let swap_chain: IDXGISwapChain1 = factory
-            .CreateSwapChainForComposition(device, &desc, None::<&IDXGIOutput>)
-            .map_err(|e| format!("CreateSwapChainForComposition: {e}"))?;
-        let swap_chain3: IDXGISwapChain3 = swap_chain
-            .cast()
-            .map_err(|e| format!("IDXGISwapChain3: {e}"))?;
-        Ok((swap_chain, swap_chain3))
-    }
-}
-
-fn create_d2d(
-    dxgi_device: &IDXGIDevice,
-    dpi: f32,
-) -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext), String> {
-    // SAFETY: a single-threaded factory used only on this thread; the D2D
-    // device and context are handed to the renderer and dropped with it.
-    unsafe {
-        let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-            .map_err(|e| format!("D2D1CreateFactory: {e}"))?;
-        let device = factory
-            .CreateDevice(dxgi_device)
-            .map_err(|e| format!("CreateDevice(d2d): {e}"))?;
-        let context = device
-            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-            .map_err(|e| format!("CreateDeviceContext: {e}"))?;
-        context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        // The overlay swap chain carries premultiplied alpha, so ClearType is
-        // not valid. Ask for grayscale explicitly instead of relying on
-        // Direct2D's silent fallback; text origins are already snapped to the
-        // device pixel grid in `draw_text`.
-        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        context.SetDpi(dpi, dpi);
-        Ok((factory, device, context))
-    }
-}
-
-fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
-    let mut device: Option<ID3D11Device> = None;
-    let mut immediate: Option<ID3D11DeviceContext> = None;
-    let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-    let mut level = D3D_FEATURE_LEVEL_11_0;
-    // SAFETY: out-params are owned by this function; the level array is live.
-    let created = unsafe {
-        D3D11CreateDevice(
-            None::<&IDXGIAdapter>,
-            D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            Some(&mut level),
-            Some(&mut immediate),
-        )
-    };
-    if created.is_err() {
-        let levels = [D3D_FEATURE_LEVEL_11_0];
-        // SAFETY: same as above; 11.0 is the documented floor.
-        unsafe {
-            D3D11CreateDevice(
-                None::<&IDXGIAdapter>,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut level),
-                Some(&mut immediate),
-            )
-        }
-        .map_err(|e| format!("D3D11CreateDevice(11.0): {e}"))?;
-    }
-    let device = device.ok_or_else(|| "D3D11 device missing".to_string())?;
-    let immediate = immediate.ok_or_else(|| "D3D11 context missing".to_string())?;
-    Ok((device, immediate))
-}
-
-fn create_dwrite() -> Result<IDWriteFactory, String> {
-    // SAFETY: DWrite is a free-threaded factory; the out-pointer is valid.
-    unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-        .map_err(|e| format!("DWriteCreateFactory: {e}"))
 }
 
 /// Bakes the soft shadow of one rounded rectangle.

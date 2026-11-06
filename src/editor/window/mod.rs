@@ -11,6 +11,8 @@
 //! itself with a temporary file and a rename. An open editor sleeps in `recv`
 //! whenever nothing is dirty, so it costs no CPU between gestures.
 
+mod paint;
+
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -26,50 +28,31 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES,
-    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM,
-    D2D1_DASH_STYLE_SOLID, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
-    D2D1_LAYER_OPTIONS_NONE, D2D1_LAYER_PARAMETERS, D2D1_LINE_JOIN_ROUND,
-    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory,
-    ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
-    ID2D1Geometry, ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
+    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID,
+    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
+    ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
-};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_HIT_TEST_METRICS, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
+    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGIOutput,
-    IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
+    IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
-use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory2, GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA,
-    IWICImagingFactory, IWICPalette, WICBitmapCacheOnLoad, WICBitmapDitherTypeNone,
-    WICBitmapPaletteTypeCustom, WICRect,
-};
+use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory2, IWICImagingFactory};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -101,11 +84,15 @@ use crate::capture::wic;
 use crate::editor::layout::{self, Hit, Layout};
 use crate::editor::model::{COLORS, Doc, Mark, Tool, WIDTHS};
 use crate::font;
+use crate::gfx::{
+    create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
+};
 use crate::i18n;
 use crate::logging;
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
+use paint::Chrome;
 
 /// The result of one edit, delivered on the UI thread.
 #[derive(Clone, Debug)]
@@ -562,7 +549,6 @@ enum Command {
     Undo,
     Redo,
     Save,
-    Cancel,
     Stop,
 }
 
@@ -595,15 +581,34 @@ unsafe extern "system" fn editor_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    match message {
-        WM_ERASEBKGND => return LRESULT(1),
-        WM_PAINT => {
-            // SAFETY: clearing our own update region.
-            unsafe {
-                let _ = ValidateRect(Some(hwnd), None);
-            }
-            return LRESULT(0);
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        editor_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in editor_wndproc");
+            LRESULT(0)
         }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+///
+/// A dispatcher only: it keeps the `GWLP_USERDATA` null check, the routing and
+/// the default handling, and hands each message family to one `handle_*`
+/// function below, so no single concern hides inside a 300-line match.
+unsafe fn editor_wndproc_inner(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // Erasing and painting may arrive before `open` has stored a `Shared`, so
+    // they are answered before the lookup, exactly as they were.
+    match message {
+        WM_ERASEBKGND | WM_PAINT => return handle_paint(hwnd, message),
         _ => {}
     }
 
@@ -617,6 +622,53 @@ unsafe extern "system" fn editor_wndproc(
     // SAFETY: the pointer was set by `open` and lives as long as the window.
     let shared = unsafe { &*raw };
 
+    match message {
+        WM_ACTIVATE | WM_SETFOCUS | WM_KILLFOCUS => {
+            return handle_focus(hwnd, message, wparam, shared);
+        }
+        WM_CLOSE => return handle_close(hwnd, shared),
+        WM_APP_EDITOR_DONE => return handle_deliver(hwnd, shared),
+        WM_DESTROY => return handle_destroy(hwnd, shared),
+        WM_SIZE | WM_DPICHANGED => return handle_resize(hwnd, message, lparam, shared),
+        WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            return handle_mouse(hwnd, message, lparam, shared);
+        }
+        WM_SETCURSOR => return handle_cursor(hwnd, message, wparam, lparam, shared),
+        WM_KEYDOWN | WM_CHAR => {
+            // A `WM_KEYDOWN` the editor does not use belongs to the window: the
+            // handler says so with `None` and the default call below runs.
+            if let Some(result) = handle_key(hwnd, message, wparam, shared) {
+                return result;
+            }
+        }
+        WM_IME_SETCONTEXT
+        | WM_IME_STARTCOMPOSITION
+        | WM_IME_COMPOSITION
+        | WM_IME_ENDCOMPOSITION
+        | WM_IME_CHAR
+        | WM_APP_IME_CARET => return handle_ime(hwnd, message, wparam, lparam, shared),
+        _ => {}
+    }
+    // SAFETY: default processing for messages the editor does not handle.
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// `WM_ERASEBKGND` and `WM_PAINT`: the render thread paints every pixel, so the
+/// window only swallows the erase and clears its own update region.
+fn handle_paint(hwnd: HWND, message: u32) -> LRESULT {
+    if message == WM_ERASEBKGND {
+        return LRESULT(1);
+    }
+    // SAFETY: clearing our own update region.
+    unsafe {
+        let _ = ValidateRect(Some(hwnd), None);
+    }
+    LRESULT(0)
+}
+
+/// `WM_ACTIVATE`, `WM_SETFOCUS` and `WM_KILLFOCUS`: the editor takes no focus
+/// from the line, but losing focus ends the edit.
+fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
     match message {
         WM_ACTIVATE => {
             // Clicking anywhere outside the editor — another app, the desktop,
@@ -632,12 +684,10 @@ unsafe extern "system" fn editor_wndproc(
                 cancel_composition(hwnd, shared);
                 request_save(shared);
             }
-            return LRESULT(0);
         }
         WM_SETFOCUS => {
             logging::trace("editor focus");
             shared.focus_ready.store(true, Ordering::Release);
-            return LRESULT(0);
         }
         WM_KILLFOCUS => {
             logging::trace("editor focus lost");
@@ -645,38 +695,48 @@ unsafe extern "system" fn editor_wndproc(
                 cancel_composition(hwnd, shared);
                 request_save(shared);
             }
-            return LRESULT(0);
         }
-        WM_CLOSE => {
-            cancel_composition(hwnd, shared);
-            request_save(shared);
-            return LRESULT(0);
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// `WM_CLOSE`: closing saves, like clicking outside the card, and uncommitted
+/// pinyin is cancelled first so it never reaches the picture.
+fn handle_close(hwnd: HWND, shared: &Shared) -> LRESULT {
+    cancel_composition(hwnd, shared);
+    request_save(shared);
+    LRESULT(0)
+}
+
+/// `WM_APP_EDITOR_DONE`: the render thread has published a result; hand it to
+/// the app here, on the UI thread.
+fn handle_deliver(hwnd: HWND, shared: &Shared) -> LRESULT {
+    deliver_pending(shared, hwnd);
+    LRESULT(0)
+}
+
+/// `WM_DESTROY`: drop the input context and mark the window closed. The
+/// `Shared` outlives the window, so the app can still read the flag.
+fn handle_destroy(hwnd: HWND, shared: &Shared) -> LRESULT {
+    let ime = shared.ime.swap(0, Ordering::AcqRel);
+    if ime != 0 {
+        let context = HIMC(ime as *mut c_void);
+        // SAFETY: the HWND is still valid during WM_DESTROY and the
+        // context was created by us in `open`.
+        unsafe {
+            let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
+            let _ = ImmDestroyContext(context);
         }
-        WM_APP_EDITOR_DONE => {
-            deliver_pending(shared, hwnd);
-            return LRESULT(0);
-        }
-        WM_APP_IME_CARET => {
-            // The render thread just published a new caret after painting the
-            // composition; this is the only point where the caret and the IME
-            // windows agree, because the caret is measured from the layout.
-            position_ime(hwnd, shared);
-            return LRESULT(0);
-        }
-        WM_DESTROY => {
-            let ime = shared.ime.swap(0, Ordering::AcqRel);
-            if ime != 0 {
-                let context = HIMC(ime as *mut c_void);
-                // SAFETY: the HWND is still valid during WM_DESTROY and the
-                // context was created by us in `open`.
-                unsafe {
-                    let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
-                    let _ = ImmDestroyContext(context);
-                }
-            }
-            shared.closed.store(true, Ordering::Release);
-            return LRESULT(0);
-        }
+    }
+    shared.closed.store(true, Ordering::Release);
+    LRESULT(0)
+}
+
+/// `WM_SIZE` and `WM_DPICHANGED`: keep the render thread's pixel geometry and
+/// DPI in step with the window.
+fn handle_resize(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    match message {
         WM_SIZE => {
             let width = (lparam.0 as usize & 0xFFFF) as u32;
             let height = ((lparam.0 as usize >> 16) & 0xFFFF) as u32;
@@ -687,7 +747,6 @@ unsafe extern "system" fn editor_wndproc(
                 height_px: height.max(1),
                 dpi,
             });
-            return LRESULT(0);
         }
         WM_DPICHANGED => {
             // SAFETY: lparam is the suggested window rectangle for this message.
@@ -704,8 +763,17 @@ unsafe extern "system" fn editor_wndproc(
                     SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
-            return LRESULT(0);
         }
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// `WM_LBUTTONDOWN`, `WM_MOUSEMOVE`, `WM_MOUSELEAVE`, `WM_LBUTTONUP` and
+/// `WM_CAPTURECHANGED`: pointer positions, capture and the hover highlight, all
+/// forwarded to the render thread, which owns the hit math.
+fn handle_mouse(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    match message {
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_xy(lparam);
             // A click ends the text mark it lands on (or the whole edit, on
@@ -720,41 +788,6 @@ unsafe extern "system" fn editor_wndproc(
             // SAFETY: capturing the mouse for our own window.
             unsafe { SetCapture(hwnd) };
             shared.send(Command::PointerDown { x, y });
-            return LRESULT(0);
-        }
-        WM_SETCURSOR => {
-            // Hand over the floating pills, cross/I-beam over the photo and a
-            // plain arrow in the transparent gaps around the card.
-            if (lparam.0 as u32 & 0xFFFF) == HTCLIENT {
-                let mut point = POINT::default();
-                // SAFETY: pure queries on our own window and the thread cursor.
-                unsafe {
-                    let _ = GetCursorPos(&mut point);
-                    let _ = ScreenToClient(hwnd, &mut point);
-                }
-                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
-                let x = point.x as f32 / (dpi / 96.0);
-                let y = point.y as f32 / (dpi / 96.0);
-                let layout = shared.layout.lock().map(|layout| *layout).ok();
-                let cursor = match layout {
-                    Some(layout) if layout.hit(x, y).is_some() => IDC_HAND,
-                    Some(layout) if layout.on_photo(x, y) => {
-                        if shared.text_tool.load(Ordering::Acquire) {
-                            IDC_IBEAM
-                        } else {
-                            IDC_CROSS
-                        }
-                    }
-                    _ => IDC_ARROW,
-                };
-                // SAFETY: system cursors are process-wide and never freed.
-                unsafe {
-                    let loaded = LoadCursorW(None, cursor).unwrap_or_default();
-                    let _ = SetCursor(Some(loaded));
-                }
-                return LRESULT(1);
-            }
-            return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_xy(lparam);
@@ -772,11 +805,9 @@ unsafe extern "system" fn editor_wndproc(
                 let _ = TrackMouseEvent(&mut track as *mut _);
             }
             shared.send(Command::PointerMove { x, y });
-            return LRESULT(0);
         }
         WM_MOUSELEAVE => {
             shared.send(Command::HoverClear);
-            return LRESULT(0);
         }
         WM_LBUTTONUP => {
             let (x, y) = mouse_xy(lparam);
@@ -786,18 +817,117 @@ unsafe extern "system" fn editor_wndproc(
                 let _ = ReleaseCapture();
             }
             shared.send(Command::PointerUp { x, y });
-            return LRESULT(0);
         }
         WM_CAPTURECHANGED => {
-            if shared.captured.swap(false, Ordering::AcqRel) {
+            // The flag is always cleared, but only a capture we owned turns
+            // into a cancelled gesture.
+            let was_captured = shared.captured.swap(false, Ordering::AcqRel);
+            if was_captured {
                 shared.send(Command::PointerCancel);
             }
-            return LRESULT(0);
         }
-        WM_CHAR => {
-            forward_char(shared, wparam);
-            return LRESULT(0);
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// `WM_SETCURSOR`: the cursor shape over the pills, the photo and the gaps.
+fn handle_cursor(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    shared: &Shared,
+) -> LRESULT {
+    // Hand over the floating pills, cross/I-beam over the photo and a plain
+    // arrow in the transparent gaps around the card.
+    if (lparam.0 as u32 & 0xFFFF) == HTCLIENT {
+        let mut point = POINT::default();
+        // SAFETY: pure queries on our own window and the thread cursor.
+        unsafe {
+            let _ = GetCursorPos(&mut point);
+            let _ = ScreenToClient(hwnd, &mut point);
         }
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+        let x = point.x as f32 / (dpi / 96.0);
+        let y = point.y as f32 / (dpi / 96.0);
+        let layout = shared.layout.lock().map(|layout| *layout).ok();
+        let cursor = match layout {
+            Some(layout) if layout.hit(x, y).is_some() => IDC_HAND,
+            Some(layout) if layout.on_photo(x, y) => {
+                if shared.text_tool.load(Ordering::Acquire) {
+                    IDC_IBEAM
+                } else {
+                    IDC_CROSS
+                }
+            }
+            _ => IDC_ARROW,
+        };
+        // SAFETY: system cursors are process-wide and never freed.
+        unsafe {
+            let loaded = LoadCursorW(None, cursor).unwrap_or_default();
+            let _ = SetCursor(Some(loaded));
+        }
+        return LRESULT(1);
+    }
+    // SAFETY: default handling for the non-client area.
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// `WM_KEYDOWN` and `WM_CHAR`: the shortcuts, Esc and text input. `None` means
+/// the key is not the editor's, so the caller's default handling runs.
+fn handle_key(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> Option<LRESULT> {
+    if message == WM_CHAR {
+        forward_char(shared, wparam);
+        return Some(LRESULT(0));
+    }
+    // Everything else routed here is `WM_KEYDOWN`.
+    // SAFETY: `GetKeyState` is a thread-local query with no preconditions.
+    let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+    let key = (wparam.0 as u32) & 0xFFFF;
+    if key == VK_ESCAPE.0 as u32 {
+        // Esc cancels the pinyin, not the text box: the second Esc,
+        // with no composition open, ends the text entry.
+        if shared.composing.load(Ordering::Acquire) {
+            cancel_composition(hwnd, shared);
+            return Some(LRESULT(0));
+        }
+        shared.send(Command::Escape);
+        return Some(LRESULT(0));
+    }
+    if shared.composing.load(Ordering::Acquire) {
+        // The input method owns undo/redo while it is composing.
+        if control && (key == VK_Z.0 as u32 || key == VK_Y.0 as u32) {
+            return Some(LRESULT(0));
+        }
+    }
+    if control && key == VK_Z.0 as u32 {
+        shared.send(Command::Undo);
+        return Some(LRESULT(0));
+    }
+    if control && key == VK_Y.0 as u32 {
+        shared.send(Command::Redo);
+        return Some(LRESULT(0));
+    }
+    if control && key == VK_S.0 as u32 {
+        cancel_composition(hwnd, shared);
+        request_save(shared);
+        return Some(LRESULT(0));
+    }
+    None
+}
+
+/// The IME path: `WM_IME_SETCONTEXT`, `WM_IME_STARTCOMPOSITION`,
+/// `WM_IME_COMPOSITION`, `WM_IME_ENDCOMPOSITION`, `WM_IME_CHAR` and the render
+/// thread's `WM_APP_IME_CARET`.
+fn handle_ime(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    shared: &Shared,
+) -> LRESULT {
+    match message {
         WM_IME_SETCONTEXT => {
             // The editor draws the composition itself (inside its white box),
             // so the input method must not also paint the default floating
@@ -812,7 +942,6 @@ unsafe extern "system" fn editor_wndproc(
             position_ime(hwnd, shared);
             // Returning 0 claims the composition: the IME hands over the
             // string instead of drawing a window of its own.
-            return LRESULT(0);
         }
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
@@ -833,12 +962,10 @@ unsafe extern "system" fn editor_wndproc(
                 shared.send(Command::Composition { text, cursor });
             }
             position_ime(hwnd, shared);
-            return LRESULT(0);
         }
         WM_IME_ENDCOMPOSITION => {
             shared.composing.store(false, Ordering::Release);
             shared.send(Command::EndComposition);
-            return LRESULT(0);
         }
         WM_IME_CHAR => {
             // With an IME context the result string is the single commit path
@@ -852,46 +979,16 @@ unsafe extern "system" fn editor_wndproc(
                     shared.send(Command::Char(character));
                 }
             }
-            return LRESULT(0);
         }
-        WM_KEYDOWN => {
-            // SAFETY: `GetKeyState` is a thread-local query with no preconditions.
-            let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
-            let key = (wparam.0 as u32) & 0xFFFF;
-            if key == VK_ESCAPE.0 as u32 {
-                // Esc cancels the pinyin, not the text box: the second Esc,
-                // with no composition open, ends the text entry.
-                if shared.composing.load(Ordering::Acquire) {
-                    cancel_composition(hwnd, shared);
-                    return LRESULT(0);
-                }
-                shared.send(Command::Escape);
-                return LRESULT(0);
-            }
-            if shared.composing.load(Ordering::Acquire) {
-                // The input method owns undo/redo while it is composing.
-                if control && (key == VK_Z.0 as u32 || key == VK_Y.0 as u32) {
-                    return LRESULT(0);
-                }
-            }
-            if control && key == VK_Z.0 as u32 {
-                shared.send(Command::Undo);
-                return LRESULT(0);
-            }
-            if control && key == VK_Y.0 as u32 {
-                shared.send(Command::Redo);
-                return LRESULT(0);
-            }
-            if control && key == VK_S.0 as u32 {
-                cancel_composition(hwnd, shared);
-                request_save(shared);
-                return LRESULT(0);
-            }
+        WM_APP_IME_CARET => {
+            // The render thread just published a new caret after painting the
+            // composition; this is the only point where the caret and the IME
+            // windows agree, because the caret is measured from the layout.
+            position_ime(hwnd, shared);
         }
         _ => {}
     }
-    // SAFETY: default processing for messages the editor does not handle.
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    LRESULT(0)
 }
 
 /// Asks the render thread for one save.
@@ -1136,12 +1233,14 @@ fn client_size(hwnd: HWND) -> Option<(u32, u32)> {
     ))
 }
 
-/// DIP to physical pixels, never zero.
+// ---- the render thread ----------------------------------------------------
+
+/// DIP to physical pixels, never zero. Only the IME anchor tests need it; the
+/// production paths fold the same arithmetic into their own layout math.
+#[cfg(test)]
 fn pixels(dip: f32, dpi: u32) -> i32 {
     ((dip * dpi.max(96) as f32 / 96.0).round() as i32).max(1)
 }
-
-// ---- the render thread ----------------------------------------------------
 
 fn render_thread(
     start: Start,
@@ -1192,7 +1291,7 @@ fn render_thread(
     }
     if done.is_none() {
         'session: loop {
-            if !state.dirty {
+            if !state.needs_draw() {
                 match rx.recv() {
                     Ok(command) => match state.apply(command) {
                         Step::Continue => {}
@@ -1222,7 +1321,7 @@ fn render_thread(
             if stopping {
                 break;
             }
-            if !state.dirty {
+            if !state.needs_draw() {
                 continue;
             }
             if let Err(error) = state.draw() {
@@ -1235,8 +1334,13 @@ fn render_thread(
                 if let Err(error) = state.rebuild() {
                     logging::error(format!("editor rebuild: {error}"));
                 }
+                // `draw` clears the flag of every pass it finished, so a lost
+                // surface stops here instead of spinning; the rebuild's repaint
+                // waits for the next command, and a rebuilt surface repaints the
+                // card anyway because it has no card bitmap.
+                state.content_dirty = false;
+                state.chrome_dirty = false;
             }
-            state.dirty = false;
         }
     }
     // Report while the surface is still composed. The window is deliberately
@@ -1356,7 +1460,11 @@ struct EditorState {
     dpi: f32,
     source_size: (u32, u32),
     texts_dirty: bool,
-    dirty: bool,
+    /// The card bitmap (photo and marks) must be painted again.
+    content_dirty: bool,
+    /// The window around the card (glass, pin and pills) must be composed
+    /// again; the card bitmap is reused exactly as it is.
+    chrome_dirty: bool,
     lost: u32,
     /// UI-thread side shared state; used to publish the IME caret position.
     shared: Arc<Shared>,
@@ -1413,7 +1521,8 @@ impl EditorState {
             dpi,
             source_size,
             texts_dirty: false,
-            dirty: true,
+            content_dirty: true,
+            chrome_dirty: true,
             lost: 0,
             shared,
         };
@@ -1480,7 +1589,8 @@ impl EditorState {
         self.texts.clear();
         self.composing = None;
         self.texts_dirty = true;
-        self.dirty = true;
+        // A new picture and a new card size: the whole card is repainted.
+        self.content_dirty = true;
         logging::trace(format!(
             "editor picture: {}x{}",
             self.source_size.0, self.source_size.1
@@ -1500,7 +1610,8 @@ impl EditorState {
         self.height_px = height_px;
         self.dpi = dpi as f32;
         self.relayout();
-        self.dirty = true;
+        // The surface dropped its card bitmap and the photo was re-fitted.
+        self.content_dirty = true;
         Ok(())
     }
 
@@ -1533,7 +1644,9 @@ impl EditorState {
         self.composing = None;
         self.texts_dirty = true;
         self.relayout();
-        self.dirty = true;
+        // A fresh surface has no card bitmap: the card is painted again, and
+        // the window is composed with it in the same frame.
+        self.content_dirty = true;
         self.lost = 0;
         logging::error("editor surface rebuilt");
         Ok(())
@@ -1556,19 +1669,21 @@ impl EditorState {
             Command::PointerCancel => self.cancel_gesture(),
             Command::HoverClear => {
                 if self.hover.take().is_some() {
-                    self.dirty = true;
+                    // A hover moves a pill highlight only: the card bitmap is
+                    // reused.
+                    self.chrome_dirty = true;
                 }
             }
             Command::Char(character) => {
                 if self.doc.as_mut().map(|doc| doc.type_char(character)) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::Backspace => {
                 if self.doc.as_mut().map(|doc| doc.backspace()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::Composition { text, cursor } => {
@@ -1579,19 +1694,19 @@ impl EditorState {
                     == Some(true)
                 {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::CommitComposition(text) => {
                 if self.doc.as_mut().map(|doc| doc.commit_composition(&text)) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::EndComposition => {
                 if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::FinishText => {
@@ -1599,7 +1714,7 @@ impl EditorState {
                     if doc.is_typing() {
                         doc.finish_text();
                         self.texts_dirty = true;
-                        self.dirty = true;
+                        self.content_dirty = true;
                     }
                 }
             }
@@ -1614,7 +1729,7 @@ impl EditorState {
                 // still only cancels the pinyin: the text box stays open.
                 if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                     return Step::Continue;
                 }
                 if self.doc.as_ref().map(|doc| doc.is_typing()) == Some(true) {
@@ -1622,7 +1737,7 @@ impl EditorState {
                         doc.finish_text();
                     }
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                     return Step::Continue;
                 }
                 return self.cancel_event();
@@ -1634,7 +1749,7 @@ impl EditorState {
                 }
                 if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::Redo => {
@@ -1643,11 +1758,10 @@ impl EditorState {
                 }
                 if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Command::Save => return self.save_step(),
-            Command::Cancel => return self.cancel_event(),
             Command::Stop => return Step::Stop,
         }
         Step::Continue
@@ -1732,7 +1846,7 @@ impl EditorState {
                 });
             }
         }
-        self.dirty = true;
+        self.content_dirty = true;
         Step::Continue
     }
 
@@ -1742,7 +1856,9 @@ impl EditorState {
             let hover = self.layout.hit(x, y);
             if self.hover != hover {
                 self.hover = hover;
-                self.dirty = true;
+                // The hover only lights a pill button: repaint the chrome and
+                // keep the photo and every mark as they are.
+                self.chrome_dirty = true;
             }
             return;
         }
@@ -1758,7 +1874,8 @@ impl EditorState {
         if self.tool == Tool::Eraser {
             self.erase_stroke(previous, source);
         }
-        self.dirty = true;
+        // The mark being dragged lives in the card bitmap.
+        self.content_dirty = true;
     }
 
     fn pointer_up(&mut self, x_px: i32, y_px: i32) {
@@ -1774,7 +1891,7 @@ impl EditorState {
                     doc.record_erase(before);
                 }
             }
-            self.dirty = true;
+            self.content_dirty = true;
             return;
         }
         let (left, top, width, height) = drag_rect(drag.start, end);
@@ -1821,7 +1938,7 @@ impl EditorState {
                 doc.push(mark);
             }
         }
-        self.dirty = true;
+        self.content_dirty = true;
     }
 
     /// Cancels the gesture in progress, restoring the marks an eraser had
@@ -1834,7 +1951,7 @@ impl EditorState {
             }
             self.texts_dirty = true;
         }
-        self.dirty = true;
+        self.content_dirty = true;
     }
 
     /// Erases along a line in source pixels so a fast drag leaves no gaps.
@@ -1872,7 +1989,7 @@ impl EditorState {
             hit
         });
         self.texts_dirty = true;
-        self.dirty = true;
+        self.content_dirty = true;
     }
 
     /// Eraser hit test. Text uses its real layout box; the other marks use the
@@ -1899,11 +2016,6 @@ impl EditorState {
         crate::editor::model::mark_hits_eraser(mark, point, radius)
     }
 
-    /// The toolbar entry under a DIP point.
-    fn hit_action(&self, x: f32, y: f32) -> Option<Hit> {
-        self.layout.hit(x, y)
-    }
-
     fn activate(&mut self, hit: Hit) -> Step {
         match hit {
             Hit::Tool(index) => {
@@ -1915,31 +2027,33 @@ impl EditorState {
                     self.shared
                         .text_tool
                         .store(*tool == Tool::Text, Ordering::Release);
-                    self.dirty = true;
+                    // The tool button and its glyph are chrome; the picture and
+                    // the marks already on it do not change.
+                    self.chrome_dirty = true;
                 }
             }
             Hit::Colour(index) => {
                 if let Some(entry) = COLORS.get(index) {
                     self.color = entry.0;
-                    self.dirty = true;
+                    self.chrome_dirty = true;
                 }
             }
             Hit::Width(index) => {
                 if let Some(width) = WIDTHS.get(index) {
                     self.width = *width;
-                    self.dirty = true;
+                    self.chrome_dirty = true;
                 }
             }
             Hit::Undo => {
                 if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Hit::Redo => {
                 if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
                     self.texts_dirty = true;
-                    self.dirty = true;
+                    self.content_dirty = true;
                 }
             }
             Hit::Cancel => return self.cancel_event(),
@@ -1974,19 +2088,49 @@ impl EditorState {
 
     // ---- drawing ----------------------------------------------------------
 
+    /// Whether a frame is pending: either the card content or the window around
+    /// it changed.
+    fn needs_draw(&self) -> bool {
+        self.content_dirty || self.chrome_dirty
+    }
+
+    /// Paints what changed. The card pass (photo and marks) runs only when its
+    /// content is out of date and otherwise leaves the card bitmap alone; the
+    /// window pass always recomposes the frame around that bitmap. Sweeping the
+    /// pointer across the pills therefore costs a compose, not a full-resolution
+    /// source blit and every mark.
     fn draw(&mut self) -> Result<(), String> {
         if self.texts_dirty {
             self.rebuild_texts();
             self.texts_dirty = false;
+            // Text marks and the typing box live in the card bitmap, so a text
+            // rebuild always needs the card pass.
+            self.content_dirty = true;
         }
-        self.prepare_mosaics();
-        // The photo and the marks are painted into an opaque card bitmap so
-        // text can keep ClearType; the window itself stays transparent around
-        // the card and the floating pills.
-        self.surface.begin_card(self.layout.photo, self.dpi)?;
-        self.paint_photo();
-        self.surface.end_card()?;
+        // A surface rebuilt after a device loss has no card bitmap: never
+        // compose the window over an empty card.
+        if self.surface.card.is_none() {
+            self.content_dirty = true;
+        }
+        let content = self.content_dirty;
+        if content {
+            self.prepare_mosaics();
+            // The photo and the marks are painted into an opaque card bitmap so
+            // text can keep ClearType; the window itself stays transparent
+            // around the card and the floating pills. The bitmap is persistent,
+            // so the next chrome-only frame samples exactly these pixels.
+            self.surface.begin_card(self.layout.photo, self.dpi)?;
+            self.paint_photo();
+            self.surface.end_card()?;
+            self.content_dirty = false;
+        }
+        if !content && !self.chrome_dirty {
+            return Ok(());
+        }
         self.surface.begin_window()?;
+        // The window target is up: from here a failed `EndDraw` or `Present`
+        // leaves nothing pending, exactly like a painted frame.
+        self.chrome_dirty = false;
         self.paint_chrome();
         self.surface.end()?;
         match self.surface.present(true) {
@@ -1995,7 +2139,9 @@ impl EditorState {
                 Ok(())
             }
             crate::render::Present::Retry => {
-                self.dirty = true;
+                // The card bitmap kept its content; only the window has to be
+                // composed again.
+                self.chrome_dirty = true;
                 Ok(())
             }
             crate::render::Present::DeviceLost => Err("device lost".to_string()),
@@ -2098,778 +2244,7 @@ impl EditorState {
         }
     }
 
-    /// Paints the floating window: the card's baked shadow, the glass frame and
-    /// its picture, the clothespin and the five toolbar pills.
-    fn paint_chrome(&self) {
-        let rt = &self.assets.rt;
-        // SAFETY: the window target is in a draw and every brush is ours.
-        unsafe {
-            rt.SetTransform(&Matrix3x2::identity());
-        }
-        if let Some(shadow) = self.surface.shadow.as_ref() {
-            crate::render::draw_shadow(&self.surface.context, shadow, self.layout.card, 0.18);
-        }
-        let card = self.layout.card;
-        let frame = rounded(card, layout::CARD_RADIUS);
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            rt.FillRoundedRectangle(&frame, &self.chrome.glass);
-        }
-        if let Some(bitmap) = self.surface.card.as_ref() {
-            self.paint_card_bitmap(bitmap);
-        }
-        // SAFETY: as above.
-        unsafe {
-            rt.DrawRoundedRectangle(&frame, &self.chrome.border, 0.75, None);
-        }
-        self.paint_pin();
-        for pill in self.layout.top_pills {
-            self.paint_pill(pill);
-        }
-        for pill in self.layout.bottom_pills {
-            self.paint_pill(pill);
-        }
-        self.paint_tools();
-        self.paint_colours();
-        self.paint_widths();
-        self.paint_actions();
-    }
-
-    /// Draws the opaque photo bitmap inside the rounded photo corners.
-    fn paint_card_bitmap(&self, bitmap: &ID2D1Bitmap1) {
-        let Some(mask) = self.photo_mask.as_ref() else {
-            return;
-        };
-        let photo = self.layout.photo;
-        let parameters = D2D1_LAYER_PARAMETERS {
-            contentBounds: d2d_rect(photo),
-            geometricMask: ManuallyDrop::new(Some(mask.clone())),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity: 1.0,
-            opacityBrush: ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS_NONE,
-        };
-        let destination = d2d_rect(photo);
-        let source = D2D_RECT_F {
-            left: 0.0,
-            top: 0.0,
-            right: self.layout.photo.width(),
-            bottom: self.layout.photo.height(),
-        };
-        // SAFETY: the layer parameters and the rounded mask are alive for the
-        // calls; an internal layer is used because none is passed.
-        unsafe {
-            self.assets.rt.PushLayer(&parameters, None);
-            self.assets.rt.DrawBitmap(
-                bitmap,
-                Some(&destination),
-                1.0,
-                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                Some(&source),
-            );
-            self.assets.rt.PopLayer();
-        }
-    }
-
-    fn paint_pill(&self, pill: RectF) {
-        let rounded = rounded(pill, layout::PILL_RADIUS);
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            self.assets
-                .rt
-                .FillRoundedRectangle(&rounded, &self.chrome.glass);
-            self.assets
-                .rt
-                .DrawRoundedRectangle(&rounded, &self.chrome.border, 0.75, None);
-        }
-    }
-
-    fn paint_pin(&self) {
-        let pin = self.layout.pin;
-        let body = rounded(pin, 3.5);
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            self.assets
-                .rt
-                .FillRoundedRectangle(&body, &self.chrome.metal);
-            self.assets
-                .rt
-                .DrawRoundedRectangle(&body, &self.chrome.metal_edge, 0.6, None);
-        }
-        let slot = RectF::from_xywh(pin.left + 2.0, pin.top + 8.0, pin.width() - 4.0, 1.4);
-        self.fill_round(slot, 0.7, &self.chrome.pin_slot);
-    }
-
-    fn fill_round(&self, rect: RectF, radius: f32, brush: &ID2D1SolidColorBrush) {
-        // SAFETY: the brush and the render target are alive.
-        unsafe {
-            self.assets
-                .rt
-                .FillRoundedRectangle(&rounded(rect, radius), brush);
-        }
-    }
-
-    fn paint_tools(&self) {
-        for (index, rect) in self.layout.tools.iter().enumerate() {
-            let selected = TOOLS[index] == self.tool;
-            let hovered = self.hover == Some(Hit::Tool(index));
-            self.paint_button(*rect, selected, hovered);
-            let brush = if selected {
-                &self.chrome.white
-            } else {
-                &self.chrome.ink
-            };
-            self.paint_tool_icon(index, *rect, brush);
-        }
-    }
-
-    fn paint_colours(&self) {
-        for (index, rect) in self.layout.colours.iter().enumerate() {
-            let rgb = COLORS[index].0;
-            let center = rect.center();
-            // The dots are round, concentric with the pill's end radius.
-            let disc = D2D1_ELLIPSE {
-                point: Vector2 {
-                    X: center.0,
-                    Y: center.1,
-                },
-                radiusX: rect.width() * 0.5,
-                radiusY: rect.height() * 0.5,
-            };
-            if let Some(brush) = self.assets.brush(rgb) {
-                // SAFETY: the brush and the render target are alive.
-                unsafe {
-                    self.assets.rt.FillEllipse(&disc, brush);
-                }
-            }
-            let selected = rgb == self.color;
-            let hovered = self.hover == Some(Hit::Colour(index));
-            // The hairline keeps a white dot readable on the glass; the accent
-            // ring sits just outside the dot so it never eats into the colour.
-            // SAFETY: the brush and the render target are alive.
-            unsafe {
-                self.assets
-                    .rt
-                    .DrawEllipse(&disc, &self.chrome.ink_dim, 1.0, None);
-            }
-            if selected || hovered {
-                let ring = D2D1_ELLIPSE {
-                    radiusX: disc.radiusX + 1.6,
-                    radiusY: disc.radiusY + 1.6,
-                    ..disc
-                };
-                // SAFETY: the brush and the render target are alive.
-                unsafe {
-                    self.assets.rt.DrawEllipse(
-                        &ring,
-                        &self.chrome.accent,
-                        if selected { 2.0 } else { 1.5 },
-                        None,
-                    );
-                }
-            }
-        }
-    }
-
-    fn paint_widths(&self) {
-        for (index, rect) in self.layout.widths.iter().enumerate() {
-            let selected = (WIDTHS[index] - self.width).abs() < 0.01;
-            let hovered = self.hover == Some(Hit::Width(index));
-            // Keep the button unfilled when selected so the dot's real size
-            // stays readable; the accent ring marks the choice instead.
-            self.paint_button(*rect, false, hovered);
-            if selected {
-                let ring = D2D1_ELLIPSE {
-                    point: Vector2 {
-                        X: rect.center().0,
-                        Y: rect.center().1,
-                    },
-                    radiusX: rect.width() * 0.5 - 1.2,
-                    radiusY: rect.height() * 0.5 - 1.2,
-                };
-                // SAFETY: the brush and the render target are alive.
-                unsafe {
-                    self.assets
-                        .rt
-                        .DrawEllipse(&ring, &self.chrome.accent, 2.0, None);
-                }
-            }
-            // A dot whose diameter follows the stroke weight reads at a glance:
-            // 4/8/12 source pixels, scaled 1.25x so the 4 px dot stays visible.
-            let diameter = (WIDTHS[index] * 1.25).min(rect.height() - 10.0);
-            let disc = D2D1_ELLIPSE {
-                point: Vector2 {
-                    X: rect.center().0,
-                    Y: rect.center().1,
-                },
-                radiusX: diameter * 0.5,
-                radiusY: diameter * 0.5,
-            };
-            let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.ink);
-            let outline = if selected {
-                &self.chrome.accent
-            } else {
-                &self.chrome.ink_dim
-            };
-            // SAFETY: the render target is in a draw and the brushes are alive.
-            unsafe {
-                self.assets.rt.FillEllipse(&disc, brush);
-                self.assets.rt.DrawEllipse(&disc, outline, 1.0, None);
-            }
-        }
-    }
-
-    fn paint_actions(&self) {
-        let undo_enabled = self.doc.as_ref().map(|doc| doc.can_undo()) == Some(true);
-        let redo_enabled = self.doc.as_ref().map(|doc| doc.can_redo()) == Some(true);
-        self.paint_action(
-            self.layout.undo,
-            &self.labels.undo,
-            undo_enabled,
-            false,
-            self.hover == Some(Hit::Undo),
-        );
-        self.paint_action(
-            self.layout.redo,
-            &self.labels.redo,
-            redo_enabled,
-            false,
-            self.hover == Some(Hit::Redo),
-        );
-        self.paint_action(
-            self.layout.cancel,
-            &self.labels.cancel,
-            true,
-            false,
-            self.hover == Some(Hit::Cancel),
-        );
-        self.paint_action(
-            self.layout.save,
-            &self.labels.save,
-            true,
-            true,
-            self.hover == Some(Hit::Save),
-        );
-    }
-
-    /// Paints the picture and its marks into the opaque card bitmap. The
-    /// transform maps source pixels to the bitmap's DIP space, whose origin is
-    /// the photo's top-left corner.
-    fn paint_photo(&self) {
-        let rt = &self.assets.rt;
-        let base = Matrix3x2::scale(self.canvas.scale, self.canvas.scale);
-        // SAFETY: the card target is in a draw and the bitmap is alive.
-        unsafe {
-            rt.SetTransform(&base);
-        }
-        if let Some(bitmap) = self.assets.source.as_ref() {
-            let full = d2d_rect(RectF::from_xywh(
-                0.0,
-                0.0,
-                self.source_size.0 as f32,
-                self.source_size.1 as f32,
-            ));
-            let source = D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: self.source_size.0 as f32,
-                bottom: self.source_size.1 as f32,
-            };
-            // SAFETY: the bitmap covers the whole destination.
-            unsafe {
-                rt.DrawBitmap(
-                    bitmap,
-                    Some(&full),
-                    1.0,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                    Some(&source),
-                );
-            }
-        }
-        let painter = Painter {
-            rt,
-            assets: &self.assets,
-            stroke: &self.surface.stroke_round,
-            dash: &self.surface.stroke_dash,
-            triangle: &self.surface.triangle,
-            base,
-        };
-        // WPF's text tool showed a white TextBox with a caret while typing;
-        // without it the glyphs float on a busy picture with no insertion
-        // point. It sits above older marks and below the text being typed, and
-        // is on-screen only: `save()` renders the marks alone.
-        if let Some(doc) = self.doc.as_ref() {
-            match (doc.typing_index(), doc.typing_mark()) {
-                (
-                    Some(index),
-                    Some(Mark::Text {
-                        origin,
-                        text,
-                        color,
-                        ..
-                    }),
-                ) => {
-                    painter.marks_except(doc.marks(), &self.texts, index);
-                    // While the IME is composing, the box, the text and the
-                    // caret all follow `committed + composition`: the pinyin is
-                    // drawn inside the white box, underlined, instead of by the
-                    // input method in a transparent floating window.
-                    let composed = self
-                        .composing
-                        .as_ref()
-                        .filter(|composed| composed.committed == *text);
-                    let (text_w, text_h) = match composed {
-                        Some(composed) => (composed.width, composed.height),
-                        None => self
-                            .texts
-                            .iter()
-                            .find(|entry| entry.text == *text)
-                            .map(|entry| {
-                                let metrics = text_metrics(&entry.layout);
-                                (metrics.width, metrics.height)
-                            })
-                            .unwrap_or((8.0, 38.0)),
-                    };
-                    // The caret sits after the composition cursor, not after
-                    // the committed text, so an IME that edits inside its
-                    // composition keeps the caret where the pinyin is.
-                    let caret_x = composed
-                        .and_then(|composed| {
-                            let composition = doc.composition()?;
-                            composition_caret_x(
-                                &composed.layout,
-                                text,
-                                composition.text(),
-                                composition.cursor(),
-                            )
-                        })
-                        .unwrap_or(text_w);
-                    let pad = 4.0;
-                    let box_rect = RectF::from_xywh(
-                        origin.0 - pad,
-                        origin.1 - pad,
-                        text_w.max(caret_x).max(8.0) + pad * 2.0,
-                        text_h.max(24.0) + pad * 2.0,
-                    );
-                    let rounded_box = rounded(box_rect, 3.0);
-                    let pen = self.assets.brush(*color);
-                    // SAFETY: the render target is in a draw; brushes are live.
-                    unsafe {
-                        rt.FillRoundedRectangle(&rounded_box, &self.chrome.text_box);
-                        if let Some(pen) = pen {
-                            rt.DrawRoundedRectangle(&rounded_box, pen, 1.0, None);
-                            let caret = d2d_rect(RectF::from_xywh(
-                                origin.0 + caret_x.max(0.0) + 1.0,
-                                origin.1,
-                                2.0,
-                                text_h.max(18.0),
-                            ));
-                            rt.FillRectangle(&caret, pen);
-                        }
-                    }
-                    // Publish the insertion point and the box bottom in client
-                    // pixels: the composition window of input methods that draw
-                    // their own sits at the caret, and the candidate list opens
-                    // under the box instead of on top of the glyphs.
-                    let (caret_px, candidate_px) =
-                        ime_client_px(self.canvas, *origin, caret_x + 1.0, text_h, self.dpi);
-                    let previous = (
-                        self.shared.caret_x.load(Ordering::Relaxed),
-                        self.shared.caret_y.load(Ordering::Relaxed),
-                        self.shared.candidate_x.load(Ordering::Relaxed),
-                        self.shared.candidate_y.load(Ordering::Relaxed),
-                    );
-                    let next = (caret_px.0, caret_px.1, candidate_px.0, candidate_px.1);
-                    if previous != next {
-                        self.shared.caret_x.store(next.0, Ordering::Relaxed);
-                        self.shared.caret_y.store(next.1, Ordering::Relaxed);
-                        self.shared.candidate_x.store(next.2, Ordering::Relaxed);
-                        self.shared.candidate_y.store(next.3, Ordering::Relaxed);
-                        // The composition string changes faster than a frame:
-                        // each pinyin key widens the caret before the IME asks
-                        // for its position. Re-anchor it once the layout has
-                        // been measured, while the composition is still open.
-                        if self.shared.composing.load(Ordering::Acquire) {
-                            // SAFETY: posting to the window this editor owns;
-                            // a failed post only leaves the list a frame late.
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(self.surface.hwnd),
-                                    WM_APP_IME_CARET,
-                                    WPARAM(0),
-                                    LPARAM(0),
-                                );
-                            }
-                        }
-                    }
-                    match composed {
-                        Some(composed) => {
-                            painter.text_layout(*origin, &composed.layout, *color);
-                        }
-                        None => {
-                            if let Some(mark) = doc.marks().get(index) {
-                                painter.mark(mark, &self.texts);
-                            }
-                        }
-                    }
-                }
-                _ => painter.marks(doc.marks(), &self.texts),
-            }
-        }
-        if let Some(drag) = self.drag.as_ref() {
-            painter.drag(self.tool, self.color, self.width, self.canvas.scale, drag);
-        }
-        // SAFETY: restores the identity transform for the next target.
-        unsafe {
-            rt.SetTransform(&Matrix3x2::identity());
-        }
-    }
-
-    /// Radius that keeps a button concentric with the pill around it: half its
-    /// short side, so the tool buttons and the colour dots are circles and the
-    /// wide action buttons are stadiums.
-    fn button_radius(rect: RectF) -> f32 {
-        rect.width().min(rect.height()) * 0.5
-    }
-
-    fn paint_button(&self, rect: RectF, selected: bool, hovered: bool) {
-        let rounded = rounded(rect, Self::button_radius(rect));
-        let fill = if selected {
-            Some(if hovered {
-                &self.chrome.accent_hover
-            } else {
-                &self.chrome.accent
-            })
-        } else if hovered {
-            Some(&self.chrome.glass_lit)
-        } else {
-            None
-        };
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            if let Some(fill) = fill {
-                self.assets.rt.FillRoundedRectangle(&rounded, fill);
-            }
-            if selected {
-                self.assets.rt.DrawRoundedRectangle(
-                    &rounded,
-                    &self.chrome.accent_border,
-                    1.0,
-                    None,
-                );
-            }
-        }
-    }
-
-    /// Draws one of the four Lucide tool icons (ISC/MIT; the SVG sources and
-    /// license are in `assets/icons/`). Each icon lives on Lucide's 24x24 grid
-    /// with a 2 px stroke; here it is centred in the button at 18 DIP and the
-    /// stroke is scaled to match, so all four share one optical weight.
-    fn paint_tool_icon(&self, index: usize, rect: RectF, brush: &ID2D1SolidColorBrush) {
-        let (cx, cy) = rect.center();
-        let rt = &self.assets.rt;
-        let stroke = &self.surface.stroke_round;
-        // The arrow glyph sits in a 14x14 part of Lucide's 24x24 grid, so it is
-        // grown a little to share the optical size of the rectangle and grid;
-        // the filled eraser is compact, so it gets a slightly bigger box too.
-        let design_scale = match index {
-            0 => 1.12,
-            3 => 1.2,
-            _ => 1.0,
-        };
-        let scale = ICON_BOX / ICON_DESIGN * design_scale;
-        let width = ICON_STROKE * ICON_BOX / ICON_DESIGN;
-        let point = |x: f32, y: f32| Vector2 {
-            X: cx + (x - 12.0) * scale,
-            Y: cy + (y - 12.0) * scale,
-        };
-        let box_rect = |x: f32, y: f32, w: f32, h: f32| {
-            RectF::from_xywh(
-                cx + (x - 12.0) * scale,
-                cy + (y - 12.0) * scale,
-                w * scale,
-                h * scale,
-            )
-        };
-        let line = |from: (f32, f32), to: (f32, f32)| {
-            // SAFETY: the render target is in a draw, the brush is alive and
-            // the stroke style belongs to the surface.
-            unsafe {
-                rt.DrawLine(
-                    point(from.0, from.1),
-                    point(to.0, to.1),
-                    brush,
-                    width,
-                    Some(stroke),
-                );
-            }
-        };
-        match index {
-            // Lucide `move-up-right`: M13 5H19V11 and M19 5L5 19.
-            0 => {
-                line((13.0, 5.0), (19.0, 5.0));
-                line((19.0, 5.0), (19.0, 11.0));
-                line((19.0, 5.0), (5.0, 19.0));
-            }
-            // Lucide `rectangle-horizontal`: rect x=2 y=6 w=20 h=12 rx=2.
-            1 => {
-                let frame = box_rect(2.0, 6.0, 20.0, 12.0);
-                // SAFETY: the render target is in a draw and the brush is alive.
-                unsafe {
-                    rt.DrawRoundedRectangle(
-                        &rounded(frame, 2.0 * scale),
-                        brush,
-                        width,
-                        Some(stroke),
-                    );
-                }
-            }
-            // Lucide `type`: M12 4v16, M9 20h6 and the rounded top bar
-            // M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2.
-            2 => {
-                line((12.0, 4.0), (12.0, 20.0));
-                line((9.0, 20.0), (15.0, 20.0));
-                line((4.0, 7.0), (4.0, 5.0));
-                line((4.0, 5.0), (5.0, 4.0));
-                line((5.0, 4.0), (19.0, 4.0));
-                line((19.0, 4.0), (20.0, 5.0));
-                line((20.0, 5.0), (20.0, 7.0));
-            }
-            // Lucide `eye-off` for the mosaic/redaction tool: an eye with a
-            // slash, drawn as an oval, a pupil and the slash.
-            4 => {
-                let eye = D2D1_ELLIPSE {
-                    point: point(12.0, 12.0),
-                    radiusX: 9.2 * scale,
-                    radiusY: 5.8 * scale,
-                };
-                let pupil = D2D1_ELLIPSE {
-                    point: point(12.0, 12.0),
-                    radiusX: 2.4 * scale,
-                    radiusY: 2.4 * scale,
-                };
-                // SAFETY: the render target is in a draw and the brush is alive.
-                unsafe {
-                    rt.DrawEllipse(&eye, brush, width, Some(stroke));
-                    rt.DrawEllipse(&pupil, brush, width, Some(stroke));
-                }
-                line((2.0, 2.0), (22.0, 22.0));
-            }
-            // Lucide `eraser`, drawn with the same outline and sleeve stroke.
-            3 => {
-                let transform = Matrix3x2::scale(scale, scale)
-                    * Matrix3x2::translation(cx - 12.0 * scale, cy - 12.0 * scale);
-                // SAFETY: the render target is in a draw and the brush is alive.
-                unsafe {
-                    rt.SetTransform(&transform);
-                    rt.DrawGeometry(
-                        &self.surface.eraser,
-                        brush,
-                        width / scale.max(0.0001),
-                        Some(stroke),
-                    );
-                    rt.SetTransform(&Matrix3x2::identity());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn paint_action(
-        &self,
-        rect: RectF,
-        label: &Label,
-        enabled: bool,
-        primary: bool,
-        hovered: bool,
-    ) {
-        self.paint_button(rect, primary, hovered);
-        let brush = if primary {
-            &self.chrome.white
-        } else if enabled {
-            &self.chrome.ink
-        } else {
-            &self.chrome.ink_dim
-        };
-        self.paint_label(label, rect, brush);
-    }
-
-    fn paint_label(&self, label: &Label, rect: RectF, brush: &ID2D1SolidColorBrush) {
-        let x = rect.left + (rect.width() - label.width) * 0.5;
-        let y = rect.top + (rect.height() - label.height) * 0.5 - 1.0;
-        // SAFETY: the layout, the brush and the render target are alive.
-        unsafe {
-            self.assets.rt.DrawTextLayout(
-                Vector2 { X: x, Y: y },
-                &label.layout,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-    }
-
     // ---- saving -----------------------------------------------------------
-
-    /// Renders the source picture plus marks into an image of `width` x
-    /// `height` pixels. `scale` maps source pixels to those pixels: 1.0 for the
-    /// saved file, a fraction for the flight preview. Runs on the render
-    /// thread, never on the UI thread.
-    fn render_document(
-        &mut self,
-        width: u32,
-        height: u32,
-        scale: f32,
-        smooth: bool,
-        marks: bool,
-    ) -> Result<ImageData, String> {
-        let Some(doc) = self.doc.as_ref() else {
-            return Err("there is no picture to save".to_string());
-        };
-        let source = doc
-            .source()
-            .ok_or_else(|| "there is no picture to save".to_string())?;
-        if !source.is_valid() {
-            return Err(format!(
-                "invalid source image ({}x{}, {} bytes)",
-                source.width,
-                source.height,
-                source.bgra.len()
-            ));
-        }
-        let (source_width, source_height) = (source.width, source.height);
-        let factory = wic_factory()?;
-        // SAFETY: the factory is live, the size is at least one pixel and the
-        // pixel format is a static WIC GUID.
-        let target = unsafe {
-            factory.CreateBitmap(
-                width,
-                height,
-                &GUID_WICPixelFormat32bppPBGRA,
-                WICBitmapCacheOnLoad,
-            )
-        }
-        .map_err(|error| format!("CreateBitmap({width}x{height}): {error}"))?;
-        let properties = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX: 96.0,
-            dpiY: 96.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        // SAFETY: the factory and the WIC bitmap are live; the target keeps a
-        // reference to the bitmap for as long as it exists.
-        let rt = unsafe {
-            self.surface
-                .factory
-                .CreateWicBitmapRenderTarget(&target, &properties)
-        }
-        .map_err(|error| format!("CreateWicBitmapRenderTarget: {error}"))?;
-
-        let mut assets = Assets::new(rt.clone())?;
-        assets.set_source(source)?;
-        if marks {
-            for mark in doc.marks() {
-                let Mark::Mosaic { rect, block } = mark else {
-                    continue;
-                };
-                let Some(key) = mosaic_key(*rect, *block, (source_width, source_height)) else {
-                    continue;
-                };
-                if assets.has_mosaic(key) {
-                    continue;
-                }
-                if let Some(image) = build_mosaic(source, key) {
-                    assets.upload_mosaic(key, &image)?;
-                }
-            }
-        }
-
-        let transform = Matrix3x2::scale(scale, scale);
-        let full = d2d_rect(RectF::from_xywh(
-            0.0,
-            0.0,
-            source_width as f32,
-            source_height as f32,
-        ));
-        // SAFETY: the target is a fresh WIC render target on this thread.
-        unsafe {
-            rt.SetDpi(96.0, 96.0);
-            rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            // The file has an alpha channel; subpixel ClearType would both be
-            // unsupported and leave coloured fringes in it.
-            rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            rt.SetTransform(&Matrix3x2::identity());
-            rt.BeginDraw();
-            rt.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
-            rt.SetTransform(&transform);
-        }
-        if let Some(bitmap) = assets.source.as_ref() {
-            // SAFETY: `bitmap` is alive and covers the full destination.
-            unsafe {
-                rt.DrawBitmap(
-                    bitmap,
-                    Some(&full),
-                    1.0,
-                    if smooth {
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR
-                    } else {
-                        D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-                    },
-                    None,
-                );
-            }
-        }
-        let painter = Painter {
-            rt: &rt,
-            assets: &assets,
-            stroke: &self.surface.stroke_round,
-            dash: &self.surface.stroke_dash,
-            triangle: &self.surface.triangle,
-            base: transform,
-        };
-        if marks {
-            painter.marks(doc.marks(), &self.texts);
-        }
-        // SAFETY: `BeginDraw` was called above on this thread.
-        unsafe { rt.EndDraw(None, None) }.map_err(|error| format!("EndDraw(save): {error}"))?;
-
-        // The render target holds premultiplied pixels; PNG wants straight
-        // alpha, so the bitmap is converted before it is copied out.
-        // SAFETY: the factory is live.
-        let converter = unsafe { factory.CreateFormatConverter() }
-            .map_err(|error| format!("CreateFormatConverter: {error}"))?;
-        // SAFETY: the converter is fresh and the source bitmap is alive.
-        unsafe {
-            converter.Initialize(
-                &target,
-                &GUID_WICPixelFormat32bppBGRA,
-                WICBitmapDitherTypeNone,
-                None::<&IWICPalette>,
-                0.0,
-                WICBitmapPaletteTypeCustom,
-            )
-        }
-        .map_err(|error| format!("IWICFormatConverter::Initialize: {error}"))?;
-        let stride = width * 4;
-        let mut bgra = vec![0u8; width as usize * height as usize * 4];
-        let rect = WICRect {
-            X: 0,
-            Y: 0,
-            Width: width as i32,
-            Height: height as i32,
-        };
-        // SAFETY: `bgra` is exactly `stride * height` bytes for the size above.
-        unsafe { converter.CopyPixels(&rect, stride, &mut bgra) }
-            .map_err(|error| format!("CopyPixels({width}x{height}): {error}"))?;
-        Ok(ImageData::new(width, height, bgra))
-    }
 
     /// Encodes the source-resolution PNG and renders the card-sized preview
     /// plus the larger flight image.
@@ -3105,242 +2480,6 @@ fn arrow_head(
     Some((shaft, transform))
 }
 
-/// Draws marks in source coordinates through the current base transform.
-struct Painter<'a> {
-    rt: &'a ID2D1RenderTarget,
-    assets: &'a Assets,
-    stroke: &'a ID2D1StrokeStyle,
-    dash: &'a ID2D1StrokeStyle,
-    triangle: &'a ID2D1Geometry,
-    base: Matrix3x2,
-}
-
-impl<'a> Painter<'a> {
-    fn marks(&self, marks: &[Mark], texts: &[TextEntry]) {
-        for mark in marks {
-            self.mark(mark, texts);
-        }
-    }
-
-    /// Draws every mark except `skip` (the text being typed, which goes above
-    /// its input box).
-    fn marks_except(&self, marks: &[Mark], texts: &[TextEntry], skip: usize) {
-        for (index, mark) in marks.iter().enumerate() {
-            if index != skip {
-                self.mark(mark, texts);
-            }
-        }
-    }
-
-    fn mark(&self, mark: &Mark, texts: &[TextEntry]) {
-        match mark {
-            Mark::Arrow {
-                from,
-                to,
-                color,
-                width,
-            } => self.arrow(*from, *to, *color, *width),
-            Mark::Rectangle { rect, color, width } => {
-                self.rectangle(*rect, *color, *width);
-            }
-            Mark::Text {
-                origin,
-                text,
-                color,
-                ..
-            } => self.text(*origin, text, *color, texts),
-            Mark::Mosaic { rect, block } => self.mosaic(*rect, *block),
-        }
-    }
-
-    fn text(&self, origin: (f32, f32), text: &str, color: u32, texts: &[TextEntry]) {
-        let Some(entry) = texts.iter().find(|entry| entry.text == text) else {
-            return;
-        };
-        self.text_layout(origin, &entry.layout, color);
-    }
-
-    /// Draws an already laid-out run. The composing text uses the same call;
-    /// only its layout carries the composition underline.
-    fn text_layout(&self, origin: (f32, f32), layout: &IDWriteTextLayout, color: u32) {
-        let Some(brush) = self.assets.brush(color) else {
-            return;
-        };
-        // SAFETY: the layout, the brush and the target are alive.
-        unsafe {
-            self.rt.DrawTextLayout(
-                Vector2 {
-                    X: origin.0,
-                    Y: origin.1,
-                },
-                layout,
-                brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-        }
-    }
-
-    fn arrow(&self, from: (f32, f32), to: (f32, f32), color: u32, width: f32) {
-        let Some(brush) = self.assets.brush(color) else {
-            return;
-        };
-        let Some((shaft, transform)) = arrow_head(from, to, width, self.base) else {
-            return;
-        };
-        // SAFETY: the brush, the triangle and the target are alive; the head is
-        // a transformed fill of the cached unit triangle.
-        unsafe {
-            self.rt.DrawLine(
-                Vector2 {
-                    X: from.0,
-                    Y: from.1,
-                },
-                Vector2 {
-                    X: shaft.0,
-                    Y: shaft.1,
-                },
-                brush,
-                width,
-                Some(self.stroke),
-            );
-            self.rt.SetTransform(&transform);
-            self.rt.FillGeometry(self.triangle, brush, None);
-            self.rt.SetTransform(&self.base);
-        }
-    }
-
-    fn rectangle(&self, rect: (f32, f32, f32, f32), color: u32, width: f32) {
-        if let Some(brush) = self.assets.brush(color) {
-            let d = d2d_rect(rect_of(rect));
-            // SAFETY: the brush and the target are alive.
-            unsafe {
-                self.rt.DrawRectangle(&d, brush, width, Some(self.stroke));
-            }
-        }
-    }
-
-    fn mosaic(&self, rect: (f32, f32, f32, f32), block: u32) {
-        let Some(key) = mosaic_key(rect, block, self.assets.source_size) else {
-            return;
-        };
-        let Some(bitmap) = self.assets.find_mosaic(key) else {
-            return;
-        };
-        let (blocks_x, blocks_y) = key.blocks();
-        let destination = d2d_rect(rect_of((
-            key.x as f32,
-            key.y as f32,
-            key.width as f32,
-            key.height as f32,
-        )));
-        let source = D2D_RECT_F {
-            left: 0.0,
-            top: 0.0,
-            right: blocks_x as f32,
-            bottom: blocks_y as f32,
-        };
-        // SAFETY: the bitmap is alive; nearest-neighbour keeps the 16-pixel
-        // blocks square, which is what a mosaic is.
-        unsafe {
-            self.rt.DrawBitmap(
-                bitmap,
-                Some(&destination),
-                1.0,
-                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                Some(&source),
-            );
-        }
-    }
-
-    /// The in-progress gesture, drawn exactly like the mark it will become.
-    fn drag(&self, tool: Tool, color: u32, width: f32, scale: f32, drag: &Drag) {
-        match tool {
-            Tool::Arrow => self.arrow(drag.start, drag.current, color, width),
-            Tool::Rectangle => {
-                self.rectangle(drag_rect(drag.start, drag.current), color, width);
-            }
-            Tool::Mosaic => {
-                // Dashed white outline: no pixels are hidden before the drop.
-                let Some(brush) = self.assets.brush(0xFF_FF_FF) else {
-                    return;
-                };
-                let outline = (1.5 / scale.max(0.0001)).max(1.0);
-                let d = d2d_rect(rect_of(drag_rect(drag.start, drag.current)));
-                // SAFETY: the brush and the target are alive.
-                unsafe {
-                    self.rt.DrawRectangle(&d, brush, outline, Some(self.dash));
-                }
-            }
-            Tool::Eraser => {
-                // A dashed eraser disc at the pointer. A dark ring under the
-                // white dashes keeps it visible on light and dark pictures.
-                let radius = ERASER_RADIUS_DIP / scale.max(0.0001);
-                let disc = D2D1_ELLIPSE {
-                    point: Vector2 {
-                        X: drag.current.0,
-                        Y: drag.current.1,
-                    },
-                    radiusX: radius,
-                    radiusY: radius,
-                };
-                let width = (1.5 / scale.max(0.0001)).max(0.8);
-                // SAFETY: the brushes and the target are alive.
-                unsafe {
-                    if let Some(dark) = self.assets.brush(0x00_00_00) {
-                        self.rt.DrawEllipse(&disc, dark, width * 2.0, None);
-                    }
-                    if let Some(white) = self.assets.brush(0xFF_FF_FF) {
-                        self.rt.DrawEllipse(&disc, white, width, Some(self.dash));
-                    }
-                }
-            }
-            Tool::Text => {}
-        }
-    }
-}
-
-/// Solid brushes for the toolbar chrome, created once per surface.
-struct Chrome {
-    /// The same white glass a hanging card wears.
-    glass: ID2D1SolidColorBrush,
-    /// Hover fill inside a pill.
-    glass_lit: ID2D1SolidColorBrush,
-    /// Hairline around a pill or the card.
-    border: ID2D1SolidColorBrush,
-    ink: ID2D1SolidColorBrush,
-    ink_dim: ID2D1SolidColorBrush,
-    accent: ID2D1SolidColorBrush,
-    accent_hover: ID2D1SolidColorBrush,
-    accent_border: ID2D1SolidColorBrush,
-    white: ID2D1SolidColorBrush,
-    /// The translucent sheet behind the text being typed (WPF's TextBox).
-    text_box: ID2D1SolidColorBrush,
-    /// The clothespin.
-    metal: ID2D1SolidColorBrush,
-    metal_edge: ID2D1SolidColorBrush,
-    pin_slot: ID2D1SolidColorBrush,
-}
-
-impl Chrome {
-    fn new(rt: &ID2D1RenderTarget) -> Result<Self, String> {
-        Ok(Self {
-            glass: solid(rt, CHROME_GLASS, CHROME_GLASS_ALPHA)?,
-            glass_lit: solid(rt, CHROME_GLASS_LIT, CHROME_GLASS_LIT_ALPHA)?,
-            border: solid(rt, 0xFF_FF_FF, CHROME_BORDER_ALPHA)?,
-            ink: solid(rt, CHROME_INK, 1.0)?,
-            ink_dim: solid(rt, CHROME_INK_DIM, 1.0)?,
-            accent: solid(rt, CHROME_ACCENT, 1.0)?,
-            accent_hover: solid(rt, CHROME_ACCENT_HOVER, 1.0)?,
-            accent_border: solid(rt, CHROME_ACCENT_BORDER, 1.0)?,
-            white: solid(rt, 0xFF_FF_FF, 1.0)?,
-            text_box: solid(rt, 0xFF_FF_FF, 0.78)?,
-            metal: solid(rt, 0xD8_D8_D8, 1.0)?,
-            metal_edge: solid(rt, 0x8A_8A_8A, 0.9)?,
-            pin_slot: solid(rt, 0x00_00_00, 0.32)?,
-        })
-    }
-}
-
 /// Per-target resources: the pen brushes, the source bitmap, the mosaics.
 struct Assets {
     rt: ID2D1RenderTarget,
@@ -3438,7 +2577,7 @@ impl Assets {
     }
 }
 
-// ---- the GPU stack (adapted from `render/mod.rs`) -------------------------
+// ---- the editor's GPU stack (the device itself comes from `crate::gfx`) ----
 
 /// The editor's own Direct3D + Direct2D + DirectComposition stack.
 struct Surface {
@@ -3484,7 +2623,12 @@ impl Surface {
             .map_err(|error| format!("ID3D11Device -> IDXGIDevice: {error}"))?;
         let (factory2, dcomp, target, visual) = create_composition(&dxgi_device, hwnd)?;
         let (swap_chain, swap_chain3) = create_swap_chain(&factory2, &device, width_px, height_px)?;
-        let (d2d_factory, d2d_device, context) = create_d2d(&dxgi_device, dpi_f)?;
+        // The editor's card and paper targets are opaque, so the text marks and
+        // the toolbar can use subpixel ClearType even though the window itself
+        // is transparent; the saved pictures use a separate alpha target, which
+        // stays grayscale.
+        let (d2d_factory, d2d_device, context) =
+            create_d2d(&dxgi_device, dpi_f, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE)?;
         let factory: ID2D1Factory = d2d_factory
             .cast()
             .map_err(|error| format!("ID2D1Factory1 -> ID2D1Factory: {error}"))?;
@@ -3725,155 +2869,6 @@ impl Surface {
     }
 }
 
-fn create_composition(
-    dxgi_device: &IDXGIDevice,
-    hwnd: HWND,
-) -> Result<
-    (
-        IDXGIFactory2,
-        IDCompositionDevice,
-        IDCompositionTarget,
-        IDCompositionVisual,
-    ),
-    String,
-> {
-    // SAFETY: `dxgi_device` is a live DXGI device owned by this thread; the DComp
-    // objects are created from it and kept alive together.
-    unsafe {
-        let adapter = dxgi_device
-            .GetAdapter()
-            .map_err(|error| format!("GetAdapter: {error}"))?;
-        let factory: IDXGIFactory2 = adapter
-            .GetParent()
-            .map_err(|error| format!("GetParent: {error}"))?;
-        let dcomp: IDCompositionDevice = DCompositionCreateDevice(dxgi_device)
-            .map_err(|error| format!("DCompositionCreateDevice: {error}"))?;
-        let target = dcomp
-            .CreateTargetForHwnd(hwnd, true)
-            .map_err(|error| format!("CreateTargetForHwnd: {error}"))?;
-        let visual = dcomp
-            .CreateVisual()
-            .map_err(|error| format!("CreateVisual: {error}"))?;
-        target
-            .SetRoot(&visual)
-            .map_err(|error| format!("SetRoot: {error}"))?;
-        dcomp.Commit().map_err(|error| format!("Commit: {error}"))?;
-        Ok((factory, dcomp, target, visual))
-    }
-}
-
-fn create_swap_chain(
-    factory: &IDXGIFactory2,
-    device: &ID3D11Device,
-    width_px: u32,
-    height_px: u32,
-) -> Result<(IDXGISwapChain1, IDXGISwapChain3), String> {
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
-        Width: width_px,
-        Height: height_px,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        // The window is transparent around the card and the pills; the card's
-        // own bitmap is opaque, so premultiplied alpha composites cleanly.
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
-    };
-    // SAFETY: the factory and device are alive; a composition swap chain takes
-    // no output adapter.
-    unsafe {
-        let swap_chain: IDXGISwapChain1 = factory
-            .CreateSwapChainForComposition(device, &desc, None::<&IDXGIOutput>)
-            .map_err(|error| format!("CreateSwapChainForComposition: {error}"))?;
-        let swap_chain3: IDXGISwapChain3 = swap_chain
-            .cast()
-            .map_err(|error| format!("IDXGISwapChain3: {error}"))?;
-        Ok((swap_chain, swap_chain3))
-    }
-}
-
-fn create_d2d(
-    dxgi_device: &IDXGIDevice,
-    dpi: f32,
-) -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext), String> {
-    // SAFETY: a single-threaded factory used only on this thread; the D2D
-    // device and context are handed to `Surface` and dropped with it.
-    unsafe {
-        let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-            .map_err(|error| format!("D2D1CreateFactory: {error}"))?;
-        let device = factory
-            .CreateDevice(dxgi_device)
-            .map_err(|error| format!("CreateDevice(d2d): {error}"))?;
-        let context = device
-            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-            .map_err(|error| format!("CreateDeviceContext: {error}"))?;
-        context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        // The editor swap chain is opaque (DXGI_ALPHA_MODE_IGNORE), so Direct2D
-        // can use subpixel ClearType for the toolbar and the on-screen text
-        // marks. Saved pictures use a separate alpha target below, which must
-        // stay grayscale.
-        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-        context.SetDpi(dpi, dpi);
-        Ok((factory, device, context))
-    }
-}
-
-fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
-    let mut device: Option<ID3D11Device> = None;
-    let mut immediate: Option<ID3D11DeviceContext> = None;
-    let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-    let mut level = D3D_FEATURE_LEVEL_11_0;
-    // SAFETY: the out-params are owned by this function and the level array is
-    // live for the call.
-    let created = unsafe {
-        D3D11CreateDevice(
-            None::<&IDXGIAdapter>,
-            D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            Some(&mut level),
-            Some(&mut immediate),
-        )
-    };
-    if created.is_err() {
-        let levels = [D3D_FEATURE_LEVEL_11_0];
-        // SAFETY: as above; 11.0 is the documented floor.
-        unsafe {
-            D3D11CreateDevice(
-                None::<&IDXGIAdapter>,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut level),
-                Some(&mut immediate),
-            )
-        }
-        .map_err(|error| format!("D3D11CreateDevice(11.0): {error}"))?;
-    }
-    let device = device.ok_or_else(|| "D3D11 device missing".to_string())?;
-    let immediate = immediate.ok_or_else(|| "D3D11 context missing".to_string())?;
-    Ok((device, immediate))
-}
-
-fn create_dwrite() -> Result<IDWriteFactory, String> {
-    // SAFETY: DWrite is a free-threaded factory and the out-pointer is valid.
-    unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-        .map_err(|error| format!("DWriteCreateFactory: {error}"))
-}
-
 fn stroke_style(
     factory: &ID2D1Factory,
     dash: D2D1_DASH_STYLE,
@@ -4103,6 +3098,9 @@ fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The device plumbing lives in `crate::gfx`; this one test still builds a
+    // DirectWrite factory of its own to lay out text without a D3D device.
+    use windows::Win32::Graphics::DirectWrite::{DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory};
 
     #[test]
     fn drags_normalize_negative_directions() {

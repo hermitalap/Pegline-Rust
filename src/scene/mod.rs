@@ -5,12 +5,14 @@
 //! springs with the real `dt` and draws. The UI thread reads a [`FrameSnapshot`]
 //! for hit testing, so no rendering result is ever read back.
 
+mod paint;
+
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 
 use crate::layout;
-use crate::render::{ActionsLayout, Renderer, TextId};
+use crate::render::{ActionsLayout, Renderer};
 use crate::spring::{Spring, ease};
 use crate::types::{ActionKind, CardId, CardSpec, FrameSnapshot, HitCard, ImageData, RectF};
 
@@ -830,9 +832,12 @@ impl Scene {
                 || (card.press.value - card.press.target).abs() > 0.002
                 || (card.opacity - if card.flying || card.rehang { 0.0 } else { 1.0 }).abs()
                     > 0.002
-                || card.cross_alpha > 0.002
-                || card.actions_alpha > 0.002
-                || card.copied_alpha > 0.002
+                // Compare against the target, not zero: these are approached
+                // asymptotically, so `alpha > 0.002` stays true forever once a
+                // card is hovered and the thread would never go idle again.
+                || (card.cross_alpha - if hovered { 1.0 } else { 0.0 }).abs() > 0.002
+                || (card.actions_alpha - if show_actions { 1.0 } else { 0.0 }).abs() > 0.002
+                || (card.copied_alpha - if copying { 1.0 } else { 0.0 }).abs() > 0.002
                 || (card.x.value - was).abs() > 0.001;
             if (card.x.value - was).abs() > 0.01 {
                 self.dirty = true;
@@ -882,6 +887,12 @@ impl Scene {
                 + card.drop.value
                 + self.slide.value;
             let frame = card.frame_rect(slot_left).offset(0.0, slot_top);
+            // The card is drawn rotated about its pin, the clothespin at the
+            // top of the frame: `draw_card`'s transform puts that origin at the
+            // slot centre, `slot_top` down. The published boxes stay unrotated
+            // and are in the same frame, so hit testing undoes the rotation
+            // about this point before testing them.
+            let pin = (slot_center, slot_top);
             let hovered = self.hover == Some(card.id) && self.dragging.is_none();
             let actions_layout = self.actions_for(card.note);
             let actions = if hovered {
@@ -920,253 +931,11 @@ impl Scene {
                 open_button,
                 note: card.note,
                 angle: card.swing.value + card.tilt,
+                pin,
                 swatches,
             });
         }
         self.dirty = false;
-    }
-
-    /// Draws the whole scene.
-    pub fn draw(&mut self, renderer: &mut Renderer) {
-        renderer.reset_transform();
-        renderer.set_transform(windows_numerics::Matrix3x2::translation(
-            0.0,
-            self.slide.value,
-        ));
-        renderer.draw_rope(self.width_dip);
-
-        if self.note_peek.value > 0.001 && self.note_entry_center().is_some() {
-            self.draw_note_peek(renderer, self.note_peek_x.value);
-        }
-
-        if self.hint_alpha > 0.01 && self.cards.is_empty() {
-            let center_x = self.width_dip * 0.5;
-            let center_y = layout::rope_y(center_x, self.width_dip) + 34.0;
-            let (text_w, text_h) = renderer.text_size(TextId::Hint);
-            let bounds = RectF::from_xywh(
-                center_x - text_w * 0.5 - 16.0,
-                center_y - text_h * 0.5 - 8.0,
-                text_w + 32.0,
-                text_h + 16.0,
-            );
-            let pushed = renderer.push_opacity(bounds, self.hint_alpha);
-            renderer.draw_hint(center_x, center_y);
-            if pushed {
-                renderer.pop_opacity();
-            }
-        }
-
-        let count = self.cards.len();
-        for index in 0..count {
-            // The drawn position is the spring value, not the final slot: the
-            // row glides when a card is added, removed or lands.
-            let slot_left = self.cards[index].x.value - layout::CARD_WIDTH * 0.5;
-            let hovered = self.hover == Some(self.cards[index].id) && self.dragging.is_none();
-            self.draw_card(renderer, index, slot_left, hovered);
-        }
-        renderer.reset_transform();
-    }
-
-    /// The entry note's peeking corner: a tilted card almost entirely above the
-    /// top edge, with only its bottom-right corner showing.
-    ///
-    /// The line strip's window starts at the top edge, so the target clips the
-    /// rest of the card without a bitmap mask. The spring slides the card down
-    /// from fully hidden to [`layout::NOTE_PEEK_VISIBLE_DIP`], and `entry_x`
-    /// is the animated slot centre that lets it reflow with the row.
-    fn draw_note_peek(&self, renderer: &mut Renderer, entry_x: f32) {
-        let reveal = self.note_peek.value.clamp(0.0, 1.0);
-        if reveal <= 0.001 {
-            return;
-        }
-        let (card_w, card_h) = layout::note_card_size();
-        let (cx, base_cy) = layout::note_peek_center(entry_x);
-        let cy = base_cy - (1.0 - reveal) * layout::NOTE_PEEK_VISIBLE_DIP;
-        // `Matrix3x2::rotation` takes degrees, like the rest of the scene.
-        let angle = layout::NOTE_PEEK_ANGLE_DEG;
-        renderer.set_transform(
-            windows_numerics::Matrix3x2::rotation(angle)
-                * windows_numerics::Matrix3x2::translation(cx, cy),
-        );
-        let frame = RectF::from_xywh(-card_w * 0.5, -card_h * 0.5, card_w, card_h);
-        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
-        let paper = RectF::new(
-            frame.left + layout::PHOTO_INSET,
-            frame.top + layout::PHOTO_INSET,
-            frame.right - layout::PHOTO_INSET,
-            frame.bottom - layout::PHOTO_INSET,
-        );
-        renderer.fill_round(paper, layout::PHOTO_RADIUS, crate::render::Brush::NotePaper);
-        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
-        renderer.set_transform(windows_numerics::Matrix3x2::translation(
-            0.0,
-            self.slide.value,
-        ));
-    }
-
-    fn draw_card(&mut self, renderer: &mut Renderer, index: usize, slot_left: f32, hovered: bool) {
-        let (
-            id,
-            card_size,
-            drop,
-            x,
-            tilt,
-            swing,
-            press,
-            opacity,
-            cross_alpha,
-            actions_alpha,
-            note,
-            note_color,
-        ) = {
-            let card = &self.cards[index];
-            (
-                card.id,
-                card.card_size,
-                card.drop.value,
-                card.x.value,
-                card.tilt,
-                card.swing.value,
-                card.press.value,
-                card.opacity,
-                card.cross_alpha,
-                card.actions_alpha,
-                card.note,
-                card.note_color,
-            )
-        };
-        if opacity <= 0.01 {
-            return;
-        }
-        let (card_w, card_h) = card_size;
-        let slot_top = layout::rope_y(x, self.width_dip) - layout::PIN_ABOVE + drop;
-        let angle = swing + tilt;
-        // Row-vector matrices compose in application order: scale the frame,
-        // then swing it around the pin, then move it to the slot (the slide is
-        // part of the placement because this transform replaces the base one).
-        let transform =
-            windows_numerics::Matrix3x2::scale_around(
-                press,
-                press,
-                windows_numerics::Vector2 {
-                    X: layout::CARD_WIDTH * 0.5,
-                    Y: layout::CARD_OFFSET_BELOW_TOP,
-                },
-            ) * windows_numerics::Matrix3x2::rotation_around(
-                angle,
-                windows_numerics::Vector2 {
-                    X: layout::CARD_WIDTH * 0.5,
-                    Y: 0.0,
-                },
-            ) * windows_numerics::Matrix3x2::translation(slot_left, slot_top + self.slide.value);
-        let frame = RectF::from_xywh(
-            (layout::CARD_WIDTH - card_w) * 0.5,
-            layout::CARD_OFFSET_BELOW_TOP,
-            card_w,
-            card_h,
-        );
-        let bounds = RectF::from_xywh(
-            (layout::CARD_WIDTH - card_w) * 0.5 - 30.0,
-            layout::CARD_OFFSET_BELOW_TOP - 30.0,
-            card_w + 60.0,
-            card_h + 60.0 + layout::ACTIONS_HEIGHT + 20.0,
-        );
-        renderer.set_transform(transform);
-        // A fully opaque card skips the layer; the card is still drawn.
-        let pushed = renderer.push_opacity(bounds, opacity);
-
-        renderer.draw_shadow(frame, if hovered { 0.26 } else { 0.18 }, hovered);
-        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
-        if let Some(image) = self.cards[index].image.as_ref() {
-            let photo = RectF::from_xywh(
-                frame.left + layout::PHOTO_INSET,
-                frame.top + layout::PHOTO_INSET,
-                card_w - layout::PHOTO_INSET * 2.0,
-                card_h - layout::PHOTO_INSET * 2.0,
-            );
-            renderer.draw_photo(image, photo, layout::PHOTO_RADIUS);
-        }
-        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
-        renderer.draw_pin(layout::CARD_WIDTH * 0.5 - layout::PIN_WIDTH * 0.5, 0.0);
-        renderer.draw_cross(
-            frame.left + layout::CROSS_MARGIN,
-            frame.top + layout::CROSS_MARGIN,
-            cross_alpha,
-        );
-
-        // "Copied" takes the button row's place while it is visible.
-        let copied_alpha = self.cards[index].copied_alpha;
-        if copied_alpha > 0.01 {
-            let (text_w, _) = renderer.text_size(TextId::Copied);
-            let pill = RectF::from_xywh(
-                (layout::CARD_WIDTH - (text_w + 20.0)) * 0.5,
-                layout::copied_top(card_h, self.copied_height),
-                text_w + 20.0,
-                self.copied_height,
-            );
-            let pushed = renderer.push_opacity(pill.inflated(8.0), copied_alpha);
-            renderer.draw_pill(pill, TextId::Copied, false);
-            if pushed {
-                renderer.pop_opacity();
-            }
-        }
-
-        if actions_alpha > 0.01 {
-            let a = if note {
-                self.note_actions
-            } else {
-                self.actions
-            };
-            let left = (layout::CARD_WIDTH - a.total_width) * 0.5;
-            // The row rises into place as it fades in, like the original's
-            // -4 DIP translate.
-            let lift = -4.0 * (1.0 - actions_alpha);
-            let top = layout::actions_top_for(card_h, note) + lift;
-            let primary = RectF::from_xywh(left, top, a.left_width, a.height);
-            let open = RectF::from_xywh(left + a.left_width + a.gap, top, a.right_width, a.height);
-            if note {
-                // The colour dots sit above the buttons in their own glass pill.
-                let pill = layout::swatch_pill(card_h).offset(0.0, lift);
-                let pushed = renderer.push_opacity(pill.inflated(8.0), actions_alpha);
-                renderer.fill_round(pill, pill.height() * 0.5, crate::render::Brush::Glass);
-                renderer.stroke_card(pill, pill.height() * 0.5, 0.75);
-                for dot in 0..4 {
-                    renderer.draw_swatch(
-                        layout::swatch_dot(dot, card_h).offset(0.0, lift),
-                        dot,
-                        dot == note_color,
-                    );
-                }
-                if pushed {
-                    renderer.pop_opacity();
-                }
-            }
-            let bounds = RectF::from_xywh(left, top - 8.0, a.total_width, a.height + 16.0);
-            let pushed = renderer.push_opacity(bounds, actions_alpha);
-            let primary_text = if note { TextId::Copy } else { TextId::Annotate };
-            let primary_action = if note {
-                ActionKind::Copy
-            } else {
-                ActionKind::Annotate
-            };
-            renderer.draw_pill(
-                primary,
-                primary_text,
-                self.hover_action == Some((id, primary_action)),
-            );
-            renderer.draw_pill(
-                open,
-                TextId::Open,
-                self.hover_action == Some((id, ActionKind::Open)),
-            );
-            if pushed {
-                renderer.pop_opacity();
-            }
-        }
-
-        if pushed {
-            renderer.pop_opacity();
-        }
     }
 }
 
@@ -1181,6 +950,64 @@ mod tests {
             let value = rng.range(1.6, 3.4);
             assert!((1.6..=3.4).contains(&value));
         }
+    }
+
+    #[test]
+    fn the_published_pin_is_the_rotation_origin_the_card_draws_around() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            crate::render::ActionsLayout::default(),
+            32.0,
+            std::sync::Arc::clone(&snapshot),
+        );
+        // The line is part-way up, the card leans and swings: the pin must
+        // carry the slot, the drop and the slide, and the angle the lean and
+        // the swing, or the hit boxes drift away from the card.
+        scene.slide.value = -37.0;
+        let mut item = card();
+        item.tilt = 2.5;
+        item.swing.value = 4.0;
+        item.x.value = 786.0;
+        item.x.target = 786.0;
+        item.drop.snap(0.0);
+        scene.cards.push(item);
+        scene.publish(0.0);
+
+        let frame = snapshot.lock().expect("snapshot");
+        let hit = frame.cards.first().expect("one published card");
+        assert!((hit.angle - 6.5).abs() < 1e-6, "angle={}", hit.angle);
+
+        // The transform `draw_card` builds, with the local rotation origin
+        // pushed through it, has to land on the published pin: that is the
+        // point the UI thread turns the pointer back around.
+        let slot_left = 786.0 - layout::CARD_WIDTH * 0.5;
+        let slot_top =
+            layout::rope_y(786.0, scene.width_dip) - layout::PIN_ABOVE + scene.cards[0].drop.value;
+        let press = scene.cards[0].press.value;
+        let draw =
+            windows_numerics::Matrix3x2::scale_around(
+                press,
+                press,
+                windows_numerics::Vector2 {
+                    X: layout::CARD_WIDTH * 0.5,
+                    Y: layout::CARD_OFFSET_BELOW_TOP,
+                },
+            ) * windows_numerics::Matrix3x2::rotation_around(
+                hit.angle,
+                windows_numerics::Vector2 {
+                    X: layout::CARD_WIDTH * 0.5,
+                    Y: 0.0,
+                },
+            ) * windows_numerics::Matrix3x2::translation(slot_left, slot_top + scene.slide.value);
+        let (origin_x, origin_y) = (layout::CARD_WIDTH * 0.5, 0.0);
+        let x = origin_x * draw.M11 + origin_y * draw.M21 + draw.M31;
+        let y = origin_x * draw.M12 + origin_y * draw.M22 + draw.M32;
+        assert!((x - hit.pin.0).abs() < 1e-4, "pin x {x} vs {}", hit.pin.0);
+        assert!((y - hit.pin.1).abs() < 1e-4, "pin y {y} vs {}", hit.pin.1);
     }
 
     #[test]

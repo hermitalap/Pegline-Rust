@@ -9,6 +9,9 @@
 //! render thread; the UI thread only forwards input. A frame is drawn when the
 //! text changes, the pointer moves a selection, or the caret blinks.
 
+mod paint;
+
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::ops::Range;
@@ -20,40 +23,27 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_INTERPOLATION_MODE_LINEAR,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_BITMAP_PROPERTIES1, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
     D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1,
-    ID2D1Geometry, ID2D1Image, ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry,
+    ID2D1Image, ID2D1LinearGradientBrush, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
-};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
-};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_HIT_TEST_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_TRAILING,
-    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_WORD_WRAPPING_WRAP, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_HIT_TEST_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
+    DWRITE_WORD_WRAPPING_WRAP, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
-    DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice,
-    IDXGIFactory2, IDXGIOutput, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
+    DXGI_SWAP_CHAIN_FLAG, IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
 use windows::Win32::Graphics::Imaging::{
     GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA, IWICPalette, WICBitmapCacheOnLoad,
@@ -62,7 +52,9 @@ use windows::Win32::Graphics::Imaging::{
 use windows::core::{Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::i18n;
+use crate::gfx::{
+    create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
+};
 use crate::logging;
 use crate::note_editor::display::{
     self, Block, CONTENT_WIDTH, DisplayDoc, DisplayLine, PAD_BOTTOM, PAD_LEFT, PAD_TOP,
@@ -89,7 +81,7 @@ const SHADOW_OFFSET_DIP: f32 = 6.0;
 /// Caret blink half-period, seconds.
 const BLINK_SECONDS: f64 = 0.53;
 /// Mouse wheel scroll, DIP per notch.
-const WHEEL_STEP: f32 = 40.0;
+pub(super) const WHEEL_STEP: f32 = 40.0;
 /// The body and code font families.
 const BODY_FAMILY: PCWSTR = w!("Microsoft YaHei UI");
 const CODE_FAMILY: PCWSTR = w!("Consolas");
@@ -201,6 +193,129 @@ struct LaidLine {
     composition: Option<Range<usize>>,
 }
 
+/// One styled run as [`Assets::layout`] consumes it: the style it applies, the
+/// marker flag it branches on, and the UTF-16 length of the range it styles.
+///
+/// DirectWrite never sees the run's bytes, only the length of the styled range,
+/// and the whole laid-out text is compared separately (it is the cache key), so
+/// this is the exact signature of a run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RunSignature {
+    style: Style,
+    marker: bool,
+    length: u32,
+}
+
+/// Every input [`Assets::layout`] reads, except the laid-out text (that is the
+/// cache key) and the render target the drawing effects belong to (that is
+/// [`CachedLayout::generation`]).
+///
+/// The fields are compared one by one instead of hashed, so a hit is never a
+/// collision: two lines that share their text but differ in Markdown style
+/// (`**x**` and `x` both lay out `x`) keep their own layouts.
+#[derive(Debug, Eq, PartialEq)]
+struct LayoutInputs {
+    /// Layout width in bits; `f32` is not `Eq`.
+    width: u32,
+    /// Picks the text format: headings use a bold, larger one, code a mono one.
+    block: Block,
+    /// Passed to `SetLineSpacing` (and the first baseline at 0.8 of it).
+    font_size: u32,
+    line_spacing: u32,
+    mono: bool,
+    /// The active line shows its Markdown markers and keeps its block style.
+    active: bool,
+    /// Composition byte range in the laid-out text: underlined and drawn with
+    /// the link brush.
+    composition: Option<Range<usize>>,
+    /// Style runs in order. Marker runs are absent on inactive lines, exactly
+    /// as [`Assets::layout`] skips them.
+    runs: Vec<RunSignature>,
+}
+
+impl LayoutInputs {
+    fn new(
+        line: &DisplayLine,
+        active: bool,
+        width: f32,
+        composition: Option<&Range<usize>>,
+    ) -> Self {
+        Self {
+            width: width.to_bits(),
+            block: line.block,
+            font_size: line.metrics.font_size.to_bits(),
+            line_spacing: line.metrics.line_spacing.to_bits(),
+            mono: line.metrics.mono,
+            active,
+            composition: composition.cloned(),
+            runs: line
+                .runs
+                .iter()
+                .filter(|run| active || !run.marker)
+                .map(|run| RunSignature {
+                    style: run.style,
+                    marker: run.marker,
+                    length: run.text.encode_utf16().count() as u32,
+                })
+                .collect(),
+        }
+    }
+
+    /// True when [`Assets::layout`] would build the same layout again. Compares
+    /// in place, so a cache hit allocates nothing.
+    fn matches(
+        &self,
+        line: &DisplayLine,
+        active: bool,
+        width: f32,
+        composition: Option<&Range<usize>>,
+    ) -> bool {
+        self.width == width.to_bits()
+            && self.block == line.block
+            && self.font_size == line.metrics.font_size.to_bits()
+            && self.line_spacing == line.metrics.line_spacing.to_bits()
+            && self.mono == line.metrics.mono
+            && self.active == active
+            && self.composition.as_ref() == composition
+            && self.runs_match(line, active)
+    }
+
+    fn runs_match(&self, line: &DisplayLine, active: bool) -> bool {
+        let mut stored = self.runs.iter();
+        let mut current = line.runs.iter().filter(|run| active || !run.marker);
+        loop {
+            match (stored.next(), current.next()) {
+                (None, None) => return true,
+                (Some(signature), Some(run)) => {
+                    if signature.style != run.style
+                        || signature.marker != run.marker
+                        || signature.length != run.text.encode_utf16().count() as u32
+                    {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// A layout kept from a previous rebuild. Cloning its `layout` is an `AddRef`
+/// on the existing `IDWriteTextLayout`, not another `CreateTextLayout`.
+struct CachedLayout {
+    inputs: LayoutInputs,
+    /// Height the wrapped text measured when the layout was built. It depends
+    /// on the layout alone, so it is cached with it; `top`, `box_height` and
+    /// `content_height` are still recomputed every rebuild because they depend
+    /// on which line is active.
+    text_height: f32,
+    /// Render target generation the layout's drawing effects belong to.
+    generation: u64,
+    /// [`EditorState::layout_stamp`] of the rebuild that last asked for it.
+    stamp: u64,
+    layout: IDWriteTextLayout,
+}
+
 /// Cached text formats and brushes.
 struct Assets {
     body: IDWriteTextFormat,
@@ -285,6 +400,15 @@ pub struct EditorState {
     display: DisplayDoc,
     color: usize,
     lines: Vec<LaidLine>,
+    /// Layouts kept from the previous rebuilds, keyed by their laid-out text
+    /// and checked against [`LayoutInputs`]. Bounded by the number of display
+    /// lines: every entry the current rebuild does not touch is evicted.
+    layouts: HashMap<String, Vec<CachedLayout>>,
+    /// Stamp of the rebuild in progress, see [`CachedLayout::stamp`].
+    layout_stamp: u64,
+    /// Bumped whenever `assets` is replaced. Every layout carries a brush from
+    /// the target it was built against, so a new target invalidates them all.
+    layout_generation: u64,
     content_height: f32,
     scroll: f32,
     view_height: f32,
@@ -333,6 +457,9 @@ impl EditorState {
             display,
             color,
             lines: Vec::new(),
+            layouts: HashMap::new(),
+            layout_stamp: 0,
+            layout_generation: 0,
             content_height: 0.0,
             scroll: 0.0,
             view_height: PAPER_HEIGHT - PAD_TOP - PAD_BOTTOM,
@@ -409,6 +536,39 @@ impl EditorState {
             self.height_px,
             self.dpi,
         ))?);
+        Ok(())
+    }
+
+    /// The note's text as the user edited it. Used to hand the text back through
+    /// the commit path when the device cannot be recovered.
+    pub fn text(&self) -> &str {
+        self.doc.text()
+    }
+
+    /// Rebuilds the GPU stack after a device loss, keeping the document, the
+    /// caret and the scroll position.
+    ///
+    /// Without this the editor kept drawing into a dead device: every keystroke
+    /// failed, the window froze on its last frame and the text could never be
+    /// committed, because the flight image needs a live surface too.
+    pub fn rebuild_surface(&mut self, hwnd: HWND) -> Result<(), String> {
+        let surface = Surface::new(hwnd, self.width_px, self.height_px, self.dpi)?;
+        let assets = Assets::new(&surface.rt, &surface.dwrite, self.color)?;
+        self.surface = surface;
+        self.assets = assets;
+        // The cached layouts point at the dead target's brushes.
+        self.layout_generation = self.layout_generation.wrapping_add(1);
+        // Drop the old device's resources before rebuilding them.
+        self.paper_brush = None;
+        self.border_brush = None;
+        self.clip = None;
+        self.fold_edge = None;
+        self.fold_shade = None;
+        self.shadow = None;
+        self.rebuild_scenery()?;
+        self.rebuild();
+        self.dirty = true;
+        logging::error("note editor surface rebuilt");
         Ok(())
     }
 
@@ -839,6 +999,9 @@ impl EditorState {
         self.display = DisplayDoc::parse(self.doc.text());
         let caret = self.doc.caret();
         let active = self.display.line_index(caret);
+        let generation = self.layout_generation;
+        self.layout_stamp = self.layout_stamp.wrapping_add(1);
+        let stamp = self.layout_stamp;
         self.lines.clear();
         let mut y = 0.0;
         for (index, line) in self.display.lines.iter().enumerate() {
@@ -862,25 +1025,58 @@ impl EditorState {
             let mut layout = None;
             let mut text_height = metrics.font_size * metrics.line_spacing;
             if !text.is_empty() {
-                match self.assets.layout(
-                    &self.surface.dwrite,
-                    line,
-                    is_active,
-                    &base_text,
-                    &text,
-                    width,
-                    composition.clone(),
-                ) {
-                    Ok(laid) => {
-                        let mut text_metrics = DWRITE_TEXT_METRICS::default();
-                        // SAFETY: live layout and out-param.
-                        unsafe {
-                            let _ = laid.GetMetrics(&mut text_metrics);
-                        }
-                        text_height = text_height.max(text_metrics.height);
-                        layout = Some(laid);
+                // Reuse the layout of an unchanged line. A hit is an `AddRef` on
+                // the old `IDWriteTextLayout`; a miss pays one `CreateTextLayout`
+                // (shaping, wrapping, font fallback) for the whole document.
+                if let Some(bucket) = self.layouts.get_mut(&text) {
+                    let reused = bucket.iter_mut().find(|entry| {
+                        entry.generation == generation
+                            && entry
+                                .inputs
+                                .matches(line, is_active, width, composition.as_ref())
+                    });
+                    if let Some(entry) = reused {
+                        entry.stamp = stamp;
+                        text_height = entry.text_height;
+                        layout = Some(entry.layout.clone());
                     }
-                    Err(error) => logging::error(format!("note editor layout: {error}")),
+                }
+                if layout.is_none() {
+                    match self.assets.layout(
+                        &self.surface.dwrite,
+                        line,
+                        is_active,
+                        &base_text,
+                        &text,
+                        width,
+                        composition.clone(),
+                    ) {
+                        Ok(laid) => {
+                            let mut text_metrics = DWRITE_TEXT_METRICS::default();
+                            // SAFETY: live layout and out-param.
+                            unsafe {
+                                let _ = laid.GetMetrics(&mut text_metrics);
+                            }
+                            text_height = text_height.max(text_metrics.height);
+                            self.layouts
+                                .entry(text.clone())
+                                .or_default()
+                                .push(CachedLayout {
+                                    inputs: LayoutInputs::new(
+                                        line,
+                                        is_active,
+                                        width,
+                                        composition.as_ref(),
+                                    ),
+                                    text_height,
+                                    generation,
+                                    stamp,
+                                    layout: laid.clone(),
+                                });
+                            layout = Some(laid);
+                        }
+                        Err(error) => logging::error(format!("note editor layout: {error}")),
+                    }
                 }
             }
             let box_height = metrics.space_before + text_height + metrics.space_after;
@@ -900,6 +1096,13 @@ impl EditorState {
             });
             y += box_height;
         }
+        // Any layout this rebuild did not ask for is stale (its line changed, or
+        // it belongs to an older render target). Evicting here keeps the cache
+        // the size of the document instead of letting it grow per keystroke.
+        self.layouts.retain(|_, bucket| {
+            bucket.retain(|entry| entry.stamp == stamp);
+            !bucket.is_empty()
+        });
         self.content_height = y;
         self.clamp_scroll();
         self.ensure_caret_visible();
@@ -1061,6 +1264,9 @@ impl EditorState {
         // Text layouts carry the link brush as a D2D drawing effect, and that
         // brush belongs to the screen target. Rebuild them against the WIC
         // target before painting, then restore the screen layouts afterwards.
+        // The generation bump is what stops the cache from handing either pass
+        // a layout built against the other target.
+        self.layout_generation = self.layout_generation.wrapping_add(1);
         self.rebuild();
 
         let painted = {
@@ -1081,6 +1287,8 @@ impl EditorState {
         self.paper_brush = screen_paper;
         self.fold_edge = screen_edge;
         self.fold_shade = screen_shade;
+        // The WIC layouts must not survive the swap back to the screen target.
+        self.layout_generation = self.layout_generation.wrapping_add(1);
         self.rebuild();
         painted?;
 
@@ -1116,489 +1324,6 @@ impl EditorState {
             started.elapsed().as_secs_f64() * 1000.0
         ));
         Ok(ImageData::new(width, height, bgra))
-    }
-
-    /// Paints the paper (gradient, dog-ear, text) into `context`. The same code
-    /// renders the on-screen paper bitmap and the cached WIC bitmap a flight
-    /// carries, so the editor can look identical in both.
-    fn paint_paper_on(&mut self, context: &ID2D1RenderTarget) {
-        // The paper is opaque, so the whole bitmap can simply be filled.
-        let palette = crate::notes::color(self.color);
-        // SAFETY: the context is drawing to the paper target.
-        unsafe {
-            context.Clear(Some(&color_of(palette.paper, 1.0)));
-            if let Some(brush) = self.paper_brush.as_ref() {
-                let rounded = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: 0.0,
-                        top: 0.0,
-                        right: PAPER_WIDTH,
-                        bottom: PAPER_HEIGHT,
-                    },
-                    radiusX: RADIUS_DIP,
-                    radiusY: RADIUS_DIP,
-                };
-                context.FillRoundedRectangle(&rounded, brush);
-            }
-        }
-        // Dog-ear.
-        // SAFETY: the brushes and geometries are alive.
-        unsafe {
-            if let Some(geometry) = self.fold_edge.as_ref() {
-                context.FillGeometry(geometry, &self.assets.fold_edge, None);
-            }
-            if let Some(geometry) = self.fold_shade.as_ref() {
-                context.FillGeometry(geometry, &self.assets.fold_shade, None);
-            }
-        }
-        // Block decoration behind the text.
-        let origin_x = PAD_LEFT;
-        for line in &self.lines {
-            let top = PAD_TOP + line.text_top - self.scroll;
-            let height = line.text_height;
-            if !line.active {
-                match line.block {
-                    Block::Code { fence: false } => {
-                        // SAFETY: drawing on the paper target.
-                        unsafe {
-                            context.FillRectangle(
-                                &D2D_RECT_F {
-                                    left: origin_x + 2.0,
-                                    top,
-                                    right: origin_x + CONTENT_WIDTH,
-                                    bottom: top + height,
-                                },
-                                &self.assets.code_background,
-                            );
-                            context.FillRectangle(
-                                &D2D_RECT_F {
-                                    left: origin_x,
-                                    top,
-                                    right: origin_x + 2.0,
-                                    bottom: top + height,
-                                },
-                                &self.assets.quote_bar,
-                            );
-                        }
-                    }
-                    Block::Quote => {
-                        // SAFETY: drawing on the paper target.
-                        unsafe {
-                            context.FillRectangle(
-                                &D2D_RECT_F {
-                                    left: origin_x,
-                                    top,
-                                    right: origin_x + 2.0,
-                                    bottom: top + height,
-                                },
-                                &self.assets.quote_bar,
-                            );
-                        }
-                    }
-                    Block::Rule => {
-                        // SAFETY: drawing on the paper target.
-                        unsafe {
-                            context.FillRectangle(
-                                &D2D_RECT_F {
-                                    left: origin_x,
-                                    top: top + height * 0.5,
-                                    right: origin_x + CONTENT_WIDTH,
-                                    bottom: top + height * 0.5 + 1.0,
-                                },
-                                &self.assets.rule,
-                            );
-                        }
-                    }
-                    Block::List {
-                        ordered,
-                        number,
-                        task,
-                    } => self.paint_list_marker(
-                        context,
-                        ordered,
-                        number,
-                        task,
-                        origin_x,
-                        top,
-                        height,
-                        line.font_size,
-                        line.indent,
-                    ),
-                    _ => {}
-                }
-            }
-            // Inline code background.
-            if !line.active {
-                self.paint_inline_code(context, line, origin_x, top);
-            }
-        }
-        // Selection goes behind the glyphs.
-        self.paint_selection(context, origin_x);
-        // Text.
-        for line in &self.lines {
-            let Some(layout) = line.layout.as_ref() else {
-                continue;
-            };
-            let brush = if matches!(line.block, Block::Quote) {
-                &self.assets.quote
-            } else {
-                &self.assets.ink
-            };
-            let origin = Vector2 {
-                X: origin_x + line.indent,
-                Y: PAD_TOP + line.text_top - self.scroll,
-            };
-            // SAFETY: the layout, brush and context are alive.
-            unsafe {
-                context.DrawTextLayout(origin, layout, brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
-            }
-        }
-        self.paint_caret(context, origin_x);
-        self.paint_placeholder(context, origin_x);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn paint_list_marker(
-        &self,
-        context: &ID2D1RenderTarget,
-        ordered: bool,
-        number: u32,
-        task: Option<bool>,
-        origin_x: f32,
-        top: f32,
-        height: f32,
-        font_size: f32,
-        indent: f32,
-    ) {
-        // Centre the bullet and the task box on the glyphs, not on the line
-        // box. The first baseline sits at 0.8 em (see [`Assets::layout`]) and
-        // the spare room of the 1.55 line spacing lies below it, so the box
-        // centre would drop the bullet onto the descenders. 0.33 em above the
-        // baseline is the optical centre of the bullet glyph and of mixed
-        // CJK/Latin text (measured with Microsoft YaHei UI).
-        let center_y = top + font_size * (0.8 - 0.33);
-        // SAFETY: drawing on the paper target with live brushes.
-        unsafe {
-            match (ordered, task) {
-                (_, Some(checked)) => {
-                    let box_rect = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: origin_x + 1.0,
-                            top: center_y - 6.0,
-                            right: origin_x + 13.0,
-                            bottom: center_y + 6.0,
-                        },
-                        radiusX: 3.0,
-                        radiusY: 3.0,
-                    };
-                    context.DrawRoundedRectangle(&box_rect, &self.assets.quote, 1.2, None);
-                    if checked {
-                        context.DrawLine(
-                            Vector2 {
-                                X: origin_x + 4.0,
-                                Y: center_y,
-                            },
-                            Vector2 {
-                                X: origin_x + 6.5,
-                                Y: center_y + 2.5,
-                            },
-                            &self.assets.ink,
-                            1.4,
-                            None,
-                        );
-                        context.DrawLine(
-                            Vector2 {
-                                X: origin_x + 6.5,
-                                Y: center_y + 2.5,
-                            },
-                            Vector2 {
-                                X: origin_x + 11.0,
-                                Y: center_y - 3.0,
-                            },
-                            &self.assets.ink,
-                            1.4,
-                            None,
-                        );
-                    }
-                }
-                (false, _) => {
-                    let dot = windows::Win32::Graphics::Direct2D::D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: origin_x + 8.0,
-                            Y: center_y,
-                        },
-                        radiusX: 2.0,
-                        radiusY: 2.0,
-                    };
-                    context.FillEllipse(&dot, &self.assets.ink);
-                }
-                (true, None) => {
-                    // A stack buffer keeps the number layout allocation-free
-                    // even though the draw runs on every caret blink.
-                    let mut digits = [0u16; 10];
-                    let mut count = 0usize;
-                    let mut value = number.max(1);
-                    while value > 0 && count < digits.len() {
-                        digits[count] = b'0' as u16 + (value % 10) as u16;
-                        value /= 10;
-                        count += 1;
-                    }
-                    let mut wide = [0u16; 11];
-                    for index in 0..count {
-                        wide[index] = digits[count - 1 - index];
-                    }
-                    wide[count] = b'.' as u16;
-                    let len = count + 1;
-                    let rect = D2D_RECT_F {
-                        left: origin_x + indent - 22.0,
-                        top,
-                        right: origin_x + indent - 4.0,
-                        bottom: top + height,
-                    };
-                    context.DrawText(
-                        &wide[..len],
-                        &self.assets.number,
-                        &rect,
-                        &self.assets.quote,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
-            }
-        }
-    }
-
-    fn paint_inline_code(
-        &self,
-        context: &ID2D1RenderTarget,
-        line: &LaidLine,
-        origin_x: f32,
-        top: f32,
-    ) {
-        let Some(layout) = line.layout.as_ref() else {
-            return;
-        };
-        let display = &self.display.lines[line.index];
-        let mut offset = 0usize;
-        for run in display.runs.iter().filter(|run| !run.marker) {
-            if run.style == Style::Code {
-                let start = utf16_offset(&line.text, offset);
-                let length = run.text.encode_utf16().count() as u32;
-                if length > 0 {
-                    let mut metrics = [DWRITE_HIT_TEST_METRICS::default(); 8];
-                    let mut count = 0u32;
-                    // SAFETY: live layout, buffer and out-param.
-                    unsafe {
-                        let _ = layout.HitTestTextRange(
-                            start,
-                            length,
-                            0.0,
-                            0.0,
-                            Some(&mut metrics[..]),
-                            &mut count,
-                        );
-                    }
-                    // SAFETY: drawing on the paper target.
-                    unsafe {
-                        for metric in metrics.iter().take(count as usize) {
-                            let rect = D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: origin_x + line.indent + metric.left - 2.0,
-                                    top: top + metric.top,
-                                    right: origin_x
-                                        + line.indent
-                                        + metric.left
-                                        + metric.width
-                                        + 2.0,
-                                    bottom: top + metric.top + metric.height,
-                                },
-                                radiusX: 3.0,
-                                radiusY: 3.0,
-                            };
-                            context.FillRoundedRectangle(&rect, &self.assets.code_background);
-                        }
-                    }
-                }
-            }
-            offset += run.text.len();
-        }
-    }
-
-    fn paint_selection(&self, context: &ID2D1RenderTarget, origin_x: f32) {
-        let Some(selection) = self.doc.selection() else {
-            return;
-        };
-        for line in &self.lines {
-            let Some(layout) = line.layout.as_ref() else {
-                continue;
-            };
-            let display = &self.display.lines[line.index];
-            for segment in display.segments(selection.clone(), line.active) {
-                let mut start = segment.start;
-                let mut end = segment.end;
-                if let Some(composition) = &line.composition {
-                    if start >= composition.end {
-                        start -= composition.len();
-                        end -= composition.len();
-                    } else if start > composition.start {
-                        start = composition.start;
-                    }
-                    if end > composition.start && end <= composition.end {
-                        end = composition.start;
-                    }
-                }
-                if start >= end {
-                    continue;
-                }
-                let from = utf16_offset(&line.text, start);
-                let length = (utf16_offset(&line.text, end) - from).max(1);
-                let mut metrics = [DWRITE_HIT_TEST_METRICS::default(); 16];
-                let mut count = 0u32;
-                // SAFETY: live layout, buffer and out-param.
-                unsafe {
-                    let _ = layout.HitTestTextRange(
-                        from,
-                        length,
-                        0.0,
-                        0.0,
-                        Some(&mut metrics[..]),
-                        &mut count,
-                    );
-                }
-                // SAFETY: drawing on the paper target.
-                unsafe {
-                    for metric in metrics.iter().take(count as usize) {
-                        let rect = D2D_RECT_F {
-                            left: origin_x + line.indent + metric.left,
-                            top: PAD_TOP + line.text_top - self.scroll + metric.top,
-                            right: origin_x + line.indent + metric.left + metric.width,
-                            bottom: PAD_TOP + line.text_top - self.scroll
-                                + metric.top
-                                + metric.height,
-                        };
-                        context.FillRectangle(&rect, &self.assets.selection);
-                    }
-                }
-            }
-        }
-    }
-
-    fn paint_caret(&self, context: &ID2D1RenderTarget, origin_x: f32) {
-        if !self.focused || !self.enabled || !self.caret_on {
-            return;
-        }
-        let Some((x, y, height)) = self.caret_position() else {
-            return;
-        };
-        let rect = D2D_RECT_F {
-            left: origin_x + x,
-            top: PAD_TOP + y - self.scroll,
-            right: origin_x + x + 1.5,
-            bottom: PAD_TOP + y - self.scroll + height,
-        };
-        // SAFETY: drawing on the paper target.
-        unsafe {
-            context.FillRectangle(&rect, &self.assets.ink);
-        }
-    }
-
-    fn paint_placeholder(&self, context: &ID2D1RenderTarget, origin_x: f32) {
-        if !self.doc.is_empty() || self.composition.is_some() {
-            return;
-        }
-        let text = i18n::s().note_placeholder;
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let rect = D2D_RECT_F {
-            left: origin_x,
-            top: PAD_TOP,
-            right: origin_x + CONTENT_WIDTH,
-            bottom: PAD_TOP + display::BODY_SIZE * display::BODY_SPACING,
-        };
-        // SAFETY: drawing on the paper target with the body format.
-        unsafe {
-            context.DrawText(
-                &wide,
-                &self.assets.body,
-                &rect,
-                &self.assets.marker,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-        }
-    }
-
-    fn paint_window(&self) {
-        let context = &self.surface.context;
-        // SAFETY: the swap-chain target is set and transparent.
-        unsafe {
-            context.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
-            if let Some(shadow) = self.shadow.as_ref() {
-                let window = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: self.width_px as f32 / self.scale,
-                    bottom: self.height_px as f32 / self.scale,
-                };
-                context.DrawBitmap(
-                    shadow,
-                    Some(&window),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    None,
-                    None,
-                );
-            }
-            let paper = paper_rect(self.scale);
-            let Some(geometry) = self.clip.as_ref() else {
-                return;
-            };
-            let layer = D2D1_LAYER_PARAMETERS1 {
-                contentBounds: D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: self.width_px as f32 / self.scale,
-                    bottom: self.height_px as f32 / self.scale,
-                },
-                geometricMask: ManuallyDrop::new(Some(geometry.clone())),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: Matrix3x2::identity(),
-                opacity: 1.0,
-                opacityBrush: ManuallyDrop::new(None),
-                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-            };
-            context.PushLayer(
-                &layer,
-                None::<&windows::Win32::Graphics::Direct2D::ID2D1Layer>,
-            );
-            if let Some(paper_bitmap) = self.surface.paper.as_ref() {
-                let destination = d2d_rect(paper);
-                context.DrawBitmap(
-                    paper_bitmap,
-                    Some(&destination),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    None,
-                    None,
-                );
-            }
-            context.PopLayer();
-            let rounded = D2D1_ROUNDED_RECT {
-                rect: d2d_rect(paper),
-                radiusX: RADIUS_DIP,
-                radiusY: RADIUS_DIP,
-            };
-            let _ = geometry;
-            if self.now < self.error_until {
-                context.DrawRoundedRectangle(&rounded, &self.assets.error, BORDER_DIP, None);
-            } else if let Some(brush) = self.border_brush.as_ref() {
-                context.DrawRoundedRectangle(&rounded, brush, BORDER_DIP, None);
-            }
-        }
     }
 }
 
@@ -2064,7 +1789,11 @@ impl Surface {
             .map_err(|error| format!("ID3D11Device -> IDXGIDevice: {error}"))?;
         let (factory2, dcomp, target, visual) = create_composition(&dxgi_device, hwnd)?;
         let (swap_chain, swap_chain3) = create_swap_chain(&factory2, &device, width_px, height_px)?;
-        let (d2d_factory, d2d_device, context) = create_d2d(&dxgi_device, dpi_f)?;
+        // The paper is painted to an opaque bitmap, so ClearType is valid
+        // there; the window's own surface is premultiplied, so text drawn
+        // directly into it stays grayscale.
+        let (d2d_factory, d2d_device, context) =
+            create_d2d(&dxgi_device, dpi_f, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE)?;
         let factory: ID2D1Factory = d2d_factory
             .cast()
             .map_err(|error| format!("ID2D1Factory1 -> ID2D1Factory: {error}"))?;
@@ -2312,149 +2041,117 @@ fn bitmap_height(bitmap: &ID2D1Bitmap1) -> u32 {
     unsafe { bitmap.GetPixelSize() }.height
 }
 
-fn create_composition(
-    dxgi_device: &IDXGIDevice,
-    hwnd: HWND,
-) -> Result<
-    (
-        IDXGIFactory2,
-        IDCompositionDevice,
-        IDCompositionTarget,
-        IDCompositionVisual,
-    ),
-    String,
-> {
-    // SAFETY: the DXGI device is live and owned by this thread.
-    unsafe {
-        let adapter = dxgi_device
-            .GetAdapter()
-            .map_err(|error| format!("GetAdapter: {error}"))?;
-        let factory: IDXGIFactory2 = adapter
-            .GetParent()
-            .map_err(|error| format!("GetParent: {error}"))?;
-        let dcomp: IDCompositionDevice = DCompositionCreateDevice(dxgi_device)
-            .map_err(|error| format!("DCompositionCreateDevice: {error}"))?;
-        let target = dcomp
-            .CreateTargetForHwnd(hwnd, true)
-            .map_err(|error| format!("CreateTargetForHwnd: {error}"))?;
-        let visual = dcomp
-            .CreateVisual()
-            .map_err(|error| format!("CreateVisual: {error}"))?;
-        target
-            .SetRoot(&visual)
-            .map_err(|error| format!("SetRoot: {error}"))?;
-        dcomp.Commit().map_err(|error| format!("Commit: {error}"))?;
-        Ok((factory, dcomp, target, visual))
-    }
-}
-
-fn create_swap_chain(
-    factory: &IDXGIFactory2,
-    device: &ID3D11Device,
-    width_px: u32,
-    height_px: u32,
-) -> Result<(IDXGISwapChain1, IDXGISwapChain3), String> {
-    let desc = DXGI_SWAP_CHAIN_DESC1 {
-        Width: width_px,
-        Height: height_px,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        Stereo: false.into(),
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 2,
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
-        Flags: 0,
-    };
-    // SAFETY: the factory and device are alive; a composition swap chain takes
-    // no output adapter.
-    unsafe {
-        let swap_chain: IDXGISwapChain1 = factory
-            .CreateSwapChainForComposition(device, &desc, None::<&IDXGIOutput>)
-            .map_err(|error| format!("CreateSwapChainForComposition: {error}"))?;
-        let swap_chain3: IDXGISwapChain3 = swap_chain
-            .cast()
-            .map_err(|error| format!("IDXGISwapChain3: {error}"))?;
-        Ok((swap_chain, swap_chain3))
-    }
-}
-
-fn create_d2d(
-    dxgi_device: &IDXGIDevice,
-    dpi: f32,
-) -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext), String> {
-    // SAFETY: a single-threaded factory used only on this thread.
-    unsafe {
-        let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
-            .map_err(|error| format!("D2D1CreateFactory: {error}"))?;
-        let device = factory
-            .CreateDevice(dxgi_device)
-            .map_err(|error| format!("CreateDevice(d2d): {error}"))?;
-        let context = device
-            .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
-            .map_err(|error| format!("CreateDeviceContext: {error}"))?;
-        context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        context.SetDpi(dpi, dpi);
-        Ok((factory, device, context))
-    }
-}
-
-fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
-    let mut device: Option<ID3D11Device> = None;
-    let mut immediate: Option<ID3D11DeviceContext> = None;
-    let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
-    let mut level = D3D_FEATURE_LEVEL_11_0;
-    // SAFETY: the out-params are owned here and the level array is live.
-    let created = unsafe {
-        D3D11CreateDevice(
-            None::<&IDXGIAdapter>,
-            D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            Some(&mut level),
-            Some(&mut immediate),
-        )
-    };
-    if created.is_err() {
-        let levels = [D3D_FEATURE_LEVEL_11_0];
-        // SAFETY: as above; 11.0 is the documented floor.
-        unsafe {
-            D3D11CreateDevice(
-                None::<&IDXGIAdapter>,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&levels),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                Some(&mut level),
-                Some(&mut immediate),
-            )
-        }
-        .map_err(|error| format!("D3D11CreateDevice(11.0): {error}"))?;
-    }
-    let device = device.ok_or_else(|| "D3D11 device missing".to_string())?;
-    let immediate = immediate.ok_or_else(|| "D3D11 context missing".to_string())?;
-    Ok((device, immediate))
-}
-
-fn create_dwrite() -> Result<IDWriteFactory, String> {
-    // SAFETY: DWrite is a free-threaded factory and the out-pointer is valid.
-    unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-        .map_err(|error| format!("DWriteCreateFactory: {error}"))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::paint::in_view;
     use super::*;
+    use crate::note_editor::display::{LineMetrics, Run};
+
+    /// One hand-built display line, so a test can vary a single layout input.
+    fn display_line(text: &str, block: Block, style: Style) -> DisplayLine {
+        DisplayLine {
+            source: 0..text.len(),
+            block,
+            runs: vec![Run {
+                text: text.to_string(),
+                source: 0..text.len(),
+                style,
+                marker: false,
+            }],
+            metrics: LineMetrics {
+                font_size: display::BODY_SIZE,
+                line_spacing: display::BODY_SPACING,
+                bold: false,
+                mono: false,
+                indent: 0.0,
+                space_before: 0.0,
+                space_after: 0.0,
+                ink: 1.0,
+            },
+        }
+    }
+
+    /// One laid line at a known content position, without a DirectWrite layout.
+    fn laid_line(top: f32, box_height: f32) -> LaidLine {
+        LaidLine {
+            index: 0,
+            block: Block::Paragraph,
+            active: false,
+            top,
+            text_top: top,
+            text_height: box_height,
+            box_height,
+            indent: 0.0,
+            font_size: display::BODY_SIZE,
+            text: "x".to_string(),
+            layout: None,
+            composition: None,
+        }
+    }
+
+    #[test]
+    fn a_layout_is_only_reused_when_every_input_matches() {
+        let line = display_line("bold", Block::Paragraph, Style::Body);
+        let base = LayoutInputs::new(&line, false, 400.0, None);
+        assert!(base.matches(&line, false, 400.0, None));
+        // The active line shows its Markdown markers and keeps the block style.
+        assert!(!base.matches(&line, true, 400.0, None));
+        // The wrap width comes from the indent.
+        assert!(!base.matches(&line, false, 401.0, None));
+        // A composition range is underlined in the link colour.
+        let composing = 1..3;
+        assert!(!base.matches(&line, false, 400.0, Some(&composing)));
+        let with_composition = LayoutInputs::new(&line, true, 400.0, Some(&composing));
+        assert!(with_composition.matches(&line, true, 400.0, Some(&composing)));
+        // Same text, different Markdown style: DirectWrite applies other ranges.
+        let italic = display_line("bold", Block::Paragraph, Style::Italic);
+        assert!(!base.matches(&italic, false, 400.0, None));
+        // Same text and style, other block: `Assets::format` picks another font.
+        let heading = display_line("bold", Block::Heading(1), Style::Body);
+        assert!(!base.matches(&heading, false, 400.0, None));
+        // The line metrics set the font size, the spacing and the format.
+        let mut monospace = display_line("bold", Block::Paragraph, Style::Body);
+        monospace.metrics.mono = true;
+        assert!(!base.matches(&monospace, false, 400.0, None));
+        monospace.metrics.mono = false;
+        monospace.metrics.font_size = 16.0;
+        assert!(!base.matches(&monospace, false, 400.0, None));
+        monospace.metrics.font_size = display::BODY_SIZE;
+        monospace.metrics.line_spacing = 2.0;
+        assert!(!base.matches(&monospace, false, 400.0, None));
+    }
+
+    #[test]
+    fn only_lines_that_can_land_on_the_paper_are_painted() {
+        let view_height = PAPER_HEIGHT - PAD_TOP - PAD_BOTTOM;
+        let box_height = 26.0;
+        // Inside the viewport.
+        assert!(in_view(&laid_line(10.0, box_height), 0.0, view_height));
+        // Scrolled up into the top padding: still on the paper bitmap.
+        assert!(in_view(
+            &laid_line(0.0, box_height),
+            PAD_TOP - 1.0,
+            view_height
+        ));
+        // Above the paper: the whole box is off the bitmap.
+        assert!(!in_view(
+            &laid_line(0.0, box_height),
+            PAD_TOP + box_height + 1.0,
+            view_height
+        ));
+        // Below the last visible line, still inside the bottom padding.
+        assert!(in_view(
+            &laid_line(view_height, box_height),
+            0.0,
+            view_height
+        ));
+        // Past the bottom padding: the box starts below the paper bitmap.
+        assert!(!in_view(
+            &laid_line(view_height + PAD_BOTTOM, box_height),
+            0.0,
+            view_height
+        ));
+    }
 
     #[test]
     fn the_window_is_paper_plus_a_shadow_margin() {

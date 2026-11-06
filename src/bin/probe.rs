@@ -8,6 +8,7 @@
 //! probe --mode=idle   --seconds=10   # 6 cards, settled, no frame loop
 //! probe --mode=flight --seconds=5    # the real flight window
 //! probe --mode=static --seconds=10   # one frame, then no presents
+//! probe --mode=timer                 # frame-cap wait precision, no window
 //! ```
 //!
 //! Output is one `PROBE ...` line per run: fps, p50/p95/max frame interval,
@@ -57,6 +58,8 @@ fn main() {
         Mode::Line | Mode::Idle | Mode::Static | Mode::Clear | Mode::Primitive => run_line(&config),
         Mode::Flight => run_flight(&config),
         Mode::Atlas => run_atlas(&config),
+        Mode::Timer => run_timer(&config),
+        Mode::Duo => run_duo(&config),
     };
     match result {
         Ok(line) => println!("{line}"),
@@ -76,6 +79,11 @@ enum Mode {
     Clear,
     Primitive,
     Atlas,
+    /// Waits out a frame period and reports the achieved precision. No window,
+    /// no device: this measures the frame-cap timer on its own.
+    Timer,
+    /// Two renderers in one process, to price a second window's device.
+    Duo,
 }
 
 impl Mode {
@@ -88,6 +96,8 @@ impl Mode {
             Mode::Primitive => "primitive",
             Mode::Atlas => "atlas",
             Mode::Flight => "flight",
+            Mode::Timer => "timer",
+            Mode::Duo => "duo",
         }
     }
 }
@@ -134,6 +144,8 @@ impl Config {
                         "idle" => Mode::Idle,
                         "static" => Mode::Static,
                         "flight" => Mode::Flight,
+                        "timer" => Mode::Timer,
+                        "duo" => Mode::Duo,
                         "clear" => Mode::Clear,
                         "prim" => Mode::Primitive,
                         "atlas" => Mode::Atlas,
@@ -409,6 +421,127 @@ fn primary_monitor() -> Result<win32::Monitor, String> {
         .or_else(|| monitors.first())
         .copied()
         .ok_or_else(|| "no monitors".to_string())
+}
+
+/// How precisely a frame period can be waited out.
+///
+/// The frame cap waits out the rest of the period with `thread::sleep`, whose
+/// precision depends on the process timer resolution: nominally 15.6 ms, but
+/// Windows raises it for a process with a window. A high-resolution waitable
+/// timer was tried as an alternative and measured no better here, so the sleep
+/// stayed. This mode keeps the measurement repeatable — if a machine ever caps
+/// at half the requested rate, these two numbers say why.
+fn run_timer(config: &Config) -> Result<String, String> {
+    let samples = 40 * config.repeat.max(1);
+    Ok([1.0 / 120.0, 1.0 / 60.0]
+        .iter()
+        .map(|period| {
+            let (average, worst) = measure(samples, || {
+                std::thread::sleep(std::time::Duration::from_secs_f64(*period));
+            });
+            format!(
+                "PROBE mode=timer target_ms={:.2} samples={samples} \
+                 sleep_avg={average:.2} sleep_max={worst:.2} overshoot={:.2}",
+                period * 1000.0,
+                average - period * 1000.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Average and worst wait, in milliseconds, over `count` calls.
+fn measure(count: usize, mut wait: impl FnMut()) -> (f64, f64) {
+    let mut total = 0.0;
+    let mut worst = 0.0f64;
+    for _ in 0..count {
+        let start = win32::now_seconds();
+        wait();
+        let elapsed = (win32::now_seconds() - start) * 1000.0;
+        total += elapsed;
+        worst = worst.max(elapsed);
+    }
+    (total / count as f64, worst)
+}
+
+/// Two renderers in one process: what a second window's device actually costs.
+///
+/// Every window in the app owns its own D3D11 device, D2D device and swap chain.
+/// The audit proposed sharing one device across windows; that is a large change,
+/// so measure the prize first. The delta here is the whole second window
+/// (device + swap chain + palette + text layouts + baked shadows), which is an
+/// upper bound on what sharing could save — sharing would still need the swap
+/// chain.
+fn run_duo(config: &Config) -> Result<String, String> {
+    let monitor = primary_monitor()?;
+    let width_px = monitor.work.width().max(1) as u32;
+    let height_px = ((layout::PANEL_HEIGHT * monitor.scale()).ceil() as i32).max(1) as u32;
+
+    // First window: the line, six cards, one drawn frame.
+    let hwnd = create_window(monitor.work.left, monitor.work.top, width_px, height_px)?;
+    let mut renderer = Renderer::new(hwnd, width_px, height_px, monitor.dpi)?;
+    let snapshot = std::sync::Arc::new(std::sync::Mutex::new(FrameSnapshot::default()));
+    let mut scene = Scene::new(
+        width_px,
+        monitor.dpi,
+        renderer.actions_layout(),
+        renderer.note_actions_layout(),
+        renderer.copied_height(),
+        snapshot,
+    );
+    scene.apply(Command::SetVisible(true), &renderer, 0.0);
+    scene.apply(Command::Reveal(true), &renderer, 0.0);
+    for index in 0..config.cards.max(1) {
+        let (w, h) = match index % 3 {
+            0 => (480u32, 270u32),
+            1 => (270, 480),
+            _ => (400, 300),
+        };
+        scene.apply(
+            Command::AddCard(CardSpec {
+                id: index as CardId + 1,
+                card_size: layout::card_size(w as f32, h as f32),
+                tilt: 0.0,
+                arriving: false,
+                image: Some(gradient_image(w, h, index as u8)),
+                note: false,
+            }),
+            &renderer,
+            0.0,
+        );
+    }
+    // Settle the springs so the measurement is the steady state, then draw once.
+    for step in 0..120 {
+        scene.update(1.0 / 60.0, step as f64 / 60.0);
+    }
+    renderer.begin()?;
+    scene.draw(&mut renderer);
+    renderer.end()?;
+    let _ = renderer.present(true);
+    // SAFETY: the window was created by this thread.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    let (one, _) = process_memory_mb();
+
+    // Second window: a bare renderer on its own window, drawn once.
+    let second_hwnd = create_window(monitor.work.left, monitor.work.top, 900, 700)?;
+    let mut second = Renderer::new(second_hwnd, 900, 700, monitor.dpi)?;
+    second.begin()?;
+    second.end()?;
+    let _ = second.present(true);
+    // SAFETY: the window was created by this thread.
+    unsafe {
+        let _ = ShowWindow(second_hwnd, SW_SHOWNOACTIVATE);
+    }
+    let (two, _) = process_memory_mb();
+
+    Ok(format!(
+        "PROBE mode=duo one_renderer={one:.1}MB two_renderers={two:.1}MB \
+         second_window={:.1}MB cards={}",
+        two - one,
+        config.cards.max(1)
+    ))
 }
 
 /// One 1024x512 atlas uploaded once, six sub-region blits per frame.

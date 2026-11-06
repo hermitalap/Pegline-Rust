@@ -3,16 +3,18 @@
 //! The binary crates are `pegline` (the tray app) and `probe` (the measurement
 //! tool); both build on this library.
 //!
-//! Phase A is still landing: several helpers are used by the flight window and
-//! the probe, which are the next milestone. Remove this allowance before the
-//! v0.1 tag.
-#![allow(dead_code)]
+//! `dead_code` is deliberately **not** allowed here. The crate used to carry a
+//! blanket `#![allow(dead_code)]` left over from Phase A, which hid both the
+//! private items and — because `pub` items are never dead-code checked — more
+//! than twenty unreferenced public helpers. Keeping the default warning on is
+//! what stops that from happening again.
 
 pub mod app;
 pub mod capture;
 pub mod dragdrop;
 pub mod editor;
 pub mod font;
+pub mod gfx;
 pub mod i18n;
 pub mod layout;
 pub mod logging;

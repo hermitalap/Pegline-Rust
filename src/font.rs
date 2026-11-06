@@ -15,5 +15,3 @@ use windows::core::{PCWSTR, w};
 pub const UI_FAMILY: PCWSTR = w!("Microsoft YaHei UI");
 /// The same family as a Rust string for GDI's `CreateFontW` calls.
 pub const UI_FAMILY_STR: &str = "Microsoft YaHei UI";
-/// Symbol face for the undo/redo arrows (U+21B6/U+21B7).
-pub const SYMBOL_FAMILY: PCWSTR = w!("Segoe UI Symbol");

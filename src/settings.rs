@@ -240,18 +240,6 @@ pub fn write_pegged(paths: &[PathBuf]) {
     }
 }
 
-/// Creates the inbox directory, returning whether it is usable.
-pub fn ensure_inbox() -> bool {
-    let dir = win32::inbox_dir();
-    match fs::create_dir_all(&dir) {
-        Ok(()) => true,
-        Err(error) => {
-            logging::error(format!("create inbox {}: {error}", dir.display()));
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

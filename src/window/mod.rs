@@ -6,6 +6,7 @@
 //! caught with `catch_unwind`, so one broken gesture cannot take the tray icon
 //! down with it.
 
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
@@ -197,12 +198,101 @@ pub fn message_loop() -> i32 {
     0
 }
 
+thread_local! {
+    /// Depth of nested modal loops (menus, message boxes, OLE drags, the
+    /// shortcut recorder) entered on this thread.
+    static MODAL_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Messages swallowed by those loops, re-posted when the outermost one exits.
+    static MODAL_DEFERRED: RefCell<Vec<(HWND, u32, WPARAM, LPARAM)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Marks the scope of a nested modal message loop.
+///
+/// While one is on the stack, a message delivered to the hidden window must not
+/// run `App::on_message`: the caller that entered the loop already holds
+/// `&mut App`, and running the handler would create a second one — two live
+/// mutable references to the same object, which is undefined behaviour. Timers
+/// re-arm themselves; everything else is queued and re-posted on exit.
+pub struct ModalGuard;
+
+impl ModalGuard {
+    /// Enters a modal scope; the loop is considered over when the guard drops.
+    pub fn enter() -> Self {
+        MODAL_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for ModalGuard {
+    fn drop(&mut self) {
+        MODAL_DEPTH.with(|depth| {
+            let remaining = depth.get().saturating_sub(1);
+            depth.set(remaining);
+            if remaining != 0 {
+                return;
+            }
+            // The outermost loop is gone, so no borrow of the app state is on
+            // the stack: deliver what the nested loops swallowed.
+            let queued: Vec<(HWND, u32, WPARAM, LPARAM)> =
+                MODAL_DEFERRED.with(|queue| queue.borrow_mut().drain(..).collect());
+            for (hwnd, message, wparam, lparam) in queued {
+                // SAFETY: the handle belongs to this process and is alive; the
+                // values are exactly the ones the window procedure received.
+                unsafe {
+                    let _ = PostMessageW(Some(hwnd), message, wparam, lparam);
+                }
+            }
+        });
+    }
+}
+
+/// True while a modal loop is nested on this thread.
+pub fn in_modal_loop() -> bool {
+    MODAL_DEPTH.with(Cell::get) > 0
+}
+
+/// Queues a message that must not be handled while a modal loop is nested.
+pub fn defer_message(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) {
+    // Bounded: the messages that need this are rare, and a flood must not grow
+    // the queue without limit.
+    const LIMIT: usize = 32;
+    MODAL_DEFERRED.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        if queue.len() < LIMIT {
+            queue.push((hwnd, message, wparam, lparam));
+        }
+    });
+}
+
+/// The hidden message window, stored as an integer because `HWND` is not
+/// `Send` and the workers that call [`wake`] only need the value.
+static WAKE_TARGET: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Records the window workers should wake. Called once, from `App::start`.
+pub fn set_wake_target(hwnd: HWND) {
+    WAKE_TARGET.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+}
+
 /// Wakes the UI thread so it can drain worker results immediately.
-pub fn wake(hwnd: HWND) {
-    // SAFETY: posting to a window this process owns; the queue is bounded by the
-    // 33 ms timer so a lost wake-up only delays a tick.
+///
+/// The message must be addressed to the hidden window: `PostMessageW` with a
+/// null `HWND` posts to the *calling* thread's queue, and `DispatchMessageW`
+/// drops hwnd-less messages, so the wake-up would never reach `on_message`.
+pub fn wake() {
+    let raw = WAKE_TARGET.load(std::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    // SAFETY: the handle was stored by `set_wake_target` and stays valid for the
+    // life of the process; the message carries no pointer payload.
     unsafe {
-        let _ = PostMessageW(Some(hwnd), WM_APP_WAKE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(
+            Some(HWND(raw as *mut core::ffi::c_void)),
+            WM_APP_WAKE,
+            WPARAM(0),
+            LPARAM(0),
+        );
     }
 }
 

@@ -45,7 +45,8 @@ use crate::capture::clipboard;
 use crate::logging;
 use crate::note_editor::display::PAPER_WIDTH;
 use crate::note_editor::render::{
-    Command, EditorState, KeyCode, MARGIN_DIP, Step, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP,
+    Command, EditorState, KeyCode, MARGIN_DIP, Step, WHEEL_STEP, WINDOW_HEIGHT_DIP,
+    WINDOW_WIDTH_DIP,
 };
 use crate::types::ImageData;
 use crate::win32::{self, Monitor};
@@ -171,31 +172,8 @@ impl NoteEditor {
         notify: Box<dyn Fn(NoteEditorEvent) + Send>,
     ) -> Result<Self, String> {
         window::register_class(CLASS_NAME, Some(note_wndproc))?;
-        let dpi = dpi.max(96);
-        let frame = centered_rect(monitor.work, dpi);
-        let (width, height) = (frame.width(), frame.height());
-        // SAFETY: the module handle is this process and the class is registered.
-        let instance = unsafe { GetModuleHandleW(None) }
-            .map_err(|error| format!("GetModuleHandleW: {error}"))?;
-        // SAFETY: the class is registered, the title is shared, and no parent is
-        // requested; the window is positioned before it is shown.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                frame.left,
-                frame.top,
-                width,
-                height,
-                None,
-                None,
-                Some(HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|error| format!("CreateWindowExW(note editor): {error}"))?;
+        let frame = frame_rect(monitor, dpi);
+        let hwnd = create_window(frame)?;
 
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -217,23 +195,10 @@ impl NoteEditor {
         // holds the Arc and destroys the window before dropping it.
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Arc::as_ptr(&shared) as isize) };
 
-        // A plain Win32 window needs an IME context on Windows 11 TSF before
-        // Chinese/Japanese will compose in it.
-        // SAFETY: our window and a fresh context owned by this thread.
-        let ime = unsafe { ImmCreateContext() };
-        if !ime.0.is_null() {
-            // SAFETY: the HWND is ours; the previous context is not owned here.
-            unsafe {
-                let _ = ImmAssociateContext(hwnd, ime);
-                let _ = ImmSetOpenStatus(ime, true);
-            }
-            shared.ime.store(ime.0 as isize, Ordering::Release);
-        } else {
-            logging::error("note editor: ImmCreateContext failed");
-        }
+        attach_ime(hwnd, &shared);
 
         let (client_width, client_height) =
-            client_size(hwnd).unwrap_or((width as u32, height as u32));
+            client_size(hwnd).unwrap_or((frame.width() as u32, frame.height() as u32));
         let render_dpi = win32::window_dpi(hwnd).max(96);
         let start = Start {
             hwnd: SendHwnd(hwnd),
@@ -243,69 +208,27 @@ impl NoteEditor {
             color,
             text,
         };
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let thread_shared = Arc::clone(&shared);
-        let thread_hwnd = SendHwnd(hwnd);
-        let join = match thread::Builder::new()
-            .name("pegline-note-editor".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_thread(start, rx, thread_shared, thread_hwnd, ready_tx);
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the note editor render thread");
-                }
-            }) {
-            Ok(join) => join,
-            Err(error) => {
-                // SAFETY: the window exists and no other thread uses it.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err(format!("spawn note editor thread: {error}"));
-            }
+        let (join, flight_image) = start_render_thread(hwnd, start, rx, &shared)?;
+        logging::trace(format!(
+            "note editor open: {}x{} px at {} dpi, flight image {}",
+            client_width,
+            client_height,
+            render_dpi,
+            flight_image
+                .as_ref()
+                .map(|image| format!("{}x{}", image.width, image.height))
+                .unwrap_or_else(|| "missing".to_string())
+        ));
+        let mut editor = Self {
+            hwnd,
+            shared,
+            join: Some(join),
+            flight_image,
         };
-        match ready_rx.recv() {
-            Ok(Ok(flight_image)) => {
-                logging::trace(format!(
-                    "note editor open: {}x{} px at {} dpi, flight image {}",
-                    client_width,
-                    client_height,
-                    render_dpi,
-                    flight_image
-                        .as_ref()
-                        .map(|image| format!("{}x{}", image.width, image.height))
-                        .unwrap_or_else(|| "missing".to_string())
-                ));
-                let mut editor = Self {
-                    hwnd,
-                    shared,
-                    join: Some(join),
-                    flight_image,
-                };
-                if visible {
-                    editor.show();
-                }
-                Ok(editor)
-            }
-            Ok(Err(error)) => {
-                shared.stopping.store(true, Ordering::Release);
-                let _ = join.join();
-                // SAFETY: the render thread has stopped.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                Err(error)
-            }
-            Err(_) => {
-                shared.stopping.store(true, Ordering::Release);
-                let _ = join.join();
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                Err("note editor render thread died during setup".to_string())
-            }
+        if visible {
+            editor.show();
         }
+        Ok(editor)
     }
 
     /// Shows the window taken focus. Used directly, or by the app when the
@@ -404,6 +327,110 @@ impl Drop for NoteEditor {
     }
 }
 
+/// The editor window rectangle for `monitor` at `dpi`, centred in its work area.
+fn frame_rect(monitor: Monitor, dpi: u32) -> crate::types::RectI {
+    centered_rect(monitor.work, dpi.max(96))
+}
+
+/// Creates the editor window at `frame`, still hidden. The window class must
+/// already be registered.
+fn create_window(frame: crate::types::RectI) -> Result<HWND, String> {
+    let (width, height) = (frame.width(), frame.height());
+    // SAFETY: the module handle is this process and the class is registered.
+    let instance =
+        unsafe { GetModuleHandleW(None) }.map_err(|error| format!("GetModuleHandleW: {error}"))?;
+    // SAFETY: the class is registered, the title is shared, and no parent is
+    // requested; the window is positioned before it is shown.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            frame.left,
+            frame.top,
+            width,
+            height,
+            None,
+            None,
+            Some(HINSTANCE(instance.0)),
+            None,
+        )
+    }
+    .map_err(|error| format!("CreateWindowExW(note editor): {error}"))?;
+    Ok(hwnd)
+}
+
+/// A plain Win32 window needs an IME context on Windows 11 TSF before
+/// Chinese/Japanese will compose in it.
+fn attach_ime(hwnd: HWND, shared: &Shared) {
+    // SAFETY: our window and a fresh context owned by this thread.
+    let ime = unsafe { ImmCreateContext() };
+    if !ime.0.is_null() {
+        // SAFETY: the HWND is ours; the previous context is not owned here.
+        unsafe {
+            let _ = ImmAssociateContext(hwnd, ime);
+            let _ = ImmSetOpenStatus(ime, true);
+        }
+        shared.ime.store(ime.0 as isize, Ordering::Release);
+    } else {
+        logging::error("note editor: ImmCreateContext failed");
+    }
+}
+
+/// Starts the render thread and waits for its readiness handshake, which both
+/// proves the surface is ready and carries the paper for the opening flight.
+/// On failure the window is destroyed so `open` can return the error.
+fn start_render_thread(
+    hwnd: HWND,
+    start: Start,
+    rx: Receiver<Command>,
+    shared: &Arc<Shared>,
+) -> Result<(JoinHandle<()>, Option<ImageData>), String> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let thread_shared = Arc::clone(shared);
+    let thread_hwnd = SendHwnd(hwnd);
+    let join = match thread::Builder::new()
+        .name("pegline-note-editor".to_string())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render_thread(start, rx, thread_shared, thread_hwnd, ready_tx);
+            }));
+            if outcome.is_err() {
+                logging::error("panic in the note editor render thread");
+            }
+        }) {
+        Ok(join) => join,
+        Err(error) => {
+            // SAFETY: the window exists and no other thread uses it.
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            return Err(format!("spawn note editor thread: {error}"));
+        }
+    };
+    match ready_rx.recv() {
+        Ok(Ok(flight_image)) => Ok((join, flight_image)),
+        Ok(Err(error)) => {
+            shared.stopping.store(true, Ordering::Release);
+            let _ = join.join();
+            // SAFETY: the render thread has stopped.
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            Err(error)
+        }
+        Err(_) => {
+            shared.stopping.store(true, Ordering::Release);
+            let _ = join.join();
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            Err("note editor render thread died during setup".to_string())
+        }
+    }
+}
+
 /// Runs on the render thread until `Command::Stop` or a disconnect.
 fn render_thread(
     start: Start,
@@ -447,10 +474,29 @@ fn render_thread(
         return;
     }
     let mut commit_reported = false;
+    let mut lost = 0u32;
     loop {
         let now = win32::now_seconds();
         if let Err(error) = state.draw(now) {
             logging::error(format!("note editor draw: {error}"));
+            // A lost device used to be logged and ignored forever: the window
+            // froze on its last frame and the text could never be committed.
+            lost += 1;
+            if lost > 3 {
+                // Give up on the GPU, never on the text: hand it to the app
+                // through the normal commit path so the note is still written.
+                shared.push(
+                    NoteEditorEvent::Commit {
+                        text: state.text().to_string(),
+                        image: None,
+                    },
+                    hwnd.0,
+                );
+                break;
+            }
+            if let Err(error) = state.rebuild_surface(hwnd.0) {
+                logging::error(format!("note editor rebuild: {error}"));
+            }
         }
         publish_caret(&state, &shared);
         let timeout = state.tick_in(now).unwrap_or(Duration::from_secs(3600));
@@ -505,6 +551,23 @@ unsafe extern "system" fn note_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        note_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in note_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+unsafe fn note_wndproc_inner(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Answered while the window is being created, before `open` has stored the
+    // `Shared` pointer: these need no editor state.
     match message {
         WM_ERASEBKGND => return LRESULT(1),
         WM_PAINT => {
@@ -515,23 +578,138 @@ unsafe extern "system" fn note_wndproc(
             return LRESULT(0);
         }
         WM_GETDLGCODE => return LRESULT(1),
-        WM_MOUSEWHEEL => {
-            let Some(shared) = shared(hwnd) else {
-                return LRESULT(0);
-            };
-            let delta = ((wparam.0 as i64 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
-            shared.send(Command::Scroll(delta * 40.0));
-            return LRESULT(0);
-        }
         _ => {}
     }
 
     // SAFETY: `open` stores the live `Shared` pointer before the window is
     // shown; messages that arrive during creation fall through to the default.
     let Some(shared) = shared(hwnd) else {
+        // A wheel message was answered here before the pointer existed, and it
+        // still is: it is the one message this window takes without state.
+        if message == WM_MOUSEWHEEL {
+            return LRESULT(0);
+        }
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
     };
 
+    match message {
+        WM_MOUSEWHEEL => return handle_wheel(wparam, shared),
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            return handle_mouse(hwnd, message, lparam, shared);
+        }
+        WM_KEYDOWN | WM_CHAR => return handle_key(message, wparam, shared),
+        WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATE => {
+            return handle_focus(hwnd, message, wparam, shared);
+        }
+        WM_SIZE | WM_DPICHANGED => return handle_resize(hwnd, message, lparam, shared),
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
+            return handle_ime(hwnd, message, lparam, shared);
+        }
+        WM_CLOSE | WM_DESTROY => return handle_close(hwnd, message, shared),
+        WM_APP_NOTE_EVENT => {
+            deliver_pending(shared);
+            return LRESULT(0);
+        }
+        _ => {}
+    }
+    // SAFETY: default processing for messages the editor does not handle.
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// `WM_MOUSEWHEEL`: the high word of `wparam` is a signed multiple of
+/// `WHEEL_DELTA`; the render thread accumulates the steps.
+fn handle_wheel(wparam: WPARAM, shared: &Shared) -> LRESULT {
+    let delta = ((wparam.0 as i64 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
+    shared.send(Command::Scroll(delta * WHEEL_STEP));
+    LRESULT(0)
+}
+
+/// The pointer: movement, press, release and the capture loss that ends a drag.
+/// A press outside the paper asks to commit instead of starting a drag.
+fn handle_mouse(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    match message {
+        WM_CAPTURECHANGED => {
+            shared.send(Command::PointerUp);
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = mouse_xy(lparam);
+            // SAFETY: pure query on our own window.
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+            if !paper_contains(x, y, dpi) {
+                request_commit(shared, hwnd);
+                return LRESULT(0);
+            }
+            // SAFETY: capturing the mouse for our own window.
+            unsafe { SetCapture(hwnd) };
+            shared.send(Command::PointerDown { x, y });
+            // Double-click selects the word under the caret.
+            let now_ms = (win32::now_seconds() * 1000.0) as isize;
+            let last = shared.last_click_ms.load(Ordering::Relaxed);
+            let dx = (x - shared.last_click_x.load(Ordering::Relaxed)).abs();
+            let dy = (y - shared.last_click_y.load(Ordering::Relaxed)).abs();
+            if last > 0 && now_ms - last < 500 && dx < 4 && dy < 4 {
+                shared.last_click_ms.store(0, Ordering::Relaxed);
+                shared.send(Command::SelectWord);
+            } else {
+                shared.last_click_ms.store(now_ms, Ordering::Relaxed);
+                shared.last_click_x.store(x, Ordering::Relaxed);
+                shared.last_click_y.store(y, Ordering::Relaxed);
+            }
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = mouse_xy(lparam);
+            shared.send(Command::PointerMove { x, y });
+        }
+        WM_LBUTTONUP => {
+            // SAFETY: balances SetCapture; a no-op without capture.
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            shared.send(Command::PointerUp);
+        }
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// The keyboard: `WM_KEYDOWN` carries commands and the Ctrl shortcuts for the
+/// clipboard, `WM_CHAR` carries printable text.
+fn handle_key(message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
+    match message {
+        WM_KEYDOWN => {
+            if let Some(key) = key_code(wparam.0 as u32) {
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+                if control && key == KeyCode::V {
+                    if let Some(text) = clipboard::read_text() {
+                        shared.send(Command::Paste(text));
+                    }
+                    return LRESULT(0);
+                }
+                if control && key == KeyCode::C {
+                    shared.send(Command::Copy);
+                    return LRESULT(0);
+                }
+                if control && key == KeyCode::X {
+                    shared.send(Command::Cut);
+                    return LRESULT(0);
+                }
+                shared.send(Command::Key {
+                    code: key,
+                    shift,
+                    control,
+                });
+            }
+        }
+        WM_CHAR => forward_char(shared, wparam),
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// Focus and activation. The first `WM_SETFOCUS` arms committing; losing focus
+/// or activation afterwards asks for a commit so the text is never lost.
+fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
     match message {
         WM_ACTIVATE => {
             let active = (wparam.0 as u32) & 0xFFFF;
@@ -543,13 +721,11 @@ unsafe extern "system" fn note_wndproc(
                     request_commit(shared, hwnd);
                 }
             }
-            return LRESULT(0);
         }
         WM_SETFOCUS => {
             logging::trace("note editor WM_SETFOCUS");
             shared.focus_ready.store(true, Ordering::Release);
             shared.send(Command::Focus(true));
-            return LRESULT(0);
         }
         WM_KILLFOCUS => {
             logging::trace("note editor WM_KILLFOCUS");
@@ -559,31 +735,15 @@ unsafe extern "system" fn note_wndproc(
             {
                 request_commit(shared, hwnd);
             }
-            return LRESULT(0);
         }
-        WM_CLOSE => {
-            logging::trace("note editor WM_CLOSE");
-            request_commit(shared, hwnd);
-            return LRESULT(0);
-        }
-        WM_DESTROY => {
-            let ime = shared.ime.swap(0, Ordering::AcqRel);
-            if ime != 0 {
-                let context = HIMC(ime as *mut c_void);
-                // SAFETY: the HWND is still valid during WM_DESTROY and the
-                // context was created by us in `open`.
-                unsafe {
-                    let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
-                    let _ = ImmDestroyContext(context);
-                }
-            }
-            shared.closed.store(true, Ordering::Release);
-            return LRESULT(0);
-        }
-        WM_APP_NOTE_EVENT => {
-            deliver_pending(shared);
-            return LRESULT(0);
-        }
+        _ => {}
+    }
+    LRESULT(0)
+}
+
+/// The client size, and a DPI change that re-centres the window.
+fn handle_resize(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    match message {
         WM_SIZE => {
             let width = (lparam.0 as usize & 0xFFFF) as u32;
             let height = ((lparam.0 as usize >> 16) & 0xFFFF) as u32;
@@ -594,7 +754,6 @@ unsafe extern "system" fn note_wndproc(
                 height_px: height.max(1),
                 dpi,
             });
-            return LRESULT(0);
         }
         WM_DPICHANGED => {
             // Re-centre on the monitor's work area at the new DPI instead of
@@ -632,86 +791,17 @@ unsafe extern "system" fn note_wndproc(
                     );
                 }
             }
-            return LRESULT(0);
         }
+        _ => {}
+    }
+    LRESULT(0)
+}
 
-        WM_CAPTURECHANGED => {
-            shared.send(Command::PointerUp);
-            return LRESULT(0);
-        }
-        WM_LBUTTONDOWN => {
-            let (x, y) = mouse_xy(lparam);
-            // SAFETY: pure query on our own window.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-            if !paper_contains(x, y, dpi) {
-                request_commit(shared, hwnd);
-                return LRESULT(0);
-            }
-            // SAFETY: capturing the mouse for our own window.
-            unsafe { SetCapture(hwnd) };
-            shared.send(Command::PointerDown { x, y });
-            // Double-click selects the word under the caret.
-            let now_ms = (win32::now_seconds() * 1000.0) as isize;
-            let last = shared.last_click_ms.load(Ordering::Relaxed);
-            let dx = (x - shared.last_click_x.load(Ordering::Relaxed)).abs();
-            let dy = (y - shared.last_click_y.load(Ordering::Relaxed)).abs();
-            if last > 0 && now_ms - last < 500 && dx < 4 && dy < 4 {
-                shared.last_click_ms.store(0, Ordering::Relaxed);
-                shared.send(Command::SelectWord);
-            } else {
-                shared.last_click_ms.store(now_ms, Ordering::Relaxed);
-                shared.last_click_x.store(x, Ordering::Relaxed);
-                shared.last_click_y.store(y, Ordering::Relaxed);
-            }
-            return LRESULT(0);
-        }
-        WM_MOUSEMOVE => {
-            let (x, y) = mouse_xy(lparam);
-            shared.send(Command::PointerMove { x, y });
-            return LRESULT(0);
-        }
-        WM_LBUTTONUP => {
-            // SAFETY: balances SetCapture; a no-op without capture.
-            unsafe {
-                let _ = ReleaseCapture();
-            }
-            shared.send(Command::PointerUp);
-            return LRESULT(0);
-        }
-        WM_CHAR => {
-            forward_char(shared, wparam);
-            return LRESULT(0);
-        }
-        WM_KEYDOWN => {
-            if let Some(key) = key_code(wparam.0 as u32) {
-                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
-                let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
-                if control && key == KeyCode::V {
-                    if let Some(text) = clipboard::read_text() {
-                        shared.send(Command::Paste(text));
-                    }
-                    return LRESULT(0);
-                }
-                if control && key == KeyCode::C {
-                    shared.send(Command::Copy);
-                    return LRESULT(0);
-                }
-                if control && key == KeyCode::X {
-                    shared.send(Command::Cut);
-                    return LRESULT(0);
-                }
-                shared.send(Command::Key {
-                    code: key,
-                    shift,
-                    control,
-                });
-            }
-            return LRESULT(0);
-        }
-        WM_IME_STARTCOMPOSITION => {
-            position_ime(hwnd, shared);
-            return LRESULT(0);
-        }
+/// The IME: a composition start re-anchors the candidate window at the caret,
+/// and each composition reports its committed and in-progress text.
+fn handle_ime(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    match message {
+        WM_IME_STARTCOMPOSITION => position_ime(hwnd, shared),
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
             if flags & GCS_RESULTSTR.0 != 0 {
@@ -724,12 +814,36 @@ unsafe extern "system" fn note_wndproc(
                 shared.send(Command::Composition(text));
             }
             position_ime(hwnd, shared);
-            return LRESULT(0);
         }
         _ => {}
     }
-    // SAFETY: default processing for messages the editor does not handle.
-    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    LRESULT(0)
+}
+
+/// Closing. Both messages ask for a commit first; `WM_DESTROY` also releases
+/// the IME context and marks the editor closed.
+fn handle_close(hwnd: HWND, message: u32, shared: &Shared) -> LRESULT {
+    match message {
+        WM_CLOSE => {
+            logging::trace("note editor WM_CLOSE");
+            request_commit(shared, hwnd);
+        }
+        WM_DESTROY => {
+            let ime = shared.ime.swap(0, Ordering::AcqRel);
+            if ime != 0 {
+                let context = HIMC(ime as *mut c_void);
+                // SAFETY: the HWND is still valid during WM_DESTROY and the
+                // context was created by us in `open`.
+                unsafe {
+                    let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
+                    let _ = ImmDestroyContext(context);
+                }
+            }
+            shared.closed.store(true, Ordering::Release);
+        }
+        _ => {}
+    }
+    LRESULT(0)
 }
 
 fn shared(hwnd: HWND) -> Option<&'static Shared> {

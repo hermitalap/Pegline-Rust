@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::path::PathBuf;
 
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint,
@@ -16,9 +16,8 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
-    REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW,
+    RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
@@ -30,12 +29,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IsIconic, IsWindowVisible, SM_CXICON,
-    SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IsIconic, IsWindowVisible, SM_CXSMICON,
+    SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
-use windows::core::{BOOL, GUID, HSTRING, PCWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR};
 
 /// `MONITORINFOF_PRIMARY`; the constant lives in a feature we do not enable.
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -441,31 +439,6 @@ pub fn set_autostart(enabled: bool) -> WinResult<()> {
     Ok(())
 }
 
-/// Creates the Run key if the user has never had one (unlikely, but cheap).
-pub fn ensure_run_key() {
-    let mut key = HKEY::default();
-    // SAFETY: standard key creation with no security attributes requested.
-    let result = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            RUN_KEY,
-            Some(0),
-            PCWSTR::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_QUERY_VALUE | KEY_SET_VALUE,
-            None,
-            &mut key,
-            None,
-        )
-    };
-    if result.is_ok() {
-        // SAFETY: the handle was created above.
-        unsafe {
-            let _ = RegCloseKey(key);
-        }
-    }
-}
-
 /// Makes the window topmost without activating it.
 pub fn set_topmost(hwnd: HWND) {
     // SAFETY: the handle belongs to this process; no size/move flags.
@@ -527,11 +500,6 @@ pub fn set_click_through(hwnd: HWND, enabled: bool) {
     }
 }
 
-pub fn is_topmost(hwnd: HWND) -> bool {
-    // SAFETY: querying our own window's style.
-    unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 }
-}
-
 /// Places a window in device pixels without activating it.
 pub fn place_window(hwnd: HWND, rect: RectI, topmost: bool) {
     // SAFETY: moving a window we own; the handle is valid for the process life.
@@ -567,11 +535,6 @@ pub fn window_dpi(hwnd: HWND) -> u32 {
 pub fn small_icon_size() -> i32 {
     // SAFETY: metric query.
     unsafe { GetSystemMetrics(SM_CXSMICON).max(16) }
-}
-
-pub fn large_icon_size() -> i32 {
-    // SAFETY: metric query.
-    unsafe { GetSystemMetrics(SM_CXICON).max(32) }
 }
 
 /// Loads icon resource 1 (see `assets/pegline.rc`) at the requested size.
@@ -611,16 +574,6 @@ pub fn virtual_screen() -> RectI {
     }
 }
 
-pub fn icon_metrics() -> (i32, i32) {
-    // SAFETY: metric queries.
-    unsafe { (GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON)) }
-}
-
-pub fn small_icon_metrics() -> (i32, i32) {
-    // SAFETY: metric queries.
-    unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) }
-}
-
 /// QueryPerformanceCounter frequency, cached after the first call.
 pub fn qpc_frequency() -> f64 {
     use std::sync::OnceLock;
@@ -649,13 +602,7 @@ pub fn now_seconds() -> f64 {
     ticks as f64 / qpc_frequency()
 }
 
-/// A GUID from the shell namespace, used only for the screenshots folder.
-pub fn known_folder_guid() -> GUID {
-    FOLDERID_Screenshots
-}
-
 /// The local wall clock as `(year, month, day, hour, minute, second)`.
-///
 /// File names use local time, exactly like the WPF version, so a screenshot
 /// taken at 18:04 in Shanghai reads `18:04` in Explorer rather than UTC.
 pub fn local_time_parts() -> (i32, u32, u32, u32, u32, u32) {
@@ -670,9 +617,6 @@ pub fn local_time_parts() -> (i32, u32, u32, u32, u32, u32) {
         time.wSecond as u32,
     )
 }
-
-/// Handle type used by clipboard and drag-and-drop code.
-pub type WinHandle = HANDLE;
 
 #[cfg(test)]
 mod registry_tests {

@@ -683,6 +683,26 @@ unsafe extern "system" fn preview_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        preview_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in preview_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+unsafe fn preview_wndproc_inner(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_SETCURSOR => {

@@ -9,7 +9,6 @@
 //! across the call.
 
 use std::mem::size_of;
-use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::{
@@ -17,11 +16,11 @@ use windows::Win32::UI::Shell::{
     NOTIFY_ICON_DATA_FLAGS, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, HICON, HMENU, MENU_ITEM_FLAGS, MF_CHECKED,
-    MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, PostMessageW, RegisterWindowMessageW,
+    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, HICON, HMENU, MENU_ITEM_FLAGS,
+    MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, PostMessageW,
     SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_NULL,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::PCWSTR;
 
 use crate::i18n;
 use crate::logging;
@@ -149,20 +148,6 @@ impl Tray {
         }
     }
 
-    pub fn set_tooltip(&mut self, text: &str) {
-        self.tooltip = tip_field(text);
-        let data = self.data(NIF_TIP);
-        // SAFETY: as in `remove`; NIM_MODIFY reads the fields named by `uFlags`,
-        // and `szTip` is a NUL-terminated UTF-16 buffer inside the struct.
-        let modified = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
-        if !modified.as_bool() {
-            logging::error(win32::werr(
-                "Shell_NotifyIconW(NIM_MODIFY)",
-                windows::core::Error::from_thread(),
-            ));
-        }
-    }
-
     /// Shows a balloon tip (used when the clipboard has no text for a note).
     pub fn show_balloon(&mut self, title: &str, text: &str) {
         let mut data = self.data(NIF_INFO);
@@ -263,6 +248,21 @@ impl Tray {
         unsafe { Shell_NotifyIconW(NIM_ADD, &data) }
             .ok()
             .map_err(|error| win32::werr("Shell_NotifyIconW(NIM_ADD)", error))
+    }
+}
+
+impl Drop for Tray {
+    fn drop(&mut self) {
+        // `LoadImageW` ran without `LR_SHARED`, so this icon belongs to the
+        // process. The shell is done with it once `NIM_DELETE` has run, and
+        // nothing else frees it: without this the handle leaked for the life of
+        // the process, and would leak once per reinstall if that grew a reload.
+        if self.icon.is_invalid() {
+            return;
+        }
+        // SAFETY: the handle came from `LoadImageW` in `install` and is owned by
+        // this `Tray`; `remove` has already told the shell to drop it.
+        let _ = unsafe { DestroyIcon(self.icon) };
     }
 }
 
@@ -441,17 +441,6 @@ fn command_for_id(id: u32) -> Option<MenuCommand> {
         ID_EXIT => Some(MenuCommand::Exit),
         _ => None,
     }
-}
-
-/// The message Explorer broadcasts after a restart; the tray icon must be
-/// re-added when it arrives.
-pub fn taskbar_created_message() -> u32 {
-    static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
-    *TASKBAR_CREATED.get_or_init(|| {
-        // SAFETY: user32 registers the message from a static NUL-terminated
-        // name and returns a process-wide id; no memory is retained by us.
-        unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) }
-    })
 }
 
 #[cfg(test)]

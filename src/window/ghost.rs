@@ -11,6 +11,7 @@
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
@@ -35,6 +36,9 @@ const WINDOW_TITLE: PCWSTR = w!("Pegline drag preview");
 const GHOST_SCALE: f32 = 0.9;
 /// How far below the pointer the ghost hangs, DIP (BEHAVIOR §3.2).
 const FOLLOW_DIP: f32 = 12.0;
+/// Pointer-follow period while the ghost is visible, milliseconds. The render
+/// thread chases the cursor on its own instead of being driven by a UI timer.
+const FOLLOW_MS: u64 = 15;
 /// Whole-card opacity of the ghost (BEHAVIOR §3.2).
 const GHOST_OPACITY: f32 = 0.85;
 /// Frame border width, DIP, as on the cards.
@@ -50,8 +54,6 @@ enum GhostCommand {
         rect: RectI,
         dpi: u32,
     },
-    /// Reposition only; the pixel size and the content do not change.
-    Move(RectI),
     /// Hide, drop the bitmap and shrink the swap chain.
     Hide,
     Stop,
@@ -72,11 +74,6 @@ pub struct Ghost {
     join: Option<JoinHandle<()>>,
     /// UI-side flag: a show was requested and no hide has followed yet.
     visible: bool,
-    /// Pixel size of the ghost, cached by `show` so `move_to` reuses it and
-    /// never needs to resize (and therefore never redraws) mid-drag.
-    size_px: (u32, u32),
-    /// Monitor scale `size_px` was computed at.
-    dpi: u32,
 }
 
 impl Ghost {
@@ -159,8 +156,6 @@ impl Ghost {
             tx,
             join: Some(join),
             visible: false,
-            size_px: (0, 0),
-            dpi: 0,
         })
     }
 
@@ -190,8 +185,6 @@ impl Ghost {
             self.hide();
             return;
         }
-        self.size_px = size;
-        self.dpi = dpi;
         self.visible = true;
         let rect = follow_rect(cursor, size, dpi);
         let _ = self.tx.send(GhostCommand::Show {
@@ -199,22 +192,6 @@ impl Ghost {
             rect,
             dpi,
         });
-    }
-
-    /// Moves the ghost with the pointer. Nothing is redrawn: the window keeps
-    /// the pixel size [`Ghost::show`] computed, so a monitor with another scale
-    /// is picked up by the next drag instead of by a resize mid-drag (which
-    /// would throw the presented frame away). `dpi` is the scale of the monitor
-    /// under the pointer, or 0 when the caller does not know it and the scale
-    /// the ghost was drawn at should be kept; it only positions the 12 DIP gap.
-    pub fn move_to(&mut self, cursor: (i32, i32), dpi: u32) {
-        if !self.visible || self.size_px.0 == 0 || self.size_px.1 == 0 {
-            return;
-        }
-        let dpi = if dpi == 0 { self.dpi } else { dpi };
-        let _ = self
-            .tx
-            .send(GhostCommand::Move(follow_rect(cursor, self.size_px, dpi)));
     }
 
     /// Hides the ghost. The render thread drops the bitmap and shrinks the swap
@@ -267,16 +244,43 @@ fn ghost_thread(hwnd: SendHwnd, rx: Receiver<GhostCommand>, ready: Sender<Result
 
     let mut texture: Option<ID2D1Bitmap1> = None;
     let mut shown = false;
-    while let Ok(command) = rx.recv() {
+    // The size and scale the visible ghost was drawn at; the follower only
+    // moves the window and never resizes it mid-drag (that would throw the
+    // presented frame away).
+    let mut size_px = (0u32, 0u32);
+    let mut follow_dpi = 96u32;
+    loop {
+        // While the ghost is on screen, wake up often enough to chase the
+        // pointer. This used to be a 15 ms timer on the hidden window, which
+        // meant `App` had to be mutably borrowed across the OLE drag loop --
+        // an alias that the pointer did not always survive. The ghost now
+        // follows itself.
+        let command = if shown {
+            match rx.recv_timeout(Duration::from_millis(FOLLOW_MS)) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(command) => Some(command),
+                Err(_) => break,
+            }
+        };
+        let Some(command) = command else {
+            if shown && size_px.0 > 0 && size_px.1 > 0 {
+                if let Some(cursor) = win32::cursor_pos() {
+                    win32::place_window(hwnd.0, follow_rect(cursor, size_px, follow_dpi), true);
+                }
+            }
+            continue;
+        };
         match command {
             GhostCommand::Stop => break,
             GhostCommand::Hide => release(&mut renderer, hwnd.0, &mut texture, &mut shown),
-            GhostCommand::Move(rect) => {
-                if shown {
-                    win32::place_window(hwnd.0, rect, true);
-                }
-            }
             GhostCommand::Show { image, rect, dpi } => {
+                size_px = (rect.width().max(1) as u32, rect.height().max(1) as u32);
+                follow_dpi = dpi.max(96);
                 // Never leave an old frame on screen while the new one is
                 // composed: hide first, draw, then show.
                 if shown {
@@ -400,6 +404,21 @@ unsafe extern "system" fn ghost_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        ghost_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in ghost_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+unsafe fn ghost_wndproc_inner(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => return LRESULT(1),

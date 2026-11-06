@@ -136,10 +136,6 @@ impl DisplayLine {
         text
     }
 
-    pub fn display_len(&self, active: bool) -> usize {
-        self.visible_runs(active).map(|run| run.text.len()).sum()
-    }
-
     fn visible_runs<'a>(&'a self, active: bool) -> impl Iterator<Item = &'a Run> + 'a {
         self.runs.iter().filter(move |run| active || !run.marker)
     }
@@ -343,27 +339,6 @@ impl DisplayDoc {
 
     pub fn line_at(&self, offset: usize) -> Option<&DisplayLine> {
         self.lines.get(self.line_index(offset))
-    }
-
-    /// Total content height in DIP for the given active line, assuming no
-    /// wrapping. The renderer replaces this with measured heights once it has
-    /// DWrite layouts.
-    pub fn estimated_height(&self, active: usize) -> f32 {
-        self.lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                if line.collapsed(index == active) {
-                    return 0.0;
-                }
-                let height = if matches!(line.block, Block::Rule) && index != active {
-                    12.0
-                } else {
-                    line.metrics.font_size * line.metrics.line_spacing
-                };
-                line.metrics.space_before + height + line.metrics.space_after
-            })
-            .sum()
     }
 }
 

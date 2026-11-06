@@ -51,7 +51,12 @@ const HGLOBAL_FLAGS: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(GMEM_MOVEABLE.0 | G
 /// message handler (OLE pumps messages internally). `hwnd` and `image` are kept
 /// for the drag preview and the bitmap payload of a later phase; the OLE drag
 /// loop itself needs neither.
-pub fn drag_file(_hwnd: HWND, path: &Path, _image: &ImageData, png: &[u8]) -> Result<u32, String> {
+pub fn drag_file(
+    _hwnd: HWND,
+    path: &Path,
+    _image: &ImageData,
+    png: Vec<u8>,
+) -> Result<u32, String> {
     // The drag must name the file, not a path relative to our working
     // directory: Explorer resolves the drop in the target's context.
     let path =
@@ -66,10 +71,11 @@ pub fn drag_file(_hwnd: HWND, path: &Path, _image: &ImageData, png: &[u8]) -> Re
         .map_err(|_| format!("RegisterClipboardFormatW(\"PNG\") returned {png_format}, which does not fit a clipboard format"))?;
 
     // Owned copies: the object outlives every caller-side buffer during the
-    // modal drag loop, and OLE may ask for the data more than once.
+    // modal drag loop, and OLE may ask for the data more than once. `png` is
+    // moved in, not copied: a screenshot payload is megabytes.
     let object: IDataObject = FileDataObject {
         path,
-        png: png.to_vec(),
+        png,
         png_format,
     }
     .into();

@@ -6,6 +6,8 @@
 //! shrunk to 2x2 so it gives its surface back. Its render thread owns the swap
 //! chain and the timeline; the UI thread only places, shows and hides it.
 
+mod paint;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow,
     WM_ERASEBKGND, WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
@@ -24,11 +27,12 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::capture::wic;
 use crate::layout;
 use crate::logging;
-use crate::render::{Brush, Present, Renderer};
+use crate::render::{Present, Renderer};
 use crate::spring::{Spring, ease};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
+use paint::{draw_flight_card, drop_pose, paint, paint_pre_roll};
 
 const CLASS_NAME: PCWSTR = w!("PeglineFlight");
 const WINDOW_TITLE: PCWSTR = w!("Pegline");
@@ -68,8 +72,10 @@ const ENTRY_SETTLE_DAMPING: f32 = 0.9;
 /// Padding around the travel bounds: 60 DIP plus 5% of the longer side.
 const PAD_DIP: f32 = 60.0;
 const PAD_FRACTION: f32 = 0.05;
-/// Smallest card that still gets a shadow, DIP.
-const SHADOW_MAX_CARD: f32 = 300.0;
+/// Largest frame delta the animation integrates, seconds. The overlay caps its
+/// own scene delta at 0.05 s and the mirror springs that follow the landed card
+/// must use the same cap, or one stalled frame desynchronises the two copies.
+const MAX_FRAME_DT: f32 = 0.05;
 
 /// How the clothespin behaves during an editor flight.
 ///
@@ -691,14 +697,9 @@ fn flight_thread(
                 origin,
                 dpi,
             } => {
-                if let Err(error) = run_flight(
-                    &mut renderer,
-                    hwnd.0,
-                    token,
-                    generation,
-                    &interrupt,
-                    &image.resolve(),
-                    start_image.as_ref(),
+                let request = FlightRequest {
+                    image: image.resolve(),
+                    start_image,
                     settle_angle,
                     blend_entry,
                     chrome_full,
@@ -709,6 +710,14 @@ fn flight_thread(
                     pin,
                     origin,
                     dpi,
+                };
+                if let Err(error) = run_flight(
+                    &mut renderer,
+                    hwnd.0,
+                    token,
+                    generation,
+                    &interrupt,
+                    request,
                     &on_event,
                 ) {
                     logging::error(format!("flight: {error}"));
@@ -770,159 +779,218 @@ fn flight_thread(
     logging::trace("flight render thread stopped");
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_flight(
-    renderer: &mut Renderer,
-    hwnd: HWND,
-    token: u64,
-    generation: u64,
-    interrupt: &AtomicU64,
-    image: &ImageData,
-    start_image: Option<&ImageData>,
+/// What one flight should do: the image it carries, the rectangles it travels
+/// between and how its card is decorated.
+///
+/// Grouped into one value because the setup wants all of it at once; a dozen
+/// positional parameters made the call unreadable.
+struct FlightRequest {
+    /// The picture that travels.
+    image: ImageData,
+    /// The card's own bitmap, shown at the start and dissolved into `image`
+    /// (a note opening its editor).
+    start_image: Option<ImageData>,
+    /// The card's visual angle when the flight starts, degrees. When set, the
+    /// flight first turns the card upright with an angular spring so a tilted
+    /// hanging picture does not snap before flying.
     settle_angle: Option<f32>,
+    /// Run the settle/cross-fade during the travel instead of first waiting at
+    /// the slot.
     blend_entry: bool,
+    /// Keep the glass frame and pin fully opaque from the first frame: editor
+    /// flights start from a real, fully decorated card.
     chrome_full: bool,
+    /// The card's starting rect, screen pixels.
     from: RectI,
+    /// The rect it lands on, screen pixels.
     to: RectI,
+    /// Fixed card tilt, degrees, applied increasingly during the flight.
     tilt: f32,
+    /// How far the row glides after landing, DIP (normally -87, or 0 for the
+    /// first card). The flight window mirrors the same spring.
     slide_dip: f32,
+    /// How the clothespin behaves. A pin belongs to the line, not the editor
+    /// card, so editor flights hide it or fade it at the rope end.
     pin: PinMode,
+    /// The window rect, screen pixels: everything drawn is relative to it.
     origin: RectI,
     dpi: u32,
-    on_event: &dyn Fn(FlightEvent),
-) -> Result<(), String> {
-    let width_px = origin.width().max(1) as u32;
-    let height_px = origin.height().max(1) as u32;
-    renderer.resize(width_px, height_px, dpi)?;
-    let scale = dpi.max(96) as f32 / 96.0;
-    let texture = renderer.upload(image)?;
-    let start_texture = start_image
+}
+
+/// The images one flight draws with.
+struct FlightTextures {
+    /// The picture that travels.
+    card: ID2D1Bitmap1,
+    /// The card's own bitmap, dissolved into `card` at the start.
+    start: Option<ID2D1Bitmap1>,
+}
+
+/// Everything one flight needs to know, built once before the frame loop.
+///
+/// The textures live in [`FlightTextures`] so this half holds no COM and
+/// [`Self::step`] can be driven from a test without a device.
+struct FlightPlan {
+    /// The angular spring that turns a tilted card upright, when the flight
+    /// starts from a tilt at all.
+    settle: Option<Spring>,
+    /// The row spring and landing sway the flight image mirrors after the
+    /// hand-off.
+    follow: LandingFollow,
+    /// The card at its slot, where the annotation pre-roll turns it upright.
+    pre_roll_card: RectF,
+    from: RectI,
+    to: RectI,
+    /// The window rect: everything drawn is relative to it.
+    origin: RectI,
+    /// Device pixels per DIP.
+    scale: f32,
+    /// Fixed card tilt, degrees, applied increasingly during the flight.
+    tilt: f32,
+    pin: PinMode,
+    /// The glass frame and pin are opaque from the first frame.
+    chrome_full: bool,
+    /// The flight starts from a decorated card: no landing sway, and the pin
+    /// follows `pin` only.
+    entry: bool,
+    /// The settle and the cross-fade run during the travel, not at the slot.
+    blend: bool,
+    /// A card bitmap is uploaded and dissolved into the travel image.
+    has_start_image: bool,
+    /// The annotation pre-roll is still running: the card turns upright at its
+    /// slot before it moves.
+    pre_roll: bool,
+    /// The travel has reached the destination; the landing fade is running.
+    landed: bool,
+    /// The hand-off happened on an earlier frame, so the follow springs move.
+    following: bool,
+    /// The previous frame's travel time, so the follow springs advance by the
+    /// same delta whether the flight is interpolated or handed over.
+    last_elapsed: f32,
+}
+
+/// One travel frame, ready to draw.
+struct FlightPose {
+    /// The card rectangle in window DIP.
+    card: RectF,
+    /// Rotation about the pin top, as [`Renderer::set_transform`] wants it.
+    transform: Matrix3x2,
+    /// The glass frame's opacity: 0 for a bare screenshot, 1 for a card that
+    /// is already decorated.
+    chrome: f32,
+    /// The flight image's own opacity, which fades out after the hand-off.
+    alpha: f32,
+    /// Whether this copy still draws the shadow.
+    shadow: bool,
+    /// The clothespin's opacity.
+    pin: f32,
+    /// Progress into the start-image dissolve, 0..1; 1 when there is nothing
+    /// left to dissolve.
+    crossfade: f32,
+    /// The travel reached the destination on this frame: report `Landed`.
+    landed_now: bool,
+    /// The landing fade is over: report `Finished`.
+    finished: bool,
+}
+
+/// One pre-roll frame: the card at its slot, turning upright and dissolving
+/// into the editor image before the travel starts.
+struct PreRollPose {
+    /// The card rectangle at the slot, in window DIP.
+    card: RectF,
+    /// Rotation about the pin top, as [`Renderer::set_transform`] wants it.
+    transform: Matrix3x2,
+    /// Progress into the start-image dissolve, 0..1.
+    crossfade: f32,
+    /// The clothespin's opacity; the card has not left the line yet.
+    pin: f32,
+    /// The card is upright and the dissolve is done: the travel can start.
+    ready: bool,
+}
+
+/// Resizes the swap chain to the flight's bounding box, uploads its images and
+/// builds the plan the frame loop steps through.
+fn prepare(
+    renderer: &mut Renderer,
+    request: FlightRequest,
+) -> Result<(FlightPlan, FlightTextures), String> {
+    let origin = request.origin;
+    renderer.resize(
+        origin.width().max(1) as u32,
+        origin.height().max(1) as u32,
+        request.dpi,
+    )?;
+    let scale = request.dpi.max(96) as f32 / 96.0;
+    let texture = renderer.upload(&request.image)?;
+    let start_texture = request
+        .start_image
+        .as_ref()
         .map(|image| renderer.upload(image))
         .transpose()?;
-    let _ = hwnd;
 
-    let entry = settle_angle.is_some() || start_texture.is_some();
+    let entry = request.settle_angle.is_some() || start_texture.is_some();
     // Notes start moving at once: the cross-fade and the settle run during the
     // first part of the flight instead of delaying it. The annotation editor
     // still waits for the card to be upright before it grows.
-    let blend = blend_entry && entry;
-    let mut settle = settle_angle.map(|angle| {
+    let blend = request.blend_entry && entry;
+    let settle = request.settle_angle.map(|angle| {
         let mut spring = Spring::new(ENTRY_SETTLE_RESPONSE, ENTRY_SETTLE_DAMPING, angle);
         spring.target = 0.0;
         spring
     });
     let pre_roll_card = {
-        let width = from.width() as f32 / scale;
-        let height = from.height() as f32 / scale;
-        let cx = (from.left + from.right) as f32 * 0.5 / scale - origin.left as f32 / scale;
-        let cy = (from.top + from.bottom) as f32 * 0.5 / scale - origin.top as f32 / scale;
+        let width = request.from.width() as f32 / scale;
+        let height = request.from.height() as f32 / scale;
+        let cx = (request.from.left + request.from.right) as f32 * 0.5 / scale
+            - origin.left as f32 / scale;
+        let cy = (request.from.top + request.from.bottom) as f32 * 0.5 / scale
+            - origin.top as f32 / scale;
         RectF::from_xywh(cx - width * 0.5, cy - height * 0.5, width, height)
     };
+    let plan = FlightPlan {
+        settle,
+        follow: LandingFollow::new(request.slide_dip),
+        pre_roll_card,
+        from: request.from,
+        to: request.to,
+        origin,
+        scale,
+        tilt: request.tilt,
+        pin: request.pin,
+        chrome_full: request.chrome_full,
+        entry,
+        blend,
+        has_start_image: start_texture.is_some(),
+        pre_roll: entry && !blend,
+        landed: false,
+        following: false,
+        last_elapsed: 0.0,
+    };
+    let textures = FlightTextures {
+        card: texture,
+        start: start_texture,
+    };
+    Ok((plan, textures))
+}
 
-    let start = win32::now_seconds();
-    let mut flight_start = start;
-    let mut last = start;
-    let mut pre_roll = entry && !blend;
-    let mut landed = false;
-    let mut following = false;
-    let mut last_elapsed = 0.0f32;
-    let mut follow = LandingFollow::new(slide_dip);
-    // The overlay caps its scene delta at 0.05 s; the mirror spring must use
-    // the same cap or a stalled frame desynchronises the two copies.
-    let max_follow_dt = 0.05;
-    let mut frames = 0u32;
-    let mut draw_max_ms = 0.0f32;
-    loop {
-        // A newer capture takes over: leave without reporting a landing; the app
-        // already made the old card visible again.
-        if interrupt.load(Ordering::Relaxed) != generation {
-            return Ok(());
-        }
-        let now = win32::now_seconds();
-        let frame_dt = ((now - last) as f32).clamp(0.0, max_follow_dt);
-        last = now;
-
-        // ---- pre-roll (annotation editor): turn upright at the slot ----
-        if pre_roll {
-            let angle = match settle.as_mut() {
-                Some(spring) => {
-                    spring.step(frame_dt);
-                    spring.value
-                }
-                None => 0.0,
-            };
-            let crossfade = if start_texture.is_some() {
-                (((now - start) / ENTRY_CROSSFADE_SECONDS as f64).clamp(0.0, 1.0)) as f32
-            } else {
-                1.0
-            };
-            let settled = settle.as_ref().is_none_or(|spring| spring.settled());
-            let rotation = Matrix3x2::rotation_around(
-                angle,
-                Vector2 {
-                    X: pre_roll_card.left + pre_roll_card.width() * 0.5,
-                    Y: pre_roll_card.top - layout::CARD_OFFSET_BELOW_TOP,
-                },
-            );
-            let draw_start = win32::now_seconds();
-            renderer.begin()?;
-            renderer.set_transform(rotation);
-            draw_flight_card(
-                renderer,
-                &texture,
-                pre_roll_card,
-                1.0,
-                1.0,
-                true,
-                pin_alpha(pin, 0.0),
-            );
-            if let Some(start_texture) = start_texture.as_ref() {
-                let inset = layout::PHOTO_INSET;
-                let photo = RectF::new(
-                    pre_roll_card.left + inset,
-                    pre_roll_card.top + inset,
-                    pre_roll_card.right - inset,
-                    pre_roll_card.bottom - inset,
-                );
-                let alpha = 1.0 - ease::smooth(crossfade, 0.0, 1.0);
-                let pushed = renderer.push_opacity(photo, alpha.max(0.01));
-                renderer.draw_photo(start_texture, photo, layout::PHOTO_RADIUS);
-                if pushed {
-                    renderer.pop_opacity();
-                }
-            }
-            renderer.reset_transform();
-            renderer.end()?;
-            let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
-            draw_max_ms = draw_max_ms.max(draw_ms);
-            if renderer.present(true) == Present::DeviceLost {
-                return Err("device lost during flight pre-roll".to_string());
-            }
-            if frames == 0 {
-                on_event(FlightEvent::Started(token));
-            }
-            frames += 1;
-            if settled && crossfade >= 1.0 {
-                pre_roll = false;
-                flight_start = now;
-                last = now;
-            }
-            continue;
-        }
-
-        let elapsed = (now - flight_start) as f32;
+impl FlightPlan {
+    /// Turns the travel clock into this frame's pose.
+    ///
+    /// Pure arithmetic: no renderer, no Win32 and no clock of its own, so the
+    /// easing and both springs can be driven at any frame rate from a test.
+    fn step(&mut self, elapsed: f32, frame_dt: f32) -> FlightPose {
         let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
         let k = ease::in_out_cubic(t);
 
         // After the hand-off the flight image mirrors the real card's row
         // spring and landing sway, so the two never drift apart. An editor
         // flight lands on a still editor card, so it skips the sway.
-        if landed && following {
-            let dt = (elapsed - last_elapsed).clamp(0.0, max_follow_dt);
-            follow.step(dt);
+        if self.landed && self.following {
+            let dt = (elapsed - self.last_elapsed).clamp(0.0, MAX_FRAME_DT);
+            self.follow.step(dt);
         }
-        last_elapsed = elapsed;
+        self.last_elapsed = elapsed;
 
+        let (from, to, scale) = (self.from, self.to, self.scale);
         let from_w = from.width() as f32 / scale;
         let from_h = from.height() as f32 / scale;
         let to_w = to.width() as f32 / scale;
@@ -933,48 +1001,53 @@ fn run_flight(
         let from_cy = (from.top + from.bottom) as f32 * 0.5;
         let to_cx = (to.left + to.right) as f32 * 0.5;
         let to_cy = (to.top + to.bottom) as f32 * 0.5;
-        let cx = (from_cx + (to_cx - from_cx) * k - origin.left as f32) / scale;
-        let cy = (from_cy + (to_cy - from_cy) * k - origin.top as f32) / scale
+        let cx = (from_cx + (to_cx - from_cx) * k - self.origin.left as f32) / scale;
+        let cy = (from_cy + (to_cy - from_cy) * k - self.origin.top as f32) / scale
             - (std::f32::consts::PI * k).sin() * ARC_DIP;
-        let x_offset = if landed { follow.x.value } else { 0.0 };
-        let swing = if landed && !entry {
-            follow.swing.value
+        let x_offset = if self.landed {
+            self.follow.x.value
+        } else {
+            0.0
+        };
+        let swing = if self.landed && !self.entry {
+            self.follow.swing.value
         } else {
             0.0
         };
         // A blended note entry keeps its starting lean and settles while it
         // travels; the annotation pre-roll has already brought it to zero.
-        let settle_now = if blend {
-            settle.as_mut().map_or(0.0, |spring| {
+        let settle_now = if self.blend {
+            self.settle.as_mut().map_or(0.0, |spring| {
                 spring.step(frame_dt);
                 spring.value
             })
         } else {
             0.0
         };
-        let angle = if blend { settle_now } else { tilt * k } + swing;
+        let angle = if self.blend {
+            settle_now
+        } else {
+            self.tilt * k
+        } + swing;
         let card = RectF::from_xywh(
             cx - width * 0.5 + x_offset,
             cy - height * 0.5,
             width,
             height,
         );
-        let chrome = if chrome_full {
+        let chrome = if self.chrome_full {
             1.0
         } else {
             ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END)
         };
-        if !landed && t >= 1.0 {
-            landed = true;
-            on_event(FlightEvent::Landed {
-                token,
-                frames,
-                elapsed,
-                draw_max_ms,
-            });
+        // The hand-off: the travel is over and the real card underneath takes
+        // over, but this copy still has to dissolve over it.
+        let landed_now = !self.landed && t >= 1.0;
+        if landed_now {
+            self.landed = true;
         }
-        following = landed;
-        let alpha = if landed {
+        self.following = self.landed;
+        let alpha = if self.landed {
             // The real card underneath is already fully opaque, so only this
             // copy has to dissolve. A smoothstep keeps the fade gentle; the
             // combined image stays at full opacity throughout.
@@ -983,58 +1056,143 @@ fn run_flight(
         } else {
             1.0
         };
-
-        let rotation = Matrix3x2::rotation_around(
-            angle,
-            Vector2 {
-                X: card.left + width * 0.5,
-                // The pin top is the real card's rotation centre; rotating
-                // about the frame top would make the landing card jump.
-                Y: card.top - layout::CARD_OFFSET_BELOW_TOP,
-            },
-        );
-        let draw_start = win32::now_seconds();
-        renderer.begin()?;
-        renderer.set_transform(rotation);
-        // Once landed, the real card underneath owns the shadow; drawing the
-        // flight shadow too would double its alpha and make it pulse as the
-        // flight fades.
-        draw_flight_card(
-            renderer,
-            &texture,
+        FlightPose {
             card,
+            // The pin top is the real card's rotation centre; rotating about
+            // the frame top would make the landing card jump.
+            transform: Matrix3x2::rotation_around(
+                angle,
+                Vector2 {
+                    X: card.left + width * 0.5,
+                    Y: card.top - layout::CARD_OFFSET_BELOW_TOP,
+                },
+            ),
             chrome,
             alpha,
-            !landed,
-            pin_alpha(pin, t),
-        );
-        if blend {
-            // The card's own paper is still visible under the pointer for the
-            // first fraction of the travel; it dissolves into the editor view
-            // while the card is already moving.
-            if let Some(start_texture) = start_texture.as_ref() {
-                let crossfade = (elapsed / ENTRY_CROSSFADE_SECONDS).clamp(0.0, 1.0);
-                if crossfade < 1.0 {
-                    let inset = layout::PHOTO_INSET * chrome;
-                    let photo = RectF::new(
-                        card.left + inset,
-                        card.top + inset,
-                        card.right - inset,
-                        card.bottom - inset,
-                    );
-                    let start_alpha = (1.0 - ease::smooth(crossfade, 0.0, 1.0)).max(0.01);
-                    let pushed = renderer.push_opacity(photo, start_alpha);
-                    renderer.draw_photo(start_texture, photo, layout::PHOTO_RADIUS);
-                    if pushed {
-                        renderer.pop_opacity();
-                    }
-                }
-            }
+            shadow: !self.landed,
+            pin: pin_alpha(self.pin, t),
+            // Only a flight that dissolves the card into the editor image has
+            // a start image to fade; every other flight skips the draw.
+            crossfade: if self.blend {
+                (elapsed / ENTRY_CROSSFADE_SECONDS).clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            landed_now,
+            finished: self.landed && elapsed >= FLIGHT_SECONDS + LAND_FADE_SECONDS,
         }
-        renderer.reset_transform();
-        renderer.end()?;
-        let draw_ms = ((win32::now_seconds() - draw_start) * 1000.0) as f32;
-        draw_max_ms = draw_max_ms.max(draw_ms);
+    }
+
+    /// Turns the pre-roll clock into this frame's pose: the card turning
+    /// upright at its slot and dissolving into the editor image.
+    fn step_pre_roll(&mut self, elapsed: f64, frame_dt: f32) -> PreRollPose {
+        let angle = match self.settle.as_mut() {
+            Some(spring) => {
+                spring.step(frame_dt);
+                spring.value
+            }
+            None => 0.0,
+        };
+        // The pre-roll measures its dissolve from the flight's first frame,
+        // not from the hand-off: it is what delays the travel.
+        let crossfade = if self.has_start_image {
+            ((elapsed / ENTRY_CROSSFADE_SECONDS as f64).clamp(0.0, 1.0)) as f32
+        } else {
+            1.0
+        };
+        let settled = self.settle.as_ref().is_none_or(|spring| spring.settled());
+        let card = self.pre_roll_card;
+        PreRollPose {
+            card,
+            transform: Matrix3x2::rotation_around(
+                angle,
+                Vector2 {
+                    X: card.left + card.width() * 0.5,
+                    Y: card.top - layout::CARD_OFFSET_BELOW_TOP,
+                },
+            ),
+            crossfade,
+            pin: pin_alpha(self.pin, 0.0),
+            ready: settled && crossfade >= 1.0,
+        }
+    }
+}
+
+/// Milliseconds since `start`, for the per-frame draw-time probe.
+fn elapsed_ms(start: f64) -> f32 {
+    ((win32::now_seconds() - start) * 1000.0) as f32
+}
+
+/// Runs one flight from the first frame to the end of the landing fade.
+///
+/// The loop is a sequence of steps: [`prepare`] once, then
+/// [`FlightPlan::step`] for the timing and [`paint`] for the drawing, once per
+/// frame.
+fn run_flight(
+    renderer: &mut Renderer,
+    hwnd: HWND,
+    token: u64,
+    generation: u64,
+    interrupt: &AtomicU64,
+    request: FlightRequest,
+    on_event: &dyn Fn(FlightEvent),
+) -> Result<(), String> {
+    let (mut plan, textures) = prepare(renderer, request)?;
+    let _ = hwnd;
+
+    let start = win32::now_seconds();
+    // The travel clock; an annotation pre-roll hands over to it when the card
+    // is upright, so the 0.65 s starts when the card actually moves.
+    let mut flight_start = start;
+    let mut last = start;
+    let mut frames = 0u32;
+    let mut draw_max_ms = 0.0f32;
+    loop {
+        // A newer capture takes over: leave without reporting a landing; the app
+        // already made the old card visible again.
+        if interrupt.load(Ordering::Relaxed) != generation {
+            return Ok(());
+        }
+        let now = win32::now_seconds();
+        let frame_dt = ((now - last) as f32).clamp(0.0, MAX_FRAME_DT);
+        last = now;
+
+        // ---- pre-roll (annotation editor): turn upright at the slot ----
+        if plan.pre_roll {
+            let pose = plan.step_pre_roll(now - start, frame_dt);
+            let draw_start = win32::now_seconds();
+            paint_pre_roll(renderer, &textures, &pose)?;
+            draw_max_ms = draw_max_ms.max(elapsed_ms(draw_start));
+            if renderer.present(true) == Present::DeviceLost {
+                return Err("device lost during flight pre-roll".to_string());
+            }
+            if frames == 0 {
+                on_event(FlightEvent::Started(token));
+            }
+            frames += 1;
+            if pose.ready {
+                plan.pre_roll = false;
+                flight_start = now;
+                last = now;
+            }
+            continue;
+        }
+
+        let elapsed = (now - flight_start) as f32;
+        let pose = plan.step(elapsed, frame_dt);
+        // Reported before the frame is drawn: the real card is already
+        // underneath, so the landing is announced as soon as the travel ends.
+        if pose.landed_now {
+            on_event(FlightEvent::Landed {
+                token,
+                frames,
+                elapsed,
+                draw_max_ms,
+            });
+        }
+        let draw_start = win32::now_seconds();
+        paint(renderer, &textures, &pose)?;
+        draw_max_ms = draw_max_ms.max(elapsed_ms(draw_start));
         if renderer.present(true) == Present::DeviceLost {
             return Err("device lost during flight".to_string());
         }
@@ -1045,7 +1203,7 @@ fn run_flight(
         }
         frames += 1;
 
-        if landed && elapsed >= FLIGHT_SECONDS + LAND_FADE_SECONDS {
+        if pose.finished {
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
@@ -1237,97 +1395,31 @@ fn pin_alpha(mode: PinMode, t: f32) -> f32 {
     }
 }
 
-/// The transform and group opacity of a falling card at progress `t` (0..1).
-///
-/// The card only travels down and fades. Its fixed tilt is applied about its
-/// own top centre (the pin) *before* the placement: rotating after the
-/// placement, around a point in window space, is what used to swing the card
-/// out to the left while it fell (`BEHAVIOR.md` §6.4).
-fn drop_pose(t: f32, left: f32, top: f32, width: f32, tilt: f32) -> (Matrix3x2, f32) {
-    let t = t.clamp(0.0, 1.0);
-    let e = t * t * t;
-    let transform = Matrix3x2::rotation_around(
-        tilt,
-        Vector2 {
-            X: width * 0.5,
-            Y: 0.0,
-        },
-    ) * Matrix3x2::translation(left, top + DROP_DISTANCE * e);
-    (transform, 1.0 - e)
-}
-
-/// Draws the card: photo, then the glass frame and (when `pin` is set) the
-/// clothespin at `chrome` opacity.
-fn draw_flight_card(
-    renderer: &mut Renderer,
-    texture: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
-    card: RectF,
-    chrome: f32,
-    alpha: f32,
-    shadow: bool,
-    pin: f32,
-) {
-    let width_dip = card.width();
-    let inset = layout::PHOTO_INSET * chrome;
-    let photo = RectF::new(
-        card.left + inset,
-        card.top + inset,
-        card.right - inset,
-        card.bottom - inset,
-    );
-    let opacity_ok = if alpha < 0.999 {
-        renderer.push_opacity(card.inflated(24.0), alpha)
-    } else {
-        false
-    };
-
-    if chrome > 0.01 {
-        // The frame is the whole card; only the photo shrinks inward as the
-        // chrome fades in. (Shrinking the frame too made it hide behind the
-        // photo, so a landing card looked like a bare screenshot.)
-        let frame = card;
-        if shadow && width_dip <= SHADOW_MAX_CARD {
-            renderer.draw_shadow(frame, 0.18 * chrome, false);
-        }
-        // Draw the frame even when the group is fully opaque: push_opacity
-        // skips the layer (and returns false) at opacity 1.
-        let pushed = renderer.push_opacity(frame.inflated(8.0), chrome);
-        renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
-        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
-        if pushed {
-            renderer.pop_opacity();
-        }
-    }
-    renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
-    if pin > 0.01 && chrome > 0.01 {
-        // The card rotates about this point, exactly like the real card on the
-        // line: the pin top, not the frame top (which is 14 DIP lower).
-        let pin_left = card.left + width_dip * 0.5 - layout::PIN_WIDTH * 0.5;
-        let pin_top = card.top - layout::CARD_OFFSET_BELOW_TOP;
-        let pushed = renderer.push_opacity(
-            RectF::from_xywh(
-                pin_left - 4.0,
-                pin_top - 12.0,
-                layout::PIN_WIDTH + 8.0,
-                40.0,
-            ),
-            pin * chrome,
-        );
-        renderer.draw_pin(pin_left, pin_top);
-        if pushed {
-            renderer.pop_opacity();
-        }
-    }
-    if opacity_ok {
-        renderer.pop_opacity();
-    }
-}
-
 /// Window procedure: never take focus, never erase.
 ///
 /// SAFETY: this only reads message parameters; the window is destroyed on the
 /// UI thread after the render thread has stopped.
 unsafe extern "system" fn flight_wndproc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        flight_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in flight_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+unsafe fn flight_wndproc_inner(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
@@ -1396,5 +1488,97 @@ mod tests {
 
         assert_eq!(pin_alpha(PinMode::Hidden, 0.5), 0.0);
         assert_eq!(pin_alpha(PinMode::Full, 0.5), 1.0);
+    }
+
+    /// A blended note-entry flight on a 120 Hz (2x) screen: the one `step`
+    /// path that integrates a spring. The card leans 12° at take-off and
+    /// travels from a screenshot rect to a slot 1100 DIP to the right.
+    fn plan_for_step_tests() -> FlightPlan {
+        let mut settle = Spring::new(ENTRY_SETTLE_RESPONSE, ENTRY_SETTLE_DAMPING, 12.0);
+        settle.target = 0.0;
+        FlightPlan {
+            settle: Some(settle),
+            follow: LandingFollow::new(0.0),
+            pre_roll_card: RectF::default(),
+            from: RectI::new(400, 300, 700, 520),
+            to: RectI::new(1500, 120, 1772, 312),
+            origin: RectI::new(100, 50, 3300, 1350),
+            scale: 2.0,
+            tilt: 0.0,
+            pin: PinMode::Hidden,
+            chrome_full: false,
+            entry: true,
+            blend: true,
+            has_start_image: true,
+            pre_roll: false,
+            landed: false,
+            following: false,
+            last_elapsed: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_travel_ends_on_the_destination_rect() {
+        let mut plan = plan_for_step_tests();
+        let (to, origin, scale) = (plan.to, plan.origin, plan.scale);
+        let pose = plan.step(FLIGHT_SECONDS, 1.0 / 60.0);
+        // At the end of the travel the card sits where the real card will:
+        // the destination rect, moved into the window and scaled to DIP.
+        let left = (to.center_x() - origin.left as f32) / scale - to.width() as f32 / scale * 0.5;
+        let top = (to.center_y() - origin.top as f32) / scale - to.height() as f32 / scale * 0.5;
+        assert!(
+            (pose.card.left - left).abs() < 1e-3,
+            "left={} want={left}",
+            pose.card.left
+        );
+        assert!(
+            (pose.card.top - top).abs() < 1e-3,
+            "top={} want={top}",
+            pose.card.top
+        );
+        assert!((pose.card.width() - to.width() as f32 / scale).abs() < 1e-3);
+        assert!((pose.card.height() - to.height() as f32 / scale).abs() < 1e-3);
+        // It lands opaque, with the fade only about to start and the shadow
+        // handed over to the real card underneath, which owns it from here.
+        assert!(pose.landed_now, "the last travel frame reports the landing");
+        assert!((pose.alpha - 1.0).abs() < 1e-4);
+        assert!(!pose.shadow, "the landed copy no longer draws the shadow");
+        assert!(!pose.finished, "the landing fade has not run yet");
+    }
+
+    #[test]
+    fn the_settle_spring_advances_by_time_not_by_frames() {
+        // One 60 Hz frame and two 120 Hz frames cover the same 1/60 s, so the
+        // settle spring - integrated by real `dt` - must draw the same card.
+        // A frame-counted integration would be a whole frame apart.
+        let (end, frame_60, frame_120) = (0.30_f32, 1.0 / 60.0, 1.0 / 120.0);
+        let mut sixty = plan_for_step_tests();
+        let mut one_twenty = plan_for_step_tests();
+
+        let pose_60 = sixty.step(end, frame_60);
+        one_twenty.step(end - frame_120, frame_120);
+        let pose_120 = one_twenty.step(end, frame_120);
+
+        assert!((pose_60.card.left - pose_120.card.left).abs() < 1e-3);
+        assert!((pose_60.card.top - pose_120.card.top).abs() < 1e-3);
+        for (x, y) in [(0.0, 0.0), (136.0, 96.0)] {
+            let a = apply(&pose_60.transform, x, y);
+            let b = apply(&pose_120.transform, x, y);
+            assert!(
+                (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3,
+                "60Hz={a:?} 120Hz={b:?}"
+            );
+        }
+
+        // The spring really did advance, so the equality above is not vacuous:
+        // held at its 12° start, the same flight draws a visibly different card.
+        let held = plan_for_step_tests().step(end, 0.0);
+        let moved = apply(&pose_60.transform, 0.0, 0.0);
+        let still = apply(&held.transform, 0.0, 0.0);
+        let travel = ((moved.0 - still.0).powi(2) + (moved.1 - still.1).powi(2)).sqrt();
+        assert!(
+            travel > 1.0,
+            "the settle spring did not advance: {moved:?} vs {still:?}"
+        );
     }
 }

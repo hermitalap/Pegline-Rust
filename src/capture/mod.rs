@@ -5,6 +5,7 @@
 
 pub mod areas;
 pub mod clipboard;
+mod dib;
 pub mod watcher;
 pub mod wic;
 

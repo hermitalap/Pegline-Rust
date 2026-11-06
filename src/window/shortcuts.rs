@@ -555,6 +555,26 @@ unsafe extern "system" fn dialog_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // process. Contain it here.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        dialog_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in dialog_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.
+unsafe fn dialog_wndproc_inner(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut State;
     if raw.is_null() {
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
@@ -587,9 +607,7 @@ unsafe extern "system" fn dialog_wndproc(
         WM_ERASEBKGND => LRESULT(1),
         WM_KEYDOWN => {
             state.handle_key(wparam.0 as u32, false);
-            if state.closed {
-                let _ = unsafe { DestroyWindow(hwnd) };
-            } else {
+            if !state.closed {
                 let _ = unsafe {
                     windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false)
                 };
@@ -599,9 +617,7 @@ unsafe extern "system" fn dialog_wndproc(
         WM_KEYUP => {
             if (wparam.0 as u32) == VK_SNAPSHOT.0 as u32 {
                 state.handle_key(wparam.0 as u32, true);
-                if state.closed {
-                    let _ = unsafe { DestroyWindow(hwnd) };
-                } else {
+                if !state.closed {
                     let _ = unsafe {
                         windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false)
                     };
@@ -636,13 +652,11 @@ unsafe extern "system" fn dialog_wndproc(
             if let (Some(down), Some(hit)) = (down, hit) {
                 if down == hit {
                     match down {
-                        0 => choice_and_destroy(hwnd, state, Choice::Chosen(None)),
-                        1 => choice_and_destroy(hwnd, state, Choice::Cancelled),
+                        0 => choice_and_close(state, Choice::Chosen(None)),
+                        1 => choice_and_close(state, Choice::Cancelled),
                         _ => state.confirm(state.pressed),
                     }
-                    if state.closed {
-                        let _ = unsafe { DestroyWindow(hwnd) };
-                    } else {
+                    if !state.closed {
                         let _ = unsafe {
                             windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false)
                         };
@@ -653,7 +667,6 @@ unsafe extern "system" fn dialog_wndproc(
         }
         WM_CLOSE => {
             state.finish(Choice::Cancelled);
-            let _ = unsafe { DestroyWindow(hwnd) };
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -664,9 +677,13 @@ unsafe extern "system" fn dialog_wndproc(
     }
 }
 
-fn choice_and_destroy(hwnd: HWND, state: &mut State, choice: Choice) {
+/// Records the answer and lets `ask` close the window.
+///
+/// Never calls `DestroyWindow` from inside this window's own procedure: it
+/// dispatches `WM_DESTROY` synchronously, which re-enters the procedure and
+/// creates a second `&mut State` while the first is still on the stack.
+fn choice_and_close(state: &mut State, choice: Choice) {
     state.finish(choice);
-    let _ = unsafe { DestroyWindow(hwnd) };
 }
 
 /// Whether a combination can be registered by another window right now.

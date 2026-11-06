@@ -7,6 +7,30 @@
 //!
 //! Win32 objects (`HWND`, `HHOOK`, hotkeys, tray) are created and destroyed on
 //! this thread only.
+//!
+//! The `--*-demo` acceptance scaffolding lives in the [`dev`] submodule: it can
+//! reach the private state here, but the shipping paths never read it.
+
+mod book;
+mod capture_flow;
+mod capture_state;
+mod cards;
+mod dev;
+mod line;
+mod pointer;
+mod pool;
+mod reveal;
+mod sessions;
+mod state;
+mod tray_menu;
+
+use book::FlightBook;
+use capture_state::Capture;
+use dev::Dev;
+use line::Line;
+use pool::WindowPool;
+use sessions::Sessions;
+use state::LineState;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -15,12 +39,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, VK_LBUTTON, VK_RETURN,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, HHOOK, IDYES,
-    KillTimer, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING,
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, IDYES, KillTimer,
+    MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING,
     MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
     SetTimer, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
     UnhookWindowsHookEx, WH_MOUSE_LL, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY,
@@ -33,20 +55,19 @@ use crate::editor::{Editor, EditorEvent};
 use crate::i18n;
 use crate::layout;
 use crate::logging;
-use crate::note_editor::display::PAPER_HEIGHT;
 use crate::note_editor::model;
 use crate::note_editor::window::{NoteEditor, NoteEditorEvent};
 use crate::notes;
-use crate::preview::{self, HoverState};
+use crate::preview;
 use crate::scene::Command;
-use crate::settings::{self, Settings};
+use crate::settings::Settings;
 use crate::shortcut;
 use crate::sound::{self, Cue};
 use crate::spring::ease;
-use crate::tray::{MenuCommand, MenuState, Tray};
-use crate::types::{ActionKind, CardId, CardSpec, ImageData, RectF, RectI};
+use crate::tray::Tray;
+use crate::types::{CardId, CardSpec, ImageData, RectF, RectI};
 use crate::win32::{self, Monitor};
-use crate::window::flight::{Flight, FlightEvent, FlightImage, PinMode};
+use crate::window::flight::{FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
 use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_card_dip};
@@ -56,13 +77,21 @@ const CLASS_NAME: PCWSTR = w!("PeglineMessage");
 const WINDOW_TITLE: PCWSTR = w!("Pegline");
 const TIMER_TICK: usize = 1;
 const TICK_MS: u32 = 33;
-/// Follows the pointer during a drag (BEHAVIOR §3.2: the ghost follows every
-/// 15 ms).
-const TIMER_GHOST: usize = 2;
-const GHOST_MS: u32 = 15;
-/// Follows the hover note's physics at the same cadence as the drag ghost.
+/// Follows the hover note's physics; the drag ghost follows itself on its own
+/// render thread.
 const TIMER_NOTE: usize = 3;
 const NOTE_FOLLOW_MS: u32 = 15;
+
+/// How long a quit waits for an in-flight note commit before dropping the
+/// editor. Polled from the frame loop, never slept on.
+const QUIT_GRACE_SECONDS: f64 = 2.0;
+
+/// Largest file whose encoded bytes are also offered under the registered
+/// `PNG` clipboard format during a drag. Bigger cards drag as a file only:
+/// a 6K screenshot can be tens of megabytes, and reading plus copying that on
+/// the UI thread would stall the pointer. Explorer, the usual target, reads the
+/// file path anyway.
+const DRAG_PNG_MAX: u64 = 8 * 1024 * 1024;
 
 const HOTKEY_TOGGLE: i32 = 1;
 const HOTKEY_NOTE: i32 = 3;
@@ -296,7 +325,6 @@ enum Event {
     TrashDone {
         paths: Vec<PathBuf>,
     },
-    Quit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,7 +423,6 @@ struct HoverNote {
     spin: f32,
     /// Start of the slow ±3 DIP bob.
     float_start: f64,
-    color: usize,
     dpi: u32,
     /// Last physics step, seconds.
     last: f64,
@@ -439,282 +466,65 @@ pub fn run() -> i32 {
 struct App {
     hwnd: HWND,
     settings: Settings,
-    tray: Option<Tray>,
-    overlay: Option<Overlay>,
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
 
-    items: Vec<Item>,
-    next_id: CardId,
+    /// The pooled windows and the Win32 resources that belong to them.
+    windows: WindowPool,
+    /// The card currently in the air, and its hand-off deadlines.
+    book: FlightBook,
+    /// The cards on the line.
+    line: Line,
+    /// Visibility, hover and press state.
+    state: LineState,
+    /// The watcher, the twin window and the clipboard bookkeeping.
+    capture: Capture,
+    /// The two in-place editors and their hand-offs.
+    sessions: Sessions,
+
+    /// The monitor the line is on.
     screen: Option<Monitor>,
-    demo: bool,
-
-    is_present: bool,
-    is_revealed: bool,
-    pinned: bool,
-    peek_until: f64,
-    hot_zone_since: Option<f64>,
-    away_since: Option<f64>,
-    band_suppressed: bool,
-    keep_open: bool,
-    /// While set, the line stays down after a launch until this deadline.
-    startup_until: Option<f64>,
-    /// When to show the one-time "let Pegline handle your screenshots?" box.
-    catch_offer_at: Option<f64>,
-    empty_since: Option<f64>,
-    hide_at: Option<f64>,
-
-    hover: Option<CardId>,
-    /// Which of the hovered card's two buttons the pointer is over.
-    hover_action: Option<(CardId, ActionKind)>,
-    /// The invisible entry hotspot and its line pin.
-    note_peek_on: bool,
-    note_hover: Option<HoverNote>,
-    note_hotspot_hovered: bool,
-    note_pin: bool,
-    pressed: Option<Press>,
-    last_click: Option<(f64, CardId)>,
-    menu_open: bool,
-
-    hook: Option<HHOOK>,
-    watcher: Option<watcher::Watcher>,
-    flight: Option<Flight>,
-    /// The hover preview window; created on first use and pooled afterwards.
-    preview: Option<Preview>,
-    preview_state: HoverState,
-    /// The drag preview; created on the first drag and hidden between drags.
-    ghost: Option<Ghost>,
-    ghost_follow: bool,
-    /// True while the OLE drag loop owns the UI thread.
-    dragging: bool,
-    /// The annotation editor, while one is open.
-    editor: Option<Editor>,
-    editing: Option<EditingCapture>,
-    /// The WYSIWYG note editor and the note it is editing.
-    note_editor: Option<NoteEditor>,
-    note_editing: Option<EditingNote>,
-    /// True between a commit request and its worker result; the window stays
-    /// open and disabled meanwhile.
-    note_committing: bool,
-    /// The editor's paper bitmap captured when the user committed, carried by
-    /// the flight back to the line.
-    note_return_image: Option<ImageData>,
-    /// True while an empty new note is tumbling off the screen; the editor is
-    /// hidden and no click may commit it again.
-    note_tumbling: bool,
-    /// Deadline for the tumble: the editor is released even if the flight was
-    /// interrupted and never reported back.
-    note_tumble_until: f64,
-    /// Fallback deadline for showing a hidden note editor if its flight is
-    /// interrupted by a screenshot.
-    note_show_at: Option<f64>,
-    /// Files our own editor just wrote, ignored by the watcher for 2 s.
-    recently_saved: Vec<(PathBuf, f64)>,
-    last_reload: f64,
-    /// When the pooled flight window last went idle; after a while it is
-    /// destroyed to give its ~34 MB of device memory back (M6).
-    flight_idle_at: Option<f64>,
-    /// The card the flight window is carrying, if any. A newer capture or a
-    /// drop interrupts the old animation (BEHAVIOR §3.8), so this is cleared as
-    /// soon as the flight window moves on.
-    flying_card: Option<CardId>,
-    /// True when `flying_card` is an edited note or picture returning to its
-    /// existing slot rather than a new card arriving at the right end.
-    flying_rehang: bool,
-    /// The opening flight did not report its landing yet; show the editor after
-    /// this time anyway (the flight may have been interrupted by a capture).
-    annotate_show_at: Option<f64>,
-    /// Safety deadline for the closing flight: release the hidden editor even
-    /// if the flight window was taken over by a capture.
-    annotate_close_at: Option<f64>,
-    /// The same for the preview and the drag ghost, which are cheaper to
-    /// rebuild.
-    preview_idle_at: Option<f64>,
-    ghost_idle_at: Option<f64>,
-    /// Captures from the twin window (4 s), used to fold the inbox copy and the
-    /// Windows-saved copy of the same screenshot into one card.
-    recent: Vec<Recent>,
-    /// Content hash of the last clipboard capture and when it arrived, so the
-    /// same copied image is not hung twice (10 s window).
-    last_clip_hash: u64,
-    last_clip_at: f64,
     /// Whether RegisterHotKey succeeded; the tray menu says when it did not.
     note_hotkey_ok: bool,
-    /// `--panic-test`: panic once inside the message handler to prove recovery.
-    panic_test: bool,
-    panicked: bool,
-    /// `--editor-demo`: open the annotation editor on a generated picture and
-    /// close it after a few seconds. Development check, like `--demo`.
-    editor_demo_at: Option<f64>,
-    /// `--annotate-demo`: hang one demo card and open the real annotate flow on
-    /// it, so the card-to-editor flight and the return can be captured without
-    /// a mouse. Development check, like `--demo`.
-    annotate_demo: bool,
-    annotate_demo_stage: u8,
-    annotate_demo_at: f64,
-    /// `--note-editor-demo`: open the WYSIWYG note editor with sample text so
-    /// the visual acceptance run can screenshot it.
-    note_demo: bool,
-    note_demo_opened: bool,
-    /// `--note-hover-demo`: keep the line down and park a synthetic pointer on
-    /// the entry hotspot so the blank note can be captured deterministically.
-    note_hover_demo: bool,
-    /// Where that synthetic pointer sits, DIP from the hotspot centre, from
-    /// `PEGLINE_NOTE_DEMO_POINTER` (`x,y`); the visual acceptance run uses it
-    /// to lean the paper in each quadrant.
-    note_demo_pointer: (f32, f32),
-    /// `PEGLINE_NOTE_PEEK_POINTER`: an absolute screen point for the hover demo
-    /// that is outside the hotspot, so the peeking corner can be captured
-    /// deterministically.
-    note_peek_pointer: Option<(i32, i32)>,
-    /// Slow-motion factor for the hover fly-in/out, from
-    /// `PEGLINE_NOTE_SLOW`; only used by the visual acceptance runs.
-    note_slow: f32,
-    /// `--note-flow-demo`: open a new note, type into it, commit, and let the
-    /// flight land. The acceptance run inspects the resulting file and card.
-    note_flow_demo: bool,
-    note_flow_stage: u8,
-    note_flow_at: f64,
-    /// `--note-discard-demo`: open an empty new note and discard it, so the
-    /// throw-away animation can be captured.
-    note_discard_demo: bool,
-    note_discard_stage: u8,
-    note_discard_at: f64,
-    /// `--note-storage-demo`: create a temporary note, edit and save it through
-    /// the real card editor path, then archive it through `discard`, and clean
-    /// the test file up. No user note is touched.
-    note_storage_demo: bool,
-    note_storage_stage: u8,
-    note_storage_at: f64,
-    note_storage_id: Option<CardId>,
-    note_storage_path: Option<PathBuf>,
-    note_storage_archived: Option<PathBuf>,
-    /// `--note-preview-demo`: hang one note, park a synthetic pointer on its
-    /// card and keep the line down, so the note hover preview can be captured
-    /// deterministically without restoring the user's cards.
-    note_preview_demo: bool,
-    note_preview_demo_card: Option<CardId>,
-    /// How many restored cards are still decoding; `pegged.txt` is not
-    /// rewritten until they are all back.
-    restore_pending: usize,
-    clipboard_at: Option<f64>,
+    /// Scripted acceptance demos (`--*-demo`); see [`dev`].
+    dev: Dev,
     start_time: f64,
-    last_prune: f64,
     quit: bool,
+    /// Set while a quit is waiting for an in-flight note commit; the deadline
+    /// after which the editor is dropped even if the write never reported back.
+    quit_at: Option<f64>,
     destroyed: bool,
-    hung_files: Vec<PathBuf>,
 }
 
 impl App {
     fn new() -> Self {
         let (events_tx, events_rx) = mpsc::channel();
         let start = win32::now_seconds();
-        Self {
+        let mut app = Self {
             hwnd: HWND::default(),
             settings: Settings::load(),
-            tray: None,
-            overlay: None,
             events_tx,
             events_rx,
-            items: Vec::new(),
-            next_id: 1,
+            windows: WindowPool::default(),
+            book: FlightBook::default(),
+            line: Line::default(),
+            state: LineState::default(),
+            capture: Capture::default(),
+            sessions: Sessions::default(),
             screen: None,
-            demo: std::env::args().any(|arg| arg == "--demo"),
-            is_present: false,
-            is_revealed: false,
-            pinned: false,
-            peek_until: 0.0,
-            hot_zone_since: None,
-            away_since: None,
-            band_suppressed: false,
-            keep_open: false,
-            startup_until: None,
-            catch_offer_at: None,
-            empty_since: None,
-            hide_at: None,
-            hover: None,
-            hover_action: None,
-            note_peek_on: false,
-            note_hover: None,
-            note_hotspot_hovered: false,
-            note_pin: false,
-            pressed: None,
-            last_click: None,
-            menu_open: false,
-            hook: None,
-            watcher: None,
-            flight: None,
-            preview: None,
-            preview_state: HoverState::default(),
-            ghost: None,
-            ghost_follow: false,
-            dragging: false,
-            editor: None,
-            editing: None,
-            note_editor: None,
-            note_editing: None,
-            note_committing: false,
-            note_return_image: None,
-            note_tumbling: false,
-            note_tumble_until: 0.0,
-            note_show_at: None,
-            recently_saved: Vec::new(),
-            last_reload: start,
-            flight_idle_at: None,
-            flying_card: None,
-            flying_rehang: false,
-            annotate_show_at: None,
-            annotate_close_at: None,
-            preview_idle_at: None,
-            ghost_idle_at: None,
-            recent: Vec::new(),
-            last_clip_hash: 0,
-            last_clip_at: 0.0,
             note_hotkey_ok: false,
-            panic_test: std::env::args().any(|arg| arg == "--panic-test"),
-            panicked: false,
-            editor_demo_at: None,
-            annotate_demo: std::env::args().any(|arg| arg == "--annotate-demo"),
-            annotate_demo_stage: 0,
-            annotate_demo_at: 0.0,
-            note_demo: std::env::args().any(|arg| arg == "--note-editor-demo"),
-            note_demo_opened: false,
-            note_hover_demo: std::env::args().any(|arg| arg == "--note-hover-demo"),
-            note_demo_pointer: std::env::var("PEGLINE_NOTE_DEMO_POINTER")
-                .ok()
-                .and_then(|value| parse_demo_pointer(&value))
-                .unwrap_or((78.0, 80.0)),
-            note_peek_pointer: std::env::var("PEGLINE_NOTE_PEEK_POINTER")
-                .ok()
-                .and_then(|value| parse_demo_pointer(&value))
-                .map(|(x, y)| (x as i32, y as i32)),
-            note_slow: std::env::var("PEGLINE_NOTE_SLOW")
-                .ok()
-                .and_then(|value| value.parse::<f32>().ok())
-                .unwrap_or(1.0)
-                .clamp(1.0, 10.0),
-            note_flow_demo: std::env::args().any(|arg| arg == "--note-flow-demo"),
-            note_flow_stage: 0,
-            note_flow_at: 0.0,
-            note_discard_demo: std::env::args().any(|arg| arg == "--note-discard-demo"),
-            note_discard_stage: 0,
-            note_discard_at: 0.0,
-            note_storage_demo: std::env::args().any(|arg| arg == "--note-storage-demo"),
-            note_preview_demo: std::env::args().any(|arg| arg == "--note-preview-demo"),
-            note_preview_demo_card: None,
-            note_storage_stage: 0,
-            note_storage_at: 0.0,
-            note_storage_id: None,
-            note_storage_path: None,
-            note_storage_archived: None,
-            restore_pending: 0,
-            clipboard_at: None,
+            dev: Dev::from_env(),
             start_time: start,
-            last_prune: start,
             quit: false,
+            quit_at: None,
             destroyed: false,
-            hung_files: Vec::new(),
-        }
+        };
+        // Three values are not `Default`: the first card id is 1, not 0, and the
+        // two throttle clocks start at launch rather than at the epoch.
+        app.line.next_id = 1;
+        app.state.last_prune = start;
+        app.capture.last_reload = start;
+        app
     }
 
     fn start(&mut self) -> Result<(), String> {
@@ -724,6 +534,8 @@ impl App {
             Some(hidden_wndproc),
             self as *mut App as *mut (),
         )?;
+        // Workers post `WM_APP_WAKE` here; it must be a real handle, not null.
+        window::set_wake_target(self.hwnd);
         // SAFETY: the window exists; the timer id is ours.
         let timer = unsafe { SetTimer(Some(self.hwnd), TIMER_TICK, TICK_MS, None) };
         if timer == 0 {
@@ -739,7 +551,7 @@ impl App {
 
         let dpi = win32::window_dpi(self.hwnd);
         match Tray::install(self.hwnd, dpi) {
-            Ok(tray) => self.tray = Some(tray),
+            Ok(tray) => self.windows.tray = Some(tray),
             Err(error) => logging::error(format!("tray: {error}")),
         }
 
@@ -758,12 +570,12 @@ impl App {
             Box::new(move |paths| {
                 for path in paths {
                     let _ = tx.send(Event::CaptureFile(path));
-                    window::wake(HWND::default());
+                    window::wake();
                 }
             }),
         ) {
             Ok(watcher) => {
-                self.watcher = Some(watcher);
+                self.capture.watcher = Some(watcher);
                 logging::trace(format!("watching {}", folder.display()));
             }
             Err(error) => logging::error(format!("watcher: {error}")),
@@ -772,7 +584,7 @@ impl App {
         // `--note-preview-demo` deliberately starts from an empty line: the
         // user's pegged cards would sit around the demo note and make the
         // captured preview depend on their number.
-        if !self.note_preview_demo {
+        if !self.dev.note_preview_demo {
             self.restore_pegged();
         }
 
@@ -787,8 +599,8 @@ impl App {
         } else {
             STARTUP_SECONDS
         };
-        self.keep_open = true;
-        self.startup_until = Some(self.start_time + hold);
+        self.state.keep_open = true;
+        self.state.startup_until = Some(self.start_time + hold);
         if first_run {
             self.settings.mark_welcomed();
         }
@@ -798,20 +610,20 @@ impl App {
         // take over screenshots (BEHAVIOR §3.2). Reading the clipboard is the
         // user's call, never ours.
         if !self.settings.catch_offered()
-            && !self.demo
-            && !self.note_preview_demo
-            && !std::env::args().any(|arg| arg == "--editor-demo")
+            && !self.dev.demo
+            && !self.dev.note_preview_demo
+            && !self.dev.editor_demo
         {
-            self.catch_offer_at = Some(self.start_time + 1.2);
+            self.state.catch_offer_at = Some(self.start_time + 1.2);
         }
 
-        if self.demo {
+        if self.dev.demo {
             self.install_demo_cards();
         }
-        if self.note_preview_demo {
+        if self.dev.note_preview_demo {
             self.start_note_preview_demo();
         }
-        if std::env::args().any(|arg| arg == "--editor-demo") {
+        if self.dev.editor_demo {
             self.install_editor_demo();
         }
 
@@ -886,12 +698,17 @@ impl App {
             }
             None
         };
-        let choice = window::shortcuts::ask(
-            self.hwnd,
-            i18n::s().note_shortcut,
-            current,
-            Box::new(validate),
-        );
+        let choice = {
+            // The recorder runs its own message loop on this thread while `&mut
+            // self` is live below.
+            let _modal = window::ModalGuard::enter();
+            window::shortcuts::ask(
+                self.hwnd,
+                i18n::s().note_shortcut,
+                current,
+                Box::new(validate),
+            )
+        };
         let mut registered = false;
         match choice {
             window::shortcuts::Choice::Cancelled => {
@@ -916,7 +733,7 @@ impl App {
                         registered = Self::register_hotkey(self.hwnd, HOTKEY_NOTE, previous);
                     }
                     let body = i18n::s().conflict_external.to_string();
-                    if let Some(tray) = self.tray.as_mut() {
+                    if let Some(tray) = self.windows.tray.as_mut() {
                         tray.show_balloon("Pegline", &body);
                     }
                 }
@@ -967,7 +784,7 @@ impl App {
         // SAFETY: the hook procedure is a static function; `None` module is
         // this process and the thread id 0 means "the calling thread".
         match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0) } {
-            Ok(hook) => self.hook = Some(hook),
+            Ok(hook) => self.windows.hook = Some(hook),
             Err(error) => logging::error(format!("SetWindowsHookExW: {error}")),
         }
     }
@@ -988,7 +805,7 @@ impl App {
             Ok(overlay) => {
                 // The frame cap follows `fps=auto|60|120` from settings.ini.
                 overlay.set_frame_cap(self.settings.fps_cap().period());
-                self.overlay = Some(overlay);
+                self.windows.overlay = Some(overlay);
                 self.screen = Some(screen);
             }
             Err(error) => logging::error(format!("overlay: {error}")),
@@ -1010,9 +827,7 @@ impl App {
     ) -> Option<LRESULT> {
         match message {
             WM_TIMER => {
-                if wparam.0 == TIMER_GHOST {
-                    self.follow_ghost();
-                } else if wparam.0 == TIMER_NOTE {
+                if wparam.0 == TIMER_NOTE {
                     self.update_note_entry(win32::now_seconds());
                 } else {
                     self.tick();
@@ -1057,7 +872,7 @@ impl App {
             }
             _ => {
                 if message == taskbar_created() {
-                    if let Some(tray) = self.tray.as_mut() {
+                    if let Some(tray) = self.windows.tray.as_mut() {
                         tray.reinstall();
                     }
                     return Some(LRESULT(0));
@@ -1067,107 +882,31 @@ impl App {
         }
     }
 
-    fn on_tray(&mut self, wparam: WPARAM, lparam: LPARAM) {
-        if wparam.0 != 1 {
-            return;
-        }
-        let mouse = lparam.0 as u32;
-        if mouse == WM_LBUTTONUP {
-            self.toggle();
-        } else if mouse == WM_RBUTTONUP {
-            let state = self.menu_state();
-            self.menu_open = true;
-            let command = self.tray.as_mut().and_then(|tray| tray.show_menu(&state));
-            // As with the card menu, a tray-menu click must not be replayed as
-            // a click on the line afterwards.
-            if let Ok(mut queue) = mouse_queue().lock() {
-                queue.clear();
-            }
-            self.menu_open = false;
-            if let Some(command) = command {
-                self.apply(command);
-            }
-        }
-    }
-
-    fn menu_state(&self) -> MenuState {
-        MenuState {
-            revealed: self.is_revealed,
-            catch_clipboard: self.settings.catch_clipboard(),
-            sound_on: !self.settings.sound_off(),
-            autostart: win32::autostart_enabled(),
-            caught_files: count_inbox_files(),
-            live_cards: self.items.len(),
-            note_key: self.hotkey_menu_label("noteKey", "Ctrl+Alt+N", self.note_hotkey_ok),
-        }
-    }
-
-    /// The shortcut text shown in the tray menu, including "none" and the
-    /// "(in use by another app)" suffix.
-    fn hotkey_menu_label(&self, setting: &str, default: &str, registered: bool) -> String {
-        let key = self.settings.string(setting).unwrap_or(default);
-        if key == "none" {
-            i18n::s().none.to_string()
-        } else {
-            shortcut_label(key, registered)
-        }
-    }
-
-    fn apply(&mut self, command: MenuCommand) {
-        match command {
-            MenuCommand::ToggleReveal => self.toggle(),
-            MenuCommand::CatchScreenshots => {
-                let on = !self.settings.catch_clipboard();
-                self.settings.set_catch_clipboard(on);
-            }
-            MenuCommand::Sound => {
-                let off = !self.settings.sound_off();
-                self.settings.set_sound_off(off);
-            }
-            MenuCommand::Autostart => {
-                let on = !win32::autostart_enabled();
-                if let Err(error) = win32::set_autostart(on) {
-                    logging::error(format!("autostart: {error}"));
-                }
-            }
-            MenuCommand::OpenFolder => {
-                let folder = if self.settings.catch_clipboard() {
-                    win32::inbox_dir()
-                } else {
-                    win32::screenshots_folder().unwrap_or_else(win32::inbox_dir)
-                };
-                let _ = std::fs::create_dir_all(&folder);
-                if let Err(error) = win32::shell_open(&folder) {
-                    logging::error(format!("open folder: {error}"));
-                }
-            }
-            MenuCommand::ClearLine => self.clear_line(),
-            MenuCommand::ClearFiles => self.clear_inbox(),
-            MenuCommand::Exit => self.request_quit(),
-            MenuCommand::Note => self.note_shortcut(),
-            MenuCommand::NoteKey => self.change_note_hotkey(),
-        }
-    }
-
     fn tick(&mut self) {
         if self.quit {
             return;
         }
-        if self.panic_test && !self.panicked {
-            self.panicked = true;
+        if self.dev.panic_test && !self.dev.panicked {
+            self.dev.panicked = true;
             panic!("panic test requested");
         }
-        if self.dragging {
+        if self.state.dragging {
             // The OLE drag loop is pumping messages on this thread; only the
             // 15 ms ghost timer should touch the UI until it returns.
             return;
         }
         let now = win32::now_seconds();
         self.drain_events(now);
-        if let Some(at) = self.editor_demo_at {
+        if self.quit_at.is_some() {
+            // Shutting down: drain the commit result, then stop doing any other
+            // work. `poll_quit` finishes the quit on its deadline at the latest.
+            self.poll_quit(now);
+            return;
+        }
+        if let Some(at) = self.dev.editor_demo_at {
             if now >= at {
-                self.editor_demo_at = None;
-                if let Some(editor) = self.editor.as_ref() {
+                self.dev.editor_demo_at = None;
+                if let Some(editor) = self.windows.editor.as_ref() {
                     // SAFETY: our own editor window, still alive while `Editor`
                     // is held; WM_CLOSE is the documented close request.
                     unsafe {
@@ -1176,10 +915,10 @@ impl App {
                 }
             }
         }
-        if let Some(at) = self.note_show_at {
+        if let Some(at) = self.book.note_show_at {
             if now >= at {
-                self.note_show_at = None;
-                if let Some(editor) = self.note_editor.as_mut() {
+                self.book.note_show_at = None;
+                if let Some(editor) = self.windows.note_editor.as_mut() {
                     editor.show();
                 }
                 // The flight was interrupted before its first frame (a new
@@ -1188,16 +927,16 @@ impl App {
                 self.hide_note_card();
             }
         }
-        if let Some(at) = self.annotate_show_at {
+        if let Some(at) = self.book.annotate_show_at {
             if now >= at {
-                self.annotate_show_at = None;
-                if let Some(editor) = self.editor.as_mut() {
+                self.book.annotate_show_at = None;
+                if let Some(editor) = self.windows.editor.as_mut() {
                     editor.show();
                 }
                 self.hide_annotated_card();
             }
         }
-        if let Some(at) = self.annotate_close_at {
+        if let Some(at) = self.book.annotate_close_at {
             if now >= at {
                 // The return flight never reported back; release the hidden
                 // editor and put the card back rather than leaking both.
@@ -1205,186 +944,22 @@ impl App {
                 self.close_editor();
             }
         }
-        if self.note_demo && !self.note_demo_opened && now - self.start_time > 1.0 {
-            self.note_demo_opened = true;
-            self.open_note_demo();
-        }
-        if self.note_hover_demo {
-            self.keep_open = true;
-            // The synthetic pointer, not the real one, decides whether the
-            // entry is hovered; keep the strip down even while the real mouse
-            // is elsewhere on the desktop.
-            self.pinned = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-        }
-        if self.note_preview_demo {
-            // Same idea: a synthetic pointer sits on the demo note, so the
-            // strip has to stay down while the real mouse is elsewhere.
-            self.keep_open = true;
-            self.pinned = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-        }
-        if self.note_flow_demo {
-            self.keep_open = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-            match self.note_flow_stage {
-                0 if now - self.start_time > 1.0 => {
-                    self.open_new_note_editor();
-                    self.note_flow_stage = 1;
-                    self.note_flow_at = now;
-                }
-                1 if now - self.note_flow_at > 0.8 => {
-                    if let Some(editor) = self.note_editor.as_ref() {
-                        // The list line's newline now continues "- " by itself,
-                        // so the task line must not repeat the bullet.
-                        post_note_text(editor.hwnd(), "Demo note\n- one\n[x] two");
-                    }
-                    self.note_flow_stage = 2;
-                    self.note_flow_at = now;
-                }
-                2 if now - self.note_flow_at > 0.8 => {
-                    if let Some(editor) = self.note_editor.as_mut() {
-                        editor.commit();
-                    }
-                    self.note_flow_stage = 3;
-                    self.note_flow_at = now;
-                }
-                _ => {}
-            }
-        }
-        if self.note_discard_demo {
-            self.keep_open = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-            match self.note_discard_stage {
-                0 if now - self.start_time > 1.0 => {
-                    self.open_new_note_editor();
-                    self.note_discard_stage = 1;
-                    self.note_discard_at = now;
-                }
-                1 if now - self.note_discard_at > 1.5 => {
-                    // An empty note: this is the discard path.
-                    if let Some(editor) = self.note_editor.as_mut() {
-                        editor.commit();
-                    }
-                    self.note_discard_stage = 2;
-                    self.note_discard_at = now;
-                }
-                _ => {}
-            }
-        }
-        if self.note_storage_demo {
-            self.keep_open = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-            match self.note_storage_stage {
-                0 if now - self.start_time > 1.2 => {
-                    self.start_note_storage_demo();
-                    self.note_storage_stage = if self.note_storage_id.is_some() {
-                        1
-                    } else {
-                        99
-                    };
-                    self.note_storage_at = now;
-                }
-                1 if now - self.note_storage_at > 1.2 => {
-                    if let Some(editor) = self.note_editor.as_ref() {
-                        post_note_text(editor.hwnd(), " edited");
-                    }
-                    self.note_storage_stage = 2;
-                    self.note_storage_at = now;
-                }
-                2 if now - self.note_storage_at > 0.8 => {
-                    if let Some(editor) = self.note_editor.as_mut() {
-                        editor.commit();
-                    }
-                    self.note_storage_stage = 3;
-                    self.note_storage_at = now;
-                }
-                3 if now - self.note_storage_at > 1.5 => {
-                    self.verify_note_storage_save();
-                    if let Some(id) = self.note_storage_id {
-                        self.discard(id);
-                    }
-                    self.note_storage_stage = 4;
-                    self.note_storage_at = now;
-                }
-                4 if now - self.note_storage_at > 1.5 => {
-                    self.finish_note_storage_demo();
-                    self.note_storage_stage = 5;
-                }
-                _ => {}
-            }
-        }
-        if self.annotate_demo {
-            if self.annotate_demo_stage == 0 {
-                self.annotate_demo_stage = 1;
-                self.annotate_demo_at = now;
-            }
-            self.keep_open = true;
-            if !self.is_present {
-                self.present();
-            }
-            if !self.is_revealed {
-                self.reveal(false, 0.0);
-            }
-            match self.annotate_demo_stage {
-                1 if now - self.annotate_demo_at > 1.2 => {
-                    if self.demo_card_id().is_none() {
-                        self.install_demo_cards();
-                    }
-                    self.annotate_demo_stage = 2;
-                    self.annotate_demo_at = now;
-                }
-                2 if now - self.annotate_demo_at > 1.2 => {
-                    // Only ever annotate a demo card: a restored user picture
-                    // must not be rewritten by a development switch.
-                    if let Some(id) = self.demo_card_id() {
-                        self.annotate_item(id);
-                    }
-                    self.annotate_demo_stage = 3;
-                }
-                _ => {}
-            }
-        }
-        if let Some(at) = self.catch_offer_at {
+        self.run_dev(now);
+        if let Some(at) = self.state.catch_offer_at {
             if now >= at {
-                self.catch_offer_at = None;
+                self.state.catch_offer_at = None;
                 self.offer_catching();
             }
         }
-        if self.note_tumbling && now >= self.note_tumble_until {
+        if self.sessions.note_tumbling && now >= self.sessions.note_tumble_until {
             // The flight never reported back (interrupted by a capture, or its
             // thread died): release the hidden editor anyway.
             logging::trace("note tumble deadline reached");
             self.close_note_editor();
         }
-        if let Some(at) = self.clipboard_at {
+        if let Some(at) = self.capture.clipboard_at {
             if now >= at {
-                self.clipboard_at = None;
+                self.capture.clipboard_at = None;
                 self.handle_clipboard();
             }
         }
@@ -1398,37 +973,38 @@ impl App {
         self.release_idle_windows(now);
         self.update_click_through();
         if self
+            .windows
             .editor
             .as_ref()
             .is_some_and(|editor| editor.is_closed())
         {
-            if let Some(mut editor) = self.editor.take() {
+            if let Some(mut editor) = self.windows.editor.take() {
                 editor.shutdown();
             }
         }
         if self
+            .windows
             .note_editor
             .as_ref()
             .is_some_and(|editor| editor.is_closed())
         {
-            if let Some(mut editor) = self.note_editor.take() {
+            if let Some(mut editor) = self.windows.note_editor.take() {
                 editor.shutdown();
             }
-            self.note_editing = None;
-            self.note_committing = false;
-            self.note_show_at = None;
-            self.pinned = false;
+            self.sessions.note_editing = None;
+            self.sessions.note_committing = false;
+            self.book.note_show_at = None;
+            self.state.pinned = false;
         }
     }
 
     fn drain_events(&mut self, now: f64) {
         while let Ok(event) = self.events_rx.try_recv() {
             match event {
-                Event::Quit => self.request_quit(),
                 Event::CaptureFile(path) => self.on_capture_file(path),
                 Event::ClipboardChanged => {
-                    if self.clipboard_at.is_none() {
-                        self.clipboard_at = Some(now + CLIPBOARD_SETTLE);
+                    if self.capture.clipboard_at.is_none() {
+                        self.capture.clipboard_at = Some(now + CLIPBOARD_SETTLE);
                     }
                 }
                 Event::CaptureReady {
@@ -1493,7 +1069,7 @@ impl App {
                                         text,
                                         image,
                                     });
-                                    window::wake(HWND::default());
+                                    window::wake();
                                 }
                                 None => logging::error(format!(
                                     "note render: {}",
@@ -1506,7 +1082,7 @@ impl App {
                 Event::ThumbnailReady { id, image, text } => {
                     self.on_thumbnail(id, image);
                     if let Some(text) = text {
-                        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                        if let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) {
                             item.text = Some(text);
                         }
                     }
@@ -1531,551 +1107,193 @@ impl App {
                 Event::TrashDone { paths } => {
                     logging::trace(format!("recycled {} files", paths.len()));
                 }
-                Event::Flight(FlightEvent::Started(token)) => {
-                    if token == TUMBLE_FLIGHT_TOKEN {
-                        // The thrown-away paper is drawn: the editor behind it
-                        // can disappear without a flash.
-                        if let Some(editor) = self.note_editor.as_mut() {
-                            editor.hide();
-                        }
-                    } else if token == NOTE_FLIGHT_TOKEN {
-                        // The flight's first frame is on screen, so the note's
-                        // card can vanish from the line without a gap. It is
-                        // hidden only now: hiding it before the first frame
-                        // would leave the slot empty for a frame.
-                        self.hide_note_card();
-                    } else if token == ANNOTATE_OPEN_TOKEN {
-                        // Same hand-off for a picture growing into the editor.
-                        self.hide_annotated_card();
-                    } else if token == ANNOTATE_CLOSE_TOKEN {
-                        // The return flight is on screen: the editor behind it
-                        // can go without a frame of empty desktop.
-                        if let Some(editor) = self.editor.as_mut() {
-                            editor.hide();
-                        }
-                    }
-                }
-                Event::Flight(FlightEvent::Landed { token, .. }) => {
-                    if token == NOTE_FLIGHT_TOKEN {
-                        self.note_show_at = None;
-                        if let Some(editor) = self.note_editor.as_mut() {
-                            editor.show();
-                        }
-                        if let Some(flight) = self.flight.as_ref() {
-                            win32::set_topmost(flight.hwnd());
-                        }
-                        continue;
-                    }
-                    if token == ANNOTATE_OPEN_TOKEN {
-                        // The enlarged card is drawn by the flight; now the
-                        // real editor can appear underneath it.
-                        self.annotate_show_at = None;
-                        if let Some(editor) = self.editor.as_mut() {
-                            editor.show();
-                        }
-                        if let Some(flight) = self.flight.as_ref() {
-                            win32::set_topmost(flight.hwnd());
-                        }
-                        continue;
-                    }
-                    if token == ANNOTATE_CLOSE_TOKEN {
-                        // The picture is home: hand it to the card underneath.
-                        let id = self.flying_card.take();
-                        self.flying_rehang = false;
-                        if let Some(id) = id {
-                            self.send_scene(Command::SetRehang { id, flying: false });
-                        }
-                        if let Some(flight) = self.flight.as_ref() {
-                            win32::set_topmost(flight.hwnd());
-                        }
-                        continue;
-                    }
-                    let rehang = self.flying_rehang && self.flying_card == Some(token);
-                    if self.flying_card == Some(token) {
-                        self.flying_card = None;
-                    }
-                    // The real card is already opaque; keep the fading flight
-                    // image above it so the hand-off stays a clean dissolve.
-                    if let Some(flight) = self.flight.as_ref() {
-                        win32::set_topmost(flight.hwnd());
-                    }
-                    let command = if rehang {
-                        Command::SetRehang {
-                            id: token,
-                            flying: false,
-                        }
-                    } else {
-                        Command::SetFlying {
-                            id: token,
-                            flying: false,
-                        }
-                    };
-                    self.send_scene(command);
-                    self.flying_rehang = false;
-                }
-                Event::Flight(FlightEvent::Finished(id)) => {
-                    if id == NOTE_FLIGHT_TOKEN {
-                        if let Some(flight) = self.flight.as_mut() {
-                            flight.hide();
-                        }
-                        self.flight_idle_at = Some(win32::now_seconds());
-                        continue;
-                    }
-                    if id == ANNOTATE_OPEN_TOKEN {
-                        // The editor is fully drawn underneath; the window can
-                        // give its surface back until the return flight.
-                        if let Some(flight) = self.flight.as_mut() {
-                            flight.hide();
-                        }
-                        self.flight_idle_at = Some(win32::now_seconds());
-                        continue;
-                    }
-                    if id == ANNOTATE_CLOSE_TOKEN {
-                        if let Some(flight) = self.flight.as_mut() {
-                            flight.hide();
-                        }
-                        self.flight_idle_at = Some(win32::now_seconds());
-                        self.flying_card = None;
-                        self.flying_rehang = false;
-                        self.annotate_close_at = None;
-                        self.close_editor();
-                        continue;
-                    }
-                    if id == TUMBLE_FLIGHT_TOKEN {
-                        // The thrown-away note is off the screen: release the
-                        // hidden editor now.
-                        if let Some(flight) = self.flight.as_mut() {
-                            flight.hide();
-                        }
-                        self.flight_idle_at = Some(win32::now_seconds());
-                        self.close_note_editor();
-                        continue;
-                    }
-                    self.flying_card = None;
-                    self.flying_rehang = false;
-                    if let Some(flight) = self.flight.as_mut() {
-                        flight.hide();
-                    }
-                    self.flight_idle_at = Some(win32::now_seconds());
-                }
+                Event::Flight(FlightEvent::Started(token)) => self.on_flight_started(token),
+                Event::Flight(FlightEvent::Landed { token, .. }) => self.on_flight_landed(token),
+                Event::Flight(FlightEvent::Finished(id)) => self.on_flight_finished(id),
             }
         }
     }
 
-    fn drain_mouse(&mut self, _now: f64) {
-        // A popup menu pumps messages on this thread while it is open, so the
-        // low-level hook would otherwise replay the click that chose a menu
-        // item as a click on whatever card control sits underneath it.
-        if self.menu_open {
-            return;
-        }
-        loop {
-            let event = {
-                let Ok(mut queue) = mouse_queue().try_lock() else {
-                    return;
-                };
-                queue.pop_front()
-            };
-            let Some(event) = event else {
-                return;
-            };
-            match event.kind {
-                MouseKind::LeftDown => self.on_left_down(event.x, event.y, event.time),
-                MouseKind::LeftUp => self.on_left_up(event.x, event.y, event.time),
-                MouseKind::RightUp => self.on_right_up(event.x, event.y),
-                MouseKind::RightDown => self.on_right_down(event.x, event.y),
+    /// The flight window's first frame is on screen: whatever it took over
+    /// from may disappear now without leaving a gap behind it.
+    fn on_flight_started(&mut self, token: u64) {
+        if token == TUMBLE_FLIGHT_TOKEN {
+            // The thrown-away paper is drawn: the editor behind it
+            // can disappear without a flash.
+            if let Some(editor) = self.windows.note_editor.as_mut() {
+                editor.hide();
+            }
+        } else if token == NOTE_FLIGHT_TOKEN {
+            // The flight's first frame is on screen, so the note's
+            // card can vanish from the line without a gap. It is
+            // hidden only now: hiding it before the first frame
+            // would leave the slot empty for a frame.
+            self.hide_note_card();
+        } else if token == ANNOTATE_OPEN_TOKEN {
+            // Same hand-off for a picture growing into the editor.
+            self.hide_annotated_card();
+        } else if token == ANNOTATE_CLOSE_TOKEN {
+            // The return flight is on screen: the editor behind it
+            // can go without a frame of empty desktop.
+            if let Some(editor) = self.windows.editor.as_mut() {
+                editor.hide();
             }
         }
     }
 
-    fn on_left_down(&mut self, x: i32, y: i32, now: f64) {
-        if self.note_tumbling {
-            // The discarded paper is already on its way off the screen; the
-            // editor behind it is hidden and must not be committed again.
-            return;
-        }
-        if self.editor.is_some() {
-            // The annotation window owns the pointer; the line never reacts
-            // while a picture is being marked up. A click outside the window
-            // finishes the edit through its focus loss.
-            return;
-        }
-        if self.note_editor.is_some() {
-            // The note editor owns this click. Only a click outside its paper
-            // commits; the line never reacts while a note is being edited
-            // (NOTE-EDITOR.md §5.5, §5.7).
-            if let Some(paper) = self.note_editor_paper_px() {
-                if !paper.contains(x, y) {
-                    if let Some(editor) = self.note_editor.as_mut() {
-                        editor.commit();
-                    }
-                }
+    /// The flight reached its destination: hand the card over to the real one
+    /// underneath, or show the editor the flight was carrying it into.
+    fn on_flight_landed(&mut self, token: u64) {
+        if token == NOTE_FLIGHT_TOKEN {
+            self.book.note_show_at = None;
+            if let Some(editor) = self.windows.note_editor.as_mut() {
+                editor.show();
+            }
+            if let Some(flight) = self.windows.flight.as_ref() {
+                win32::set_topmost(flight.hwnd());
             }
             return;
         }
-        if self.note_hover.is_some() {
-            // Clicking the floating blank note opens it in the editor; a click
-            // in the hotspot itself does nothing (NOTE-EDITOR.md §4.2).
-            if self.note_hover_hits(x, y) {
-                self.open_new_note_editor();
-                return;
+        if token == ANNOTATE_OPEN_TOKEN {
+            // The enlarged card is drawn by the flight; now the
+            // real editor can appear underneath it.
+            self.book.annotate_show_at = None;
+            if let Some(editor) = self.windows.editor.as_mut() {
+                editor.show();
             }
-            if self.note_hotspot_hovered {
-                return;
-            }
-            let preview = self
-                .note_hover
-                .as_ref()
-                .map(|hover| (hover.center, hover.dpi));
-            if let Some((center, dpi)) = preview {
-                // A click in the shadow padding is not a note click, but it must
-                // not fall through to a card underneath either.
-                if self.note_preview_bounds(center, dpi).contains(x, y) {
-                    self.cancel_note_hover();
-                    return;
-                }
-            }
-            self.cancel_note_hover();
-        }
-        self.hide_preview();
-        self.on_band_click(x, y);
-        if let Some((id, color)) = self.swatch_at(x, y) {
-            self.set_note_color(id, color);
-            return;
-        }
-        // The two hover buttons are real targets; without this a click on
-        // "Open" would fall through to the card's single-click action.
-        if let Some((id, action)) = self.action_at(x, y) {
-            logging::trace(format!("action {action:?} on card {id}"));
-            match action {
-                ActionKind::Copy => self.copy_item(id),
-                ActionKind::Annotate => self.annotate_item(id),
-                ActionKind::Open => self.open_item(id),
+            if let Some(flight) = self.windows.flight.as_ref() {
+                win32::set_topmost(flight.hwnd());
             }
             return;
         }
-        let Some((id, frame)) = self.hit_test_exact(x, y) else {
-            return;
-        };
-        // The discard cross is the top-left 26 DIP square of the card.
-        let (dip_x, dip_y) = self.to_window_dip(x, y);
-        if dip_x >= frame.left
-            && dip_x < frame.left + layout::CROSS_HIT
-            && dip_y >= frame.top
-            && dip_y < frame.top + layout::CROSS_HIT
-        {
-            self.discard(id);
-            return;
-        }
-        logging::trace(format!("press card {id} at {x},{y}"));
-        self.pressed = Some(Press {
-            id,
-            start: (x, y),
-            since: now,
-            moved: false,
-            handled: false,
-        });
-        self.send_scene(Command::Press(Some(id)));
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.set_click_through(false);
-        }
-    }
-
-    fn on_left_up(&mut self, x: i32, y: i32, now: f64) {
-        let Some(press) = self.pressed.take() else {
-            return;
-        };
-        self.send_scene(Command::Press(None));
-        if press.moved || press.handled {
-            return;
-        }
-        let (dx, dy) = (x - press.start.0, y - press.start.1);
-        let moved = (dx.abs() + dy.abs()) as f32;
-        let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
-        if moved > DRAG_DIP * scale {
-            return;
-        }
-        let double = self
-            .last_click
-            .map(|(when, id)| id == press.id && now - when < DOUBLE_CLICK)
-            .unwrap_or(false);
-        if double {
-            self.last_click = None;
-            self.open_item(press.id);
-        } else {
-            self.last_click = Some((now, press.id));
-            // A picture still copies on a single click; a note opens its
-            // editor. Its Copy pill stays available for the clipboard.
-            let note = self
-                .items
-                .iter()
-                .find(|item| item.id == press.id)
-                .is_some_and(|item| item.note);
-            if note {
-                self.open_note_editor(press.id);
-            } else {
-                self.copy_item(press.id);
+        if token == ANNOTATE_CLOSE_TOKEN {
+            // The picture is home: hand it to the card underneath.
+            let id = self.book.flying_card.take();
+            self.book.flying_rehang = false;
+            if let Some(id) = id {
+                self.send_scene(Command::SetRehang { id, flying: false });
             }
-        }
-    }
-
-    /// A click on any screen top band suppresses the reveal until the pointer
-    /// leaves the band, and puts a revealed line away unless the click landed
-    /// on a photo (the same rule as the WPF low-level hook).
-    fn on_band_click(&mut self, x: i32, y: i32) {
-        let Some(screen) = win32::monitor_at(x, y) else {
-            return;
-        };
-        let band_top = screen.bounds.top + (screen.work.top - screen.bounds.top).max(2);
-        let in_band = x >= screen.bounds.left
-            && x < screen.bounds.right
-            && y >= screen.bounds.top
-            && y < band_top;
-        if !in_band {
-            return;
-        }
-        self.band_suppressed = true;
-        self.hot_zone_since = None;
-        logging::trace(format!("band click at {x},{y}"));
-        if self.is_revealed && self.hit_test(x, y).is_none() {
-            self.pinned = false;
-            self.set_revealed(false);
-        }
-    }
-
-    fn on_right_down(&mut self, x: i32, y: i32) {
-        if self.note_editor.is_some() || self.editor.is_some() {
-            return;
-        }
-        self.hide_preview();
-        self.on_band_click(x, y);
-    }
-    fn on_right_up(&mut self, x: i32, y: i32) {
-        let Some((id, _)) = self.hit_test_exact(x, y) else {
-            return;
-        };
-        let Some(next) = self.show_card_menu(id, x, y) else {
-            return;
-        };
-        match next {
-            CardAction::Copy => self.copy_item(id),
-            CardAction::Open => self.open_item(id),
-            CardAction::Annotate => self.annotate_item(id),
-            CardAction::Edit => self.edit_item(id),
-            CardAction::Reveal => {
-                if let Some(item) = self.items.iter().find(|item| item.id == id) {
-                    if let Err(error) = win32::reveal_in_explorer(&item.path) {
-                        logging::error(format!("reveal: {error}"));
-                    }
-                }
+            if let Some(flight) = self.windows.flight.as_ref() {
+                win32::set_topmost(flight.hwnd());
             }
-            CardAction::SaveDesktop => self.save_to_desktop(id),
-            CardAction::Discard | CardAction::TakeDown => self.discard(id),
-            CardAction::Trash => self.trash_item(id),
-        }
-    }
-
-    fn update_pointer(&mut self, now: f64) {
-        let pointer = win32::cursor_pos();
-        // `--note-preview-demo`: the parked demo note's card is the pointer, so
-        // the hover preview appears while the real mouse stays put.
-        let demo_pointer = self
-            .note_preview_demo_card
-            .and_then(|id| self.current_card_px(id))
-            .map(|card| {
-                (
-                    card.center_x().round() as i32,
-                    card.center_y().round() as i32,
-                )
-            });
-        let Some((x, y)) = demo_pointer.or(pointer) else {
             return;
-        };
-        let Some(screen) = win32::monitor_at(x, y) else {
-            return;
-        };
-
-        let screen_changed = self
-            .screen
-            .map(|current| current.handle != screen.handle)
-            .unwrap_or(true);
-        if screen_changed && self.is_revealed {
-            self.place_on_screen(screen);
         }
-
-        let band_top = screen.bounds.top + (screen.work.top - screen.bounds.top).max(2);
-        let in_band = x >= screen.bounds.left
-            && x < screen.bounds.right
-            && y >= screen.bounds.top
-            && y < band_top;
-        if !in_band {
-            self.band_suppressed = false;
+        let rehang = self.book.flying_rehang && self.book.flying_card == Some(token);
+        if self.book.flying_card == Some(token) {
+            self.book.flying_card = None;
         }
-
-        let blocked = win32::foreground_is_fullscreen_on(screen.bounds);
-        let button_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
-
-        // The line may already be down when a full screen app comes forward
-        // (video, game, slideshow). Take it away instead of waiting for the
-        // pointer to leave; `present` keeps it from coming back while blocked.
-        if blocked && self.is_present && self.hide_at.is_none() {
-            self.dismiss(now);
+        // The real card is already opaque; keep the fading flight
+        // image above it so the hand-off stays a clean dissolve.
+        if let Some(flight) = self.windows.flight.as_ref() {
+            win32::set_topmost(flight.hwnd());
         }
-
-        if !self.is_revealed {
-            let can_reveal =
-                self.wanted() && !blocked && in_band && !self.band_suppressed && !button_down;
-            if can_reveal {
-                match self.hot_zone_since {
-                    Some(since) if now - since >= REVEAL_DELAY => {
-                        if screen_changed || self.screen.is_none() {
-                            self.place_on_screen(screen);
-                        }
-                        logging::trace(format!("reveal: dwell elapsed on {x},{y}"));
-                        self.present();
-                        self.reveal(false, 0.0);
-                    }
-                    Some(_) => {}
-                    None => self.hot_zone_since = Some(now),
-                }
-            } else {
-                self.hot_zone_since = None;
+        let command = if rehang {
+            Command::SetRehang {
+                id: token,
+                flying: false,
             }
         } else {
-            // The zone reaches from the screen's top edge to the window bottom,
-            // so moving up never hides the line.
-            let inside = self.overlay.as_ref().is_some_and(|overlay| {
-                let Some(rect) = win32::window_rect(overlay.hwnd()) else {
-                    return false;
-                };
-                x >= rect.left && x < rect.right && y >= screen.bounds.top && y < rect.bottom
-            });
-            if inside && self.pinned && self.note_editor.is_none() {
-                self.pinned = false;
+            Command::SetFlying {
+                id: token,
+                flying: false,
             }
-            let busy = self.pinned
-                || self.note_pin
-                || self.pressed.is_some()
-                || self.menu_open
-                || now < self.peek_until
-                || self.startup_until.is_some_and(|until| now < until);
-            if inside || busy {
-                self.away_since = None;
-            } else {
-                let since = *self.away_since.get_or_insert(now);
-                if now - since >= RETRACT_DELAY {
-                    self.away_since = None;
-                    self.set_revealed(false);
-                }
-            }
-        }
-
-        // Hover and click-through.
-        let hover = if self.is_revealed && self.note_editor.is_none() && self.editor.is_none() {
-            self.hit_test(x, y).map(|(id, _)| id)
-        } else {
-            None
         };
-        if self.hover != hover {
-            self.hover = hover;
-            self.send_scene(Command::Hover(hover));
-        }
-        // The hover buttons light up individually. The scene only publishes
-        // their boxes while the card is hovered, so this is None the rest of
-        // the time.
-        let hover_action =
-            if self.is_revealed && self.note_editor.is_none() && self.editor.is_none() {
-                self.action_at(x, y)
-            } else {
-                None
-            };
-        if self.hover_action != hover_action {
-            self.hover_action = hover_action;
-            self.send_scene(Command::HoverAction(hover_action));
-        }
-        if let Some(overlay) = self.overlay.as_ref() {
-            // Note colour dots are clickable too and the WPF dots used a hand
-            // cursor; the cards themselves stay on the normal arrow. The note
-            // entry hotspot (and its floating note) also use the hand.
-            let on_swatch =
-                hover_action.is_none() && self.is_revealed && self.swatch_at(x, y).is_some();
-            overlay.set_hand_cursor(
-                hover_action.is_some()
-                    || on_swatch
-                    || self.note_hotspot_hovered
-                    || self.note_hover.is_some(),
-            );
-        }
-        if let Some(press) = self.pressed.as_mut() {
-            let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
-            let distance = ((x - press.start.0).abs() + (y - press.start.1).abs()) as f32;
-            if distance > DRAG_DIP * scale && !press.moved {
-                press.moved = true;
-                logging::trace(format!("press moved {distance:.0}px, drag armed"));
+        self.send_scene(command);
+        self.book.flying_rehang = false;
+    }
+
+    /// The flight is over and its window can go back to the pool.
+    fn on_flight_finished(&mut self, id: u64) {
+        if id == NOTE_FLIGHT_TOKEN {
+            if let Some(flight) = self.windows.flight.as_mut() {
+                flight.hide();
             }
-            if !press.moved
-                && !press.handled
-                && now - press.since >= LONG_PRESS
-                && unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0
-            {
-                let id = press.id;
-                press.handled = true;
-                self.edit_item(id);
-            }
+            self.windows.flight_idle_at = Some(win32::now_seconds());
+            return;
         }
-        // Start a drag once the pointer has clearly moved.
-        if let Some(press) = self.pressed.as_ref() {
-            if press.moved && !press.handled && unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0
-            {
-                let id = press.id;
-                self.start_drag(id);
+        if id == ANNOTATE_OPEN_TOKEN {
+            // The editor is fully drawn underneath; the window can
+            // give its surface back until the return flight.
+            if let Some(flight) = self.windows.flight.as_mut() {
+                flight.hide();
             }
+            self.windows.flight_idle_at = Some(win32::now_seconds());
+            return;
         }
+        if id == ANNOTATE_CLOSE_TOKEN {
+            if let Some(flight) = self.windows.flight.as_mut() {
+                flight.hide();
+            }
+            self.windows.flight_idle_at = Some(win32::now_seconds());
+            self.book.flying_card = None;
+            self.book.flying_rehang = false;
+            self.book.annotate_close_at = None;
+            self.close_editor();
+            return;
+        }
+        if id == TUMBLE_FLIGHT_TOKEN {
+            // The thrown-away note is off the screen: release the
+            // hidden editor now.
+            if let Some(flight) = self.windows.flight.as_mut() {
+                flight.hide();
+            }
+            self.windows.flight_idle_at = Some(win32::now_seconds());
+            self.close_note_editor();
+            return;
+        }
+        self.book.flying_card = None;
+        self.book.flying_rehang = false;
+        if let Some(flight) = self.windows.flight.as_mut() {
+            flight.hide();
+        }
+        self.windows.flight_idle_at = Some(win32::now_seconds());
     }
 
     fn update_timers(&mut self, now: f64) {
         // Keep the editor-save suppression list from growing for the life of
         // the process; the watcher only needs the last few seconds.
-        self.recently_saved.retain(|(_, at)| now - *at < 10.0);
-        if let Some(hide_at) = self.hide_at {
+        self.capture
+            .recently_saved
+            .retain(|(_, at)| now - *at < 10.0);
+        if let Some(hide_at) = self.state.hide_at {
             if now >= hide_at {
-                self.hide_at = None;
-                if let Some(overlay) = self.overlay.as_mut() {
+                self.state.hide_at = None;
+                if let Some(overlay) = self.windows.overlay.as_mut() {
                     overlay.hide();
                 }
-                self.is_present = false;
+                self.state.is_present = false;
             }
         }
-        if let Some(until) = self.startup_until {
+        if let Some(until) = self.state.startup_until {
             if now >= until {
-                self.startup_until = None;
-                self.keep_open = false;
-                if self.items.is_empty() {
+                self.state.startup_until = None;
+                self.state.keep_open = false;
+                if self.line.items.is_empty() {
                     self.dismiss(now);
                 }
             }
         }
-        if self.items.is_empty() && !self.keep_open && self.is_present {
-            let since = *self.empty_since.get_or_insert(now);
+        if self.line.items.is_empty() && !self.state.keep_open && self.state.is_present {
+            let since = *self.state.empty_since.get_or_insert(now);
             if now - since >= EMPTY_DELAY {
-                self.empty_since = None;
+                self.state.empty_since = None;
                 self.dismiss(now);
             }
         } else {
-            self.empty_since = None;
+            self.state.empty_since = None;
         }
     }
 
     fn prune_missing(&mut self, now: f64) {
-        if now - self.last_prune < 1.0 {
+        if now - self.state.last_prune < 1.0 {
             return;
         }
-        self.last_prune = now;
-        if self.demo {
+        self.state.last_prune = now;
+        if self.dev.demo {
             return;
         }
         let mut gone = Vec::new();
-        for item in &mut self.items {
+        for item in &mut self.line.items {
             if item.path.exists() {
                 item.missing = 0;
             } else {
@@ -2094,28 +1312,28 @@ impl App {
     /// (M6). Their D3D devices are the expensive part, so releasing them is what
     /// makes the private memory fall back after a burst of captures or drags.
     fn release_idle_windows(&mut self, now: f64) {
-        if let Some(at) = self.flight_idle_at {
+        if let Some(at) = self.windows.flight_idle_at {
             if now - at >= FLIGHT_IDLE_SECONDS {
-                self.flight_idle_at = None;
-                if let Some(mut flight) = self.flight.take() {
+                self.windows.flight_idle_at = None;
+                if let Some(mut flight) = self.windows.flight.take() {
                     flight.shutdown();
                     logging::trace("flight window released after idle");
                 }
             }
         }
-        if let Some(at) = self.preview_idle_at {
-            if now - at >= HELPER_IDLE_SECONDS && self.note_hover.is_none() {
-                self.preview_idle_at = None;
-                if let Some(mut preview) = self.preview.take() {
+        if let Some(at) = self.windows.preview_idle_at {
+            if now - at >= HELPER_IDLE_SECONDS && self.state.note_hover.is_none() {
+                self.windows.preview_idle_at = None;
+                if let Some(mut preview) = self.windows.preview.take() {
                     preview.shutdown();
                     logging::trace("preview window released after idle");
                 }
             }
         }
-        if let Some(at) = self.ghost_idle_at {
+        if let Some(at) = self.windows.ghost_idle_at {
             if now - at >= HELPER_IDLE_SECONDS {
-                self.ghost_idle_at = None;
-                if let Some(mut ghost) = self.ghost.take() {
+                self.windows.ghost_idle_at = None;
+                if let Some(mut ghost) = self.windows.ghost.take() {
                     ghost.shutdown();
                     logging::trace("drag ghost released after idle");
                 }
@@ -2123,838 +1341,10 @@ impl App {
         }
     }
 
-    fn update_click_through(&mut self) {
-        let Some(overlay) = self.overlay.as_mut() else {
-            return;
-        };
-        let pass = self.hover.is_none()
-            && self.pressed.is_none()
-            && !self.note_hotspot_hovered
-            && self.note_hover.is_none();
-        overlay.set_click_through(pass);
-    }
-
-    // ---- reveal state -----------------------------------------------------
-
-    fn wanted(&self) -> bool {
-        !self.items.is_empty() || self.keep_open || self.demo
-    }
-
-    fn present(&mut self) {
-        if self.is_present {
-            return;
-        }
-        // A full screen app on the line's monitor owns the screen; never put
-        // the strip over it (WPF `Refresh` made the same call).
-        let blocked = self
-            .screen
-            .is_some_and(|screen| win32::foreground_is_fullscreen_on(screen.bounds));
-        if blocked {
-            return;
-        }
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.show(true);
-            self.is_present = true;
-            self.hide_at = None;
-        }
-    }
-
-    fn dismiss(&mut self, now: f64) {
-        if !self.is_present {
-            return;
-        }
-        self.hide_preview();
-        self.preview_state.reset();
-        self.set_revealed(false);
-        if self.hide_at.is_none() {
-            self.hide_at = Some(now + HIDE_DELAY);
-        }
-    }
-
-    fn reveal(&mut self, pin: bool, peek: f64) {
-        if !self.is_present {
-            return;
-        }
-        if pin {
-            self.pinned = true;
-        }
-        if peek > 0.0 {
-            self.peek_until = win32::now_seconds() + peek;
-        }
-        self.away_since = None;
-        if self.is_revealed {
-            return;
-        }
-        self.is_revealed = true;
-        self.send_scene(Command::Reveal(true));
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.show(true);
-        }
-    }
-
-    fn set_revealed(&mut self, revealed: bool) {
-        if self.is_revealed == revealed {
-            return;
-        }
-        self.is_revealed = revealed;
-        self.pinned = false;
-        self.peek_until = 0.0;
-        self.note_peek_on = false;
-        if !revealed {
-            self.hover = None;
-            self.hover_action = None;
-            if let Some(overlay) = self.overlay.as_ref() {
-                overlay.set_hand_cursor(false);
-            }
-            self.send_scene(Command::Hover(None));
-            self.send_scene(Command::HoverAction(None));
-            self.hide_preview();
-            self.cancel_note_hover();
-            self.preview_state.reset();
-        }
-        self.send_scene(Command::Reveal(revealed));
-    }
-
-    fn toggle(&mut self) {
-        if self.is_revealed {
-            self.dismiss(win32::now_seconds());
-            // An empty line opened on purpose is dismissed on purpose too; it
-            // must not linger forever behind the 0.7 s empty-line rule.
-            if self.items.is_empty() {
-                self.keep_open = false;
-            }
-        } else {
-            // "Open the line on purpose" (WPF `keepOpen`): an empty line stays
-            // down with its hint instead of retracting after 0.7 s.
-            self.keep_open = true;
-            let screen = self.pointer_screen();
-            if let Some(screen) = screen {
-                if self.screen.map(|current| current.handle) != Some(screen.handle) {
-                    self.place_on_screen(screen);
-                }
-            }
-            self.present();
-            self.reveal(true, 0.0);
-        }
-    }
-
-    fn place_on_screen(&mut self, screen: Monitor) {
-        self.cancel_note_hover();
-        self.hide_preview();
-        self.preview_state.reset();
-        if let Some(overlay) = self.overlay.as_mut() {
-            overlay.place(screen.work, screen.dpi);
-            overlay.send(Command::SetVisible(self.is_present));
-            overlay.set_frame_cap(self.settings.fps_cap().period());
-        }
-        self.screen = Some(screen);
-        self.enforce_capacity();
-    }
-
-    // ---- items ------------------------------------------------------------
-
-    fn restore_pegged(&mut self) {
-        let paths: Vec<PathBuf> = settings::read_pegged()
-            .into_iter()
-            .filter(|path| path.exists() && (wic::is_image_path(path) || notes::is_note(path)))
-            .collect();
-        self.restore_pending = paths.len();
-        for path in paths {
-            if !path.exists() || !(wic::is_image_path(&path) || notes::is_note(&path)) {
-                continue;
-            }
-            let id = self.next_id;
-            self.next_id += 1;
-            let tx = self.events_tx.clone();
-            let thread_path = path.clone();
-            let thumb_max = self.thumb_max();
-            let note = notes::is_note(&path);
-            let color = self.settings.note_color(&file_name(&path));
-            let _ = std::thread::Builder::new()
-                .name("pegline-restore".to_string())
-                .spawn(move || {
-                    let (thumb, text) = if note {
-                        let text = notes::read(&thread_path);
-                        let image = text.as_deref().and_then(|text| notes::render(text, color));
-                        (image, text)
-                    } else {
-                        (wic::decode_scaled(&thread_path, thumb_max).ok(), None)
-                    };
-                    if thumb.is_none() {
-                        logging::error(format!("restore {}", thread_path.display()));
-                    }
-                    let size_px = if note {
-                        (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32)
-                    } else {
-                        // The source pixels, not the thumbnail's: the card's
-                        // aspect, the annotation flight and the editor layout
-                        // all use this size.
-                        wic::pixel_size(&thread_path)
-                            .ok()
-                            .or_else(|| thumb.as_ref().map(|thumb| (thumb.width, thumb.height)))
-                            .unwrap_or((0, 0))
-                    };
-                    let _ = tx.send(Event::RestoreReady {
-                        id,
-                        path: thread_path.clone(),
-                        size_px,
-                        thumb,
-                        note,
-                        text,
-                        color,
-                    });
-                    window::wake(HWND::default());
-                });
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn on_restore_ready(
-        &mut self,
-        id: CardId,
-        path: PathBuf,
-        size_px: (u32, u32),
-        thumb: Option<ImageData>,
-        note: bool,
-        text: Option<String>,
-        color: usize,
-    ) {
-        self.restore_pending = self.restore_pending.saturating_sub(1);
-        let Some(thumb) = thumb else {
-            if self.restore_pending == 0 {
-                self.save_pegged();
-            }
-            return;
-        };
-        if self.items.len() >= layout::capacity(100_000.0) {
-            return;
-        }
-        let own = path.starts_with(win32::inbox_dir()) || notes::is_note(&path);
-        self.add_item(
-            id, path, own, size_px, thumb, None, false, false, note, color, text,
-        );
-    }
-
-    fn on_capture_file(&mut self, path: PathBuf) {
-        if !wic::is_image_path(&path) {
-            return;
-        }
-        let now = win32::now_seconds();
-        // Our own annotation save lands in the watched folder; it is hung by
-        // the editor callback, not by the watcher.
-        if self
-            .recently_saved
-            .iter()
-            .any(|(saved, at)| saved == &path && now - at < 2.0)
-        {
-            return;
-        }
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            return;
-        };
-        if metadata.len() == 0 {
-            return;
-        }
-        let fresh = metadata
-            .modified()
-            .ok()
-            .and_then(|time| SystemTime::now().duration_since(time).ok())
-            .map(|age| age.as_secs_f64() < 3.0)
-            .unwrap_or(false);
-        let own = path.starts_with(win32::inbox_dir());
-        let area = self.guess_area(&path, fresh);
-        self.spawn_capture(path, own, area);
-    }
-
-    fn spawn_capture(&mut self, path: PathBuf, own: bool, area: Option<RectI>) {
-        let now = win32::now_seconds();
-        self.prune_recent(now);
-        // Candidates must be recorded before the worker starts so two captures
-        // that land together can still see each other.
-        let candidates: Vec<(PathBuf, bool)> = self
-            .recent
-            .iter()
-            .filter(|recent| recent.path != path)
-            .map(|recent| (recent.path.clone(), recent.own))
-            .collect();
-        self.recent.retain(|recent| recent.path != path);
-        self.recent.push(Recent {
-            at: now,
-            path: path.clone(),
-            own,
-        });
-
-        let tx = self.events_tx.clone();
-        let thread_path = path.clone();
-        let want_flight = area.is_some();
-        let thumb_max = self.thumb_max();
-        let _ = std::thread::Builder::new()
-            .name("pegline-decode".to_string())
-            .spawn(move || {
-                let thumb = match wic::decode_scaled(&thread_path, thumb_max) {
-                    Ok(thumb) => thumb,
-                    Err(error) => {
-                        logging::error(format!("decode {}: {error}", thread_path.display()));
-                        return;
-                    }
-                };
-                let size_px = wic::pixel_size(&thread_path).unwrap_or((thumb.width, thumb.height));
-                // Only a capture with a known origin flies, so only then is the
-                // big texture worth decoding.
-                let flight_image = if want_flight {
-                    wic::decode_scaled(&thread_path, crate::capture::FLIGHT_MAX).ok()
-                } else {
-                    None
-                };
-                // Twin: the same picture saved by Windows and caught here, one
-                // of them long-lived and one of them a fresh inbox copy. The
-                // comparison decodes both at 2048 px, so it stays off the UI.
-                let mut twin = None;
-                for (candidate, candidate_own) in candidates {
-                    if candidate_own != own
-                        && candidate.exists()
-                        && wic::same_picture(&thread_path, &candidate).unwrap_or(false)
-                    {
-                        twin = Some(candidate);
-                        break;
-                    }
-                }
-                let _ = tx.send(Event::CaptureReady {
-                    path: thread_path,
-                    own,
-                    size_px,
-                    thumb,
-                    area,
-                    flight_image,
-                    twin,
-                    clip_hash: None,
-                });
-                window::wake(HWND::default());
-            });
-    }
-
-    /// Forgets captures older than the twin window.
-    fn prune_recent(&mut self, now: f64) {
-        self.recent.retain(|recent| now - recent.at < TWIN_SECONDS);
-    }
-
-    /// Folds a capture into the card that already shows its twin. The
-    /// Windows-saved file always wins; the inbox copy is deleted, as in the WPF
-    /// app. Returns false when the twin is not on the line yet: the caller then
-    /// hangs this copy normally, and the twin folds into it when it arrives.
-    fn resolve_twin(&mut self, path: &Path, own: bool, twin: &Path) -> bool {
-        logging::trace(format!(
-            "twin: {} + {} (new own={own})",
-            path.display(),
-            twin.display()
-        ));
-        if !self.items.iter().any(|item| item.path == twin) {
-            return false;
-        }
-        self.recent
-            .retain(|recent| recent.path.as_path() != path && recent.path.as_path() != twin);
-        let now = win32::now_seconds();
-        if own {
-            // New arrival is our inbox copy; the external file stays.
-            if let Err(error) = std::fs::remove_file(path) {
-                logging::error(format!("twin remove {}: {error}", path.display()));
-            }
-            self.recent.push(Recent {
-                at: now,
-                path: twin.to_path_buf(),
-                own: false,
-            });
-            return true;
-        }
-        // New arrival is the Windows-saved copy: repoint the existing card and
-        // delete the inbox file it was showing.
-        if let Some(item) = self.items.iter_mut().find(|item| item.path == twin) {
-            item.path = path.to_path_buf();
-            item.own = false;
-            item.last_write = std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .unwrap_or(UNIX_EPOCH);
-        }
-        if let Err(error) = std::fs::remove_file(twin) {
-            logging::error(format!("twin remove {}: {error}", twin.display()));
-        }
-        self.save_pegged();
-        self.recent.push(Recent {
-            at: now,
-            path: path.to_path_buf(),
-            own: false,
-        });
-        true
-    }
-
-    /// Whether a card already on the line is the other half of this capture:
-    /// the other owner, the same picture size, caught inside the twin window
-    /// and with the same thumbnail.
-    fn is_twin_candidate(
-        item: &Item,
-        own: bool,
-        size_px: (u32, u32),
-        thumb_hash: u64,
-        now: f64,
-    ) -> bool {
-        !item.note
-            && item.own != own
-            && item.size_px == size_px
-            && item.captured_at > 0.0
-            && now - item.captured_at < TWIN_SECONDS
-            && Self::image_hash(&item.thumb) == thumb_hash
-    }
-
-    /// FNV-1a over a sampled view of the pixels. The sampling matches the WPF
-    /// catcher (every 4th row, 3-byte steps) so repeated clipboard copies of the
-    /// same screenshot hash the same way.
-    fn image_hash(image: &ImageData) -> u64 {
-        let mut hash: u64 = 14_695_981_039_346_656_037;
-        hash ^= (image.width as u64) * 31 + image.height as u64;
-        let stride = image.width as usize * 4;
-        for (row, y) in (0..image.height as usize).step_by(4).enumerate() {
-            let _ = row;
-            let start = y * stride;
-            let end = (start + stride).min(image.bgra.len());
-            let mut index = start;
-            while index < end {
-                hash ^= image.bgra[index] as u64;
-                hash = hash.wrapping_mul(1_099_511_628_211);
-                index += 3;
-            }
-        }
-        hash
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn on_capture_ready(
-        &mut self,
-        path: PathBuf,
-        own: bool,
-        size_px: (u32, u32),
-        thumb: ImageData,
-        area: Option<RectI>,
-        flight_image: Option<ImageData>,
-        twin: Option<PathBuf>,
-        clip_hash: Option<u64>,
-        now: f64,
-    ) {
-        if let Some(hash) = clip_hash {
-            if hash == self.last_clip_hash && now - self.last_clip_at < CLIPBOARD_DUPLICATE_SECONDS
-            {
-                logging::trace("clipboard duplicate ignored");
-                let _ = std::fs::remove_file(&path);
-                self.recent.retain(|recent| recent.path != path);
-                return;
-            }
-            self.last_clip_hash = hash;
-            self.last_clip_at = now;
-        }
-        // The capture the editor is already working on must not hang twice.
-        if self
-            .editing
-            .as_ref()
-            .is_some_and(|editing| editing.path == path)
-        {
-            return;
-        }
-        if self.items.iter().any(|item| item.path == path) {
-            return;
-        }
-        // The worker's twin search can miss when both workers decide at the
-        // same moment: the clipboard decode and the folder watcher race, and
-        // each sees only the captures registered before it started. The line
-        // is the tie-breaker — both CaptureReady events are handled in order
-        // on this thread, so the second one always sees the first card. The
-        // thumbnails are the same picture at the same size, which makes a
-        // hash match conclusive (and the card that arrived first is kept).
-        let thumb_hash = Self::image_hash(&thumb);
-        let line_twin = self
-            .items
-            .iter()
-            .find(|item| Self::is_twin_candidate(item, own, size_px, thumb_hash, now))
-            .map(|item| item.path.clone());
-        let twin = line_twin.or(twin);
-        if let Some(twin) = twin {
-            if self.resolve_twin(&path, own, &twin) {
-                return;
-            }
-        }
-        let id = self.next_id;
-        self.next_id += 1;
-        let mut flying = false;
-        if let (Some(area), Some(image), Some(dpi)) = (area, flight_image, self.screen_dpi()) {
-            let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
-            let index = self.items.len();
-            if let Some(end) = self.flight_target_px(index, index + 1, card_size) {
-                // A burst of captures must not queue flights: show the old card
-                // at its slot and let the flight window switch to the new one.
-                self.release_flying_card();
-                if let Some(flight) = self.ensure_flight() {
-                    // Same tilt `add_item` gives the real card, and the row
-                    // glide it will perform after landing. The flight window
-                    // mirrors both during the hand-off.
-                    let tilt = pseudo_random(id) * 5.0 - 2.5;
-                    let slide_dip = if index == 0 {
-                        0.0
-                    } else {
-                        -layout::SPACING * 0.5
-                    };
-                    flying = flight.fly(id, image, area, end, tilt, slide_dip, PinMode::Full, dpi);
-                    if flying {
-                        self.flight_idle_at = None;
-                        self.flying_card = Some(id);
-                        self.flying_rehang = false;
-                    }
-                }
-            }
-        }
-        self.add_item(
-            id,
-            path.clone(),
-            own,
-            size_px,
-            thumb,
-            area,
-            true,
-            flying,
-            false,
-            0,
-            None,
-        );
-        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
-            item.captured_at = now;
-        }
-        self.recent.retain(|recent| recent.path != path);
-        self.recent.push(Recent { at: now, path, own });
-        self.sound(Cue::Tink);
-        self.present();
-        self.reveal(false, PEEK_SECONDS);
-        // `present`/`reveal` may put the line above the flight window when the
-        // strip was hidden. The flight image has to stay on top of the real
-        // card: the latter is already opaque underneath it during the hand-off.
-        if flying {
-            if let Some(flight) = self.flight.as_ref() {
-                win32::set_topmost(flight.hwnd());
-            }
-        }
-    }
-    /// The DPI of the monitor the line is on.
-    fn screen_dpi(&self) -> Option<u32> {
-        self.screen.as_ref().map(|screen| screen.dpi)
-    }
-
-    /// Creates the flight window on first use. Keeping a second D3D device
-    /// alive costs ~34 MB of private memory for an animation that may never
-    /// run, so the window is built lazily and then pooled.
-    fn ensure_flight(&mut self) -> Option<&mut Flight> {
-        if self.flight.is_none() {
-            let flight_tx = self.events_tx.clone();
-            match Flight::create(Box::new(move |event| {
-                let _ = flight_tx.send(Event::Flight(event));
-                window::wake(HWND::default());
-            })) {
-                Ok(flight) => {
-                    self.flight = Some(flight);
-                    logging::trace("flight window created");
-                }
-                Err(error) => logging::error(format!("flight window: {error}")),
-            }
-        }
-        self.flight.as_mut()
-    }
-
-    /// Decode size for a card thumbnail: exactly the pixels the card occupies
-    /// (136 DIP wide at the current scale), capped by `THUMB_MAX`. Oversampling
-    /// to 480 px costs ~11 MB of driver memory for six cards and buys nothing:
-    /// the card never draws wider than 272 px on a 200% screen.
-    fn thumb_max(&self) -> u32 {
-        let scale = self
-            .screen
-            .as_ref()
-            .map(|screen| screen.scale())
-            .unwrap_or(1.0);
-        ((layout::CARD_WIDTH - 14.0) * scale)
-            .ceil()
-            .clamp(96.0, crate::capture::THUMB_MAX as f32) as u32
-    }
-
-    /// Where the flight should land card `index` of `count`, in screen pixels.
-    ///
-    /// The landing spot is one full spacing beyond the last card of the
-    /// current row — half a spacing beyond the final slot — so the new card
-    /// lands clear of its neighbour; the row then slides left to centre it
-    /// (BEHAVIOR §5.2).
-    fn flight_target_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
-        let overlay = self.overlay.as_ref()?;
-        let window = win32::window_rect(overlay.hwnd())?;
-        let scale = overlay.scale().max(0.1);
-        let width_dip = overlay.width_px() as f32 / scale;
-        let x = layout::flight_slot_x(index, count, width_dip);
-        let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
-        let left = x - card_size.0 * 0.5;
-        Some(RectI::new(
-            window.left + (left * scale).round() as i32,
-            window.top + (top * scale).round() as i32,
-            window.left + ((left + card_size.0) * scale).round() as i32,
-            window.top + ((top + card_size.1) * scale).round() as i32,
-        ))
-    }
-
-    /// Where card `index` of `count` will sit once the row settles, in screen
-    /// pixels, ignoring any reveal offset. Used as the landing target when an
-    /// edited note returns to its existing slot, including when the strip is
-    /// still on its way down.
-    fn card_slot_px(&self, index: usize, count: usize, card_size: (f32, f32)) -> Option<RectI> {
-        let overlay = self.overlay.as_ref()?;
-        let window = win32::window_rect(overlay.hwnd())?;
-        let scale = overlay.scale().max(0.1);
-        let width_dip = overlay.width_px() as f32 / scale;
-        let x = layout::slot_x(index, count, width_dip);
-        let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
-        let left = x - card_size.0 * 0.5;
-        Some(RectI::new(
-            window.left + (left * scale).round() as i32,
-            window.top + (top * scale).round() as i32,
-            window.left + ((left + card_size.0) * scale).round() as i32,
-            window.top + ((top + card_size.1) * scale).round() as i32,
-        ))
-    }
-
-    /// The card's current rectangle on screen, in pixels.
-    fn current_card_px(&self, id: CardId) -> Option<RectI> {
-        let overlay = self.overlay.as_ref()?;
-        let window = win32::window_rect(overlay.hwnd())?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        let card = snapshot.cards.iter().find(|card| card.id == id)?;
-        let scale = snapshot.scale.max(0.1);
-        Some(RectI::new(
-            window.left + (card.frame.left * scale).round() as i32,
-            window.top + (card.frame.top * scale).round() as i32,
-            window.left + (card.frame.right * scale).round() as i32,
-            window.top + (card.frame.bottom * scale).round() as i32,
-        ))
-    }
-
-    /// The card's current visual angle in degrees, published with the same
-    /// snapshot as its frame. `None` when it is not on the line.
-    fn current_card_angle(&self, id: CardId) -> Option<f32> {
-        let overlay = self.overlay.as_ref()?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        snapshot
-            .cards
-            .iter()
-            .find(|card| card.id == id)
-            .map(|card| card.angle)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn add_item(
-        &mut self,
-        id: CardId,
-        path: PathBuf,
-        own: bool,
-        size_px: (u32, u32),
-        thumb: ImageData,
-        area: Option<RectI>,
-        arriving: bool,
-        flying: bool,
-        note: bool,
-        color: usize,
-        text: Option<String>,
-    ) {
-        let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
-        let tilt = pseudo_random(id) * 5.0 - 2.5;
-        let item = Item {
-            id,
-            path: path.clone(),
-            own,
-            note,
-            color: color.min(notes::COLOR_COUNT - 1),
-            text,
-            size_px,
-            card_size,
-            tilt,
-            thumb: thumb.clone(),
-            missing: 0,
-            last_write: std::fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .unwrap_or(UNIX_EPOCH),
-            revision: 1,
-            captured_at: 0.0,
-        };
-        self.items.push(item);
-        self.send_scene(Command::AddCard(CardSpec {
-            id,
-            card_size,
-            tilt,
-            arriving,
-            image: Some(thumb),
-            note,
-        }));
-        if note {
-            self.send_scene(Command::SetNoteColor { id, color });
-        }
-        if flying {
-            self.send_scene(Command::SetFlying { id, flying: true });
-        }
-        let _ = area;
-        self.enforce_capacity();
-        self.save_pegged();
-        self.empty_since = None;
-        if !self.is_present {
-            self.present();
-        }
-    }
-
-    fn alloc_id(&mut self) -> CardId {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-
-    fn enforce_capacity(&mut self) {
-        let width_dip = self
-            .overlay
-            .as_ref()
-            .map(|overlay| overlay.width_px() as f32 / overlay.scale().max(0.1))
-            .unwrap_or(1920.0);
-        let capacity = layout::capacity(width_dip);
-        while self.items.len() > capacity {
-            let id = self.items[0].id;
-            if self.items[0].note {
-                // Capacity eviction archives a note instead of deleting it.
-                self.archive_note(id);
-                break;
-            }
-            self.start_fall(id);
-            self.remove_item(id);
-        }
-    }
-
-    fn remove_item(&mut self, id: CardId) {
-        if let Some(position) = self.items.iter().position(|item| item.id == id) {
-            self.items.remove(position);
-            self.send_scene(Command::RemoveCard { id });
-            self.save_pegged();
-        }
-    }
-
-    fn save_pegged(&mut self) {
-        // The demo switches hang generated cards on a line that did not restore
-        // the user's own set; writing them would replace the real pegged list
-        // with demo paths. `--note-preview-demo` is the same case.
-        if self.demo || self.note_preview_demo || self.restore_pending > 0 {
-            return;
-        }
-        let paths: Vec<PathBuf> = self.items.iter().map(|item| item.path.clone()).collect();
-        settings::write_pegged(&paths);
-    }
-
-    fn hit_test(&self, x: i32, y: i32) -> Option<(CardId, crate::types::RectF)> {
-        self.hit_test_impl(x, y, false)
-    }
-
-    /// Hit testing for clicks: no 10 DIP hover slop, so the empty strip around
-    /// a card stays click-through.
-    fn hit_test_exact(&self, x: i32, y: i32) -> Option<(CardId, crate::types::RectF)> {
-        self.hit_test_impl(x, y, true)
-    }
-
-    fn hit_test_impl(&self, x: i32, y: i32, exact: bool) -> Option<(CardId, crate::types::RectF)> {
-        let overlay = self.overlay.as_ref()?;
-        let rect = win32::window_rect(overlay.hwnd())?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        let scale = snapshot.scale.max(0.1);
-        let dip_x = (x - rect.left) as f32 / scale;
-        let dip_y = (y - rect.top) as f32 / scale;
-        let id = if exact {
-            snapshot.card_at_exact(dip_x, dip_y)?
-        } else {
-            snapshot.card_at(dip_x, dip_y)?
-        };
-        let card = snapshot.cards.iter().find(|card| card.id == id)?;
-        Some((id, card.frame))
-    }
-
-    /// The copy/open button under the pointer, in device pixels.
-    fn action_at(&self, x: i32, y: i32) -> Option<(CardId, ActionKind)> {
-        let overlay = self.overlay.as_ref()?;
-        let rect = win32::window_rect(overlay.hwnd())?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        let scale = snapshot.scale.max(0.1);
-        snapshot.action_at(
-            (x - rect.left) as f32 / scale,
-            (y - rect.top) as f32 / scale,
-        )
-    }
-
-    /// The note colour dot under the pointer, in window DIP.
-    fn swatch_at(&self, x: i32, y: i32) -> Option<(CardId, usize)> {
-        let overlay = self.overlay.as_ref()?;
-        let rect = win32::window_rect(overlay.hwnd())?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        let scale = snapshot.scale.max(0.1);
-        snapshot.swatch_at(
-            (x - rect.left) as f32 / scale,
-            (y - rect.top) as f32 / scale,
-        )
-    }
-
-    fn to_window_dip(&self, x: i32, y: i32) -> (f32, f32) {
-        let Some(overlay) = self.overlay.as_ref() else {
-            return (f32::NAN, f32::NAN);
-        };
-        let Some(rect) = win32::window_rect(overlay.hwnd()) else {
-            return (f32::NAN, f32::NAN);
-        };
-        let scale = overlay.scale().max(0.1);
-        (
-            (x - rect.left) as f32 / scale,
-            (y - rect.top) as f32 / scale,
-        )
-    }
-
-    /// The note editor's paper rectangle in screen pixels; clicks outside it
-    /// commit (NOTE-EDITOR.md §5.5).
-    fn note_editor_paper_px(&self) -> Option<RectI> {
-        let editor = self.note_editor.as_ref()?;
-        let rect = win32::window_rect(editor.hwnd())?;
-        let dpi = win32::window_dpi(editor.hwnd()).max(96);
-        let scale = dpi as f32 / 96.0;
-        let margin = crate::note_editor::render::MARGIN_DIP * scale;
-        Some(RectI::new(
-            rect.left + margin.round() as i32,
-            rect.top + margin.round() as i32,
-            rect.left
-                + ((crate::note_editor::render::MARGIN_DIP
-                    + crate::note_editor::display::PAPER_WIDTH)
-                    * scale)
-                    .round() as i32,
-            rect.top
-                + ((crate::note_editor::render::MARGIN_DIP + PAPER_HEIGHT) * scale).round() as i32,
-        ))
-    }
-
-    /// The note editor's glass card in screen pixels: the paper inflated by
-    /// the same 4 DIP frame the line's cards use. A flight carries the whole
-    /// card, so the paper image inside it lands exactly on the editor paper.
-    fn note_editor_card_px(&self) -> Option<RectI> {
-        let paper = self.note_editor_paper_px()?;
-        let editor = self.note_editor.as_ref()?;
-        let dpi = win32::window_dpi(editor.hwnd()).max(96);
-        let inset = (layout::PHOTO_INSET * dpi as f32 / 96.0).round() as i32;
-        Some(paper.inflate(inset))
-    }
-
     // ---- card actions -----------------------------------------------------
 
     fn copy_item(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         if item.note {
@@ -2988,7 +1378,7 @@ impl App {
                             }
                         };
                         let _ = tx.send(Event::CopyReady { id, dib, png });
-                        window::wake(HWND::default());
+                        window::wake();
                     }
                     Err(error) => logging::error(format!("copy decode: {error}")),
                 },
@@ -2996,7 +1386,7 @@ impl App {
     }
 
     fn on_copy_ready(&mut self, id: CardId, dib: ImageData, png: Vec<u8>) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let path = item.path.clone();
@@ -3019,7 +1409,7 @@ impl App {
     /// hotspot glides with the drawn corner while a removal re-centres the row.
     fn note_entry_hotspot(&self) -> Option<RectF> {
         let mut hotspot = self.note_entry_hotspot_layout()?;
-        let overlay = self.overlay.as_ref()?;
+        let overlay = self.windows.overlay.as_ref()?;
         let snapshot = overlay.snapshot();
         let snapshot = snapshot.lock().ok()?;
         if let Some(center_x) = snapshot.note_entry_x {
@@ -3035,14 +1425,15 @@ impl App {
     /// and size, and is the hover note's home so the note lands on the
     /// theoretical slot instead of chasing the row spring.
     fn note_entry_hotspot_layout(&self) -> Option<RectF> {
-        let overlay = self.overlay.as_ref()?;
+        let overlay = self.windows.overlay.as_ref()?;
         let width_dip = overlay.width_px() as f32 / overlay.scale().max(0.1);
         let (height, note) = self
+            .line
             .items
             .last()
             .map(|item| (item.card_size.1, item.note))
             .unwrap_or((layout::NOTE_CARD_HEIGHT, true));
-        layout::note_hotspot(self.items.len(), width_dip, height, note)
+        layout::note_hotspot(self.line.items.len(), width_dip, height, note)
     }
 
     /// The hover note's paper rectangle in screen pixels.
@@ -3051,7 +1442,7 @@ impl App {
     /// the card's frame dissolves when the flight begins, and keeping the paper
     /// the same size means only the thin frame goes away.
     fn note_hover_paper_px(&self) -> Option<RectI> {
-        let hover = self.note_hover.as_ref()?;
+        let hover = self.state.note_hover.as_ref()?;
         let scale = hover.dpi.max(96) as f32 / 96.0;
         let width = notes::CARD_WIDTH * scale;
         let height = notes::CARD_HEIGHT * scale;
@@ -3066,7 +1457,7 @@ impl App {
     /// Where the hovering blank note's whole glass card is, in screen pixels.
     fn note_hover_card_px(&self) -> Option<RectI> {
         let paper = self.note_hover_paper_px()?;
-        let scale = self.note_hover.as_ref()?.dpi.max(96) as f32 / 96.0;
+        let scale = self.state.note_hover.as_ref()?.dpi.max(96) as f32 / 96.0;
         let inset = (layout::PHOTO_INSET * scale).round() as i32;
         Some(paper.inflate(inset))
     }
@@ -3077,7 +1468,7 @@ impl App {
     /// hit test undoes the lean about the card's centre instead of trusting
     /// the upright rectangle (NOTE-EDITOR.md §4.5).
     fn note_hover_hits(&self, x: i32, y: i32) -> bool {
-        let Some(hover) = self.note_hover.as_ref() else {
+        let Some(hover) = self.state.note_hover.as_ref() else {
             return false;
         };
         let scale = hover.dpi.max(96) as f32 / 96.0;
@@ -3108,54 +1499,27 @@ impl App {
     /// The peeking corner, fast entry drop, follow/float and fly-out
     /// (NOTE-EDITOR.md §3.1, §4.3).
     fn update_note_entry(&mut self, now: f64) {
-        if !self.is_revealed || self.note_editor.is_some() || self.menu_open || self.dragging {
-            if self.note_hover.is_some() || self.note_peek_on {
+        if !self.state.is_revealed
+            || self.windows.note_editor.is_some()
+            || self.windows.menu_open
+            || self.state.dragging
+        {
+            if self.state.note_hover.is_some() || self.state.note_peek_on {
                 logging::trace(format!(
                     "note entry reset: revealed={} editor={} menu={} dragging={}",
-                    self.is_revealed,
-                    self.note_editor.is_some(),
-                    self.menu_open,
-                    self.dragging
+                    self.state.is_revealed,
+                    self.windows.note_editor.is_some(),
+                    self.windows.menu_open,
+                    self.state.dragging
                 ));
             }
             self.hide_note_peek_now();
-            self.note_hotspot_hovered = false;
+            self.state.note_hotspot_hovered = false;
             self.cancel_note_hover();
             return;
         }
-        let pointer = if self.note_hover_demo {
-            if let Some(pointer) = self.note_peek_pointer {
-                pointer
-            } else {
-                let Some(hotspot) = self.note_entry_hotspot() else {
-                    return;
-                };
-                let Some(overlay) = self.overlay.as_ref() else {
-                    return;
-                };
-                let Some(rect) = win32::window_rect(overlay.hwnd()) else {
-                    return;
-                };
-                let scale = overlay.scale().max(0.1);
-                let (cx, cy) = hotspot.center();
-                // Park the synthetic pointer inside the hotspot: it must stay in
-                // while the offset from the centre shows the pull and the lean.
-                // A narrow hotspot shrinks it.
-                let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
-                let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
-                let dx = self.note_demo_pointer.0.clamp(-limit_x, limit_x);
-                let dy = self.note_demo_pointer.1.clamp(-limit_y, limit_y);
-                let (cx, cy) = (cx + dx, cy + dy);
-                (
-                    rect.left + (cx * scale).round() as i32,
-                    rect.top + (cy * scale).round() as i32,
-                )
-            }
-        } else {
-            let Some(pointer) = win32::cursor_pos() else {
-                return;
-            };
-            pointer
+        let Some(pointer) = self.note_entry_pointer() else {
+            return;
         };
         let (pointer_x, pointer_y) = pointer;
         let Some(screen) = self
@@ -3164,47 +1528,25 @@ impl App {
         else {
             return;
         };
-        let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
-        let (dip_x, dip_y) = self.to_window_dip(pointer_x, pointer_y);
-        let hotspot = self.note_entry_hotspot();
-        // The visible corner sits at the top edge, above the slot itself. The
-        // entry therefore owns the whole column from the screen edge down to
-        // the slot: moving onto the corner (or anywhere below it) opens it.
-        let entry_hit =
-            hotspot.map(|rect| RectF::from_xywh(rect.left, 0.0, rect.width(), rect.bottom));
-        let in_hotspot = entry_hit
+        let scale = self
+            .windows
+            .overlay
             .as_ref()
-            .is_some_and(|rect| rect.contains(dip_x, dip_y));
-        // A fixed margin around the entry keeps the pulled note clickable at
-        // its edge; once the pointer leaves this zone the note flies out. The
-        // note must not be the exit test itself: the pointer pull would keep
-        // bringing it back under the cursor and it would never disappear.
-        let keep_near_entry = entry_hit
-            .as_ref()
-            .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
-        // The whole strip, and a little air around it, is the tool's range: as
-        // soon as the pointer is there the entry advertises itself with a
-        // corner of the blank note. Only stepping onto the hotspot completes it.
-        let in_line_range = self.overlay.as_ref().is_some_and(|overlay| {
-            win32::window_rect(overlay.hwnd()).is_some_and(|rect| {
-                let margin = (12.0 * overlay.scale()).round() as i32;
-                pointer_x >= rect.left - margin
-                    && pointer_x < rect.right + margin
-                    && pointer_y >= rect.top
-                    && pointer_y < rect.bottom + margin
-            })
-        });
-        self.note_hotspot_hovered = in_hotspot;
-        self.set_note_peek(in_line_range && self.note_hover.is_none() && hotspot.is_some());
+            .map(Overlay::scale)
+            .unwrap_or(1.0);
+        let (hotspot, in_hotspot, keep_near_entry, in_line_range) =
+            self.note_entry_zones(pointer_x, pointer_y);
+        self.state.note_hotspot_hovered = in_hotspot;
+        self.set_note_peek(in_line_range && self.state.note_hover.is_none() && hotspot.is_some());
 
         let (card_w, card_h) = layout::note_card_size();
         let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         let work = screen.work;
         let mut bounds = None;
         let mut finished = false;
-        let slow = self.note_slow as f64;
+        let slow = self.dev.note_slow as f64;
 
-        if let Some(hover) = self.note_hover.as_mut() {
+        if let Some(hover) = self.state.note_hover.as_mut() {
             match hover.phase {
                 HoverPhase::In => {
                     let t = ((now - hover.started) / (NOTE_FLY_IN_SECONDS * slow)).clamp(0.0, 1.0)
@@ -3301,8 +1643,10 @@ impl App {
         }
 
         if let Some(bounds) = bounds {
-            if let (Some(hover), Some(preview)) = (self.note_hover.as_ref(), self.preview.as_ref())
-            {
+            if let (Some(hover), Some(preview)) = (
+                self.state.note_hover.as_ref(),
+                self.windows.preview.as_ref(),
+            ) {
                 preview.move_to(bounds);
                 // A window cannot rotate, so the paper is redrawn whenever the
                 // lean changes; moving stays the cheap path in between.
@@ -3314,14 +1658,81 @@ impl App {
         }
     }
 
+    /// The pointer the entry follows: the real cursor, or the scripted one the
+    /// visual acceptance runs park on the hotspot.
+    ///
+    /// The scripted pointer is placed *inside* the hotspot with the offset the
+    /// run asked for (`PEGLINE_NOTE_DEMO_POINTER`), because that offset is what
+    /// shows the pull and the lean of the paper.
+    fn note_entry_pointer(&self) -> Option<(i32, i32)> {
+        if !self.dev.note_hover_demo {
+            return win32::cursor_pos();
+        }
+        if let Some(pointer) = self.dev.note_peek_pointer {
+            return Some(pointer);
+        }
+        let hotspot = self.note_entry_hotspot()?;
+        let overlay = self.windows.overlay.as_ref()?;
+        let rect = win32::window_rect(overlay.hwnd())?;
+        let scale = overlay.scale().max(0.1);
+        let (cx, cy) = hotspot.center();
+        // A narrow hotspot shrinks the parking zone.
+        let limit_x = (hotspot.width() * 0.5 - 3.0).max(0.0);
+        let limit_y = (hotspot.height() * 0.5 - 3.0).max(0.0);
+        let dx = self.dev.note_demo_pointer.0.clamp(-limit_x, limit_x);
+        let dy = self.dev.note_demo_pointer.1.clamp(-limit_y, limit_y);
+        Some((
+            rect.left + ((cx + dx) * scale).round() as i32,
+            rect.top + ((cy + dy) * scale).round() as i32,
+        ))
+    }
+
+    /// Where the pointer sits relative to the entry, in window DIP:
+    /// `(hotspot, on the hotspot, near the entry, anywhere over the strip)`.
+    ///
+    /// The visible corner sits at the top edge, above the slot itself, so the
+    /// entry owns the whole column from the screen edge down to the slot.
+    /// `near` is a fixed 24 DIP margin that keeps the pulled note clickable at
+    /// its edge — the note itself must never be the exit test, or the pull would
+    /// keep bringing it back under the cursor and it would never fly out.
+    fn note_entry_zones(
+        &self,
+        pointer_x: i32,
+        pointer_y: i32,
+    ) -> (Option<RectF>, bool, bool, bool) {
+        let (dip_x, dip_y) = self.to_window_dip(pointer_x, pointer_y);
+        let hotspot = self.note_entry_hotspot();
+        let entry_hit =
+            hotspot.map(|rect| RectF::from_xywh(rect.left, 0.0, rect.width(), rect.bottom));
+        let in_hotspot = entry_hit
+            .as_ref()
+            .is_some_and(|rect| rect.contains(dip_x, dip_y));
+        let keep_near = entry_hit
+            .as_ref()
+            .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
+        // The whole strip, plus a little air, is the tool's range: as soon as the
+        // pointer is there the entry advertises itself with a peeking corner.
+        // Only stepping onto the hotspot completes it.
+        let in_line_range = self.windows.overlay.as_ref().is_some_and(|overlay| {
+            win32::window_rect(overlay.hwnd()).is_some_and(|rect| {
+                let margin = (12.0 * overlay.scale()).round() as i32;
+                pointer_x >= rect.left - margin
+                    && pointer_x < rect.right + margin
+                    && pointer_y >= rect.top
+                    && pointer_y < rect.bottom + margin
+            })
+        });
+        (hotspot, in_hotspot, keep_near, in_line_range)
+    }
+
     fn begin_note_hover(&mut self, now: f64, screen: Monitor, scale: f32) {
         self.hide_note_peek_now();
         self.hide_preview();
-        self.preview_state.reset();
-        if self.preview.is_none() {
+        self.state.preview_state.reset();
+        if self.windows.preview.is_none() {
             match Preview::create() {
                 Ok(preview) => {
-                    self.preview = Some(preview);
+                    self.windows.preview = Some(preview);
                     logging::trace("note preview window created");
                 }
                 Err(error) => {
@@ -3346,11 +1757,11 @@ impl App {
         let color = 0;
         let dpi = screen.dpi;
         let bounds = self.note_preview_bounds(from, dpi);
-        if let Some(preview) = self.preview.as_mut() {
+        if let Some(preview) = self.windows.preview.as_mut() {
             preview.show_note(color, bounds, dpi, layout::NOTE_PEEK_ANGLE_DEG);
         }
-        self.preview_idle_at = None;
-        self.note_hover = Some(HoverNote {
+        self.windows.preview_idle_at = None;
+        self.state.note_hover = Some(HoverNote {
             phase: HoverPhase::In,
             started: now,
             from,
@@ -3362,12 +1773,11 @@ impl App {
             angle: layout::NOTE_PEEK_ANGLE_DEG,
             spin: 0.0,
             float_start: now,
-            color,
             dpi,
             last: now,
             trace_at: now,
         });
-        self.note_pin = true;
+        self.state.note_pin = true;
         self.present();
         // SAFETY: our own message window; the timer id is ours.
         let timer = unsafe { SetTimer(Some(self.hwnd), TIMER_NOTE, NOTE_FOLLOW_MS, None) };
@@ -3381,7 +1791,7 @@ impl App {
     /// in screen pixels. The hover note floats here, not under the pointer.
     fn note_entry_home_px(&self, scale: f32) -> Option<(f32, f32)> {
         let hotspot = self.note_entry_hotspot_layout()?;
-        let overlay = self.overlay.as_ref()?;
+        let overlay = self.windows.overlay.as_ref()?;
         let rect = win32::window_rect(overlay.hwnd())?;
         let (_, card_h) = layout::note_card_size();
         let (center_x, _) = hotspot.center();
@@ -3401,7 +1811,7 @@ impl App {
     /// during a reflow starts the full note where the corner already is.
     fn note_entry_peek_center_px(&self, scale: f32) -> Option<(f32, f32)> {
         let hotspot = self.note_entry_hotspot()?;
-        let overlay = self.overlay.as_ref()?;
+        let overlay = self.windows.overlay.as_ref()?;
         let rect = win32::window_rect(overlay.hwnd())?;
         let (center_x, center_y) = layout::note_peek_center(hotspot.center().0);
         Some((
@@ -3411,7 +1821,7 @@ impl App {
     }
 
     fn cancel_note_hover(&mut self) {
-        if self.note_hover.take().is_some() {
+        if self.state.note_hover.take().is_some() {
             // SAFETY: killing a timer we set on our own message window.
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), TIMER_NOTE);
@@ -3419,16 +1829,16 @@ impl App {
             logging::trace("note hover cancelled");
             self.hide_preview();
         }
-        self.note_pin = false;
-        self.note_hotspot_hovered = false;
+        self.state.note_pin = false;
+        self.state.note_hotspot_hovered = false;
     }
 
     /// Shows or hides the entry's peeking corner. The scene animates it, so the
     /// command is only sent when the state actually changes.
     fn set_note_peek(&mut self, on: bool) {
-        let changed = self.note_peek_on != on;
+        let changed = self.state.note_peek_on != on;
         if changed {
-            self.note_peek_on = on;
+            self.state.note_peek_on = on;
             logging::trace(format!("note peek {on}"));
         }
         // Keep asserting `true`: the scene snaps the peek away when the strip
@@ -3444,15 +1854,15 @@ impl App {
     /// Takes the peeking corner away without its 0.22 s retract, so the full
     /// note replacing it never has a yellow copy shrinking behind it.
     fn hide_note_peek_now(&mut self) {
-        if self.note_peek_on {
-            self.note_peek_on = false;
+        if self.state.note_peek_on {
+            self.state.note_peek_on = false;
             self.send_scene(Command::HideNotePeek);
         }
     }
 
     /// A click on the blank note opens a brand-new note in the editor.
     fn open_new_note_editor(&mut self) {
-        if self.note_editor.is_some() || self.editor.is_some() {
+        if self.windows.note_editor.is_some() || self.windows.editor.is_some() {
             return;
         }
         logging::trace("new note editor requested");
@@ -3461,6 +1871,7 @@ impl App {
         };
         let from = self.note_hover_card_px();
         let angle = self
+            .state
             .note_hover
             .as_ref()
             .map(|hover| hover.angle)
@@ -3479,17 +1890,18 @@ impl App {
         });
         match NoteEditor::open_hidden(String::new(), 0, monitor.dpi, monitor, notify) {
             Ok(editor) => {
-                self.note_editor = Some(editor);
-                self.note_editing = Some(EditingNote {
+                self.windows.note_editor = Some(editor);
+                self.sessions.note_editing = Some(EditingNote {
                     path: None,
                     card: None,
                     original: String::new(),
                     color: 0,
                 });
-                self.note_committing = false;
+                self.sessions.note_committing = false;
                 self.present();
                 self.reveal(true, 0.0);
                 let image = self
+                    .windows
                     .note_editor
                     .as_mut()
                     .and_then(NoteEditor::take_flight_image)
@@ -3500,26 +1912,28 @@ impl App {
                     (Some(from), Some(to), Some(image)) => {
                         // A brand-new note is not hanging yet, so its flight has
                         // no clothespin.
-                        self.ensure_flight().is_some_and(|flight| {
-                            flight.fly_entry(
-                                NOTE_FLIGHT_TOKEN,
-                                FlightImage::Ready(image),
-                                start_image,
-                                from,
-                                to,
-                                angle,
-                                PinMode::Hidden,
-                                dpi,
-                                true,
-                            )
-                        })
+                        self.windows
+                            .ensure_flight(&self.events_tx)
+                            .is_some_and(|flight| {
+                                flight.fly_entry(
+                                    NOTE_FLIGHT_TOKEN,
+                                    FlightImage::Ready(image),
+                                    start_image,
+                                    from,
+                                    to,
+                                    angle,
+                                    PinMode::Hidden,
+                                    dpi,
+                                    true,
+                                )
+                            })
                     }
                     _ => false,
                 };
                 if launched {
-                    self.flight_idle_at = None;
-                    self.note_show_at = Some(win32::now_seconds() + 1.5);
-                } else if let Some(editor) = self.note_editor.as_mut() {
+                    self.windows.flight_idle_at = None;
+                    self.book.note_show_at = Some(win32::now_seconds() + 1.5);
+                } else if let Some(editor) = self.windows.note_editor.as_mut() {
                     editor.show();
                 }
                 logging::trace("new note editor opened from the entry hotspot");
@@ -3533,39 +1947,48 @@ impl App {
     /// sticky note (BEHAVIOR §7).
     fn update_preview(&mut self, now: f64) {
         // The entry hover owns the pooled preview window while it is visible.
-        if self.note_hover.is_some() {
+        if self.state.note_hover.is_some() {
             return;
         }
-        let wanted = self.hover.filter(|id| {
-            self.is_present
-                && self.is_revealed
-                && self.pressed.is_none()
-                && !self.menu_open
-                && self.items.iter().any(|item| item.id == *id)
+        let wanted = self.state.hover.filter(|id| {
+            self.state.is_present
+                && self.state.is_revealed
+                && self.state.pressed.is_none()
+                && !self.windows.menu_open
+                && self.line.items.iter().any(|item| item.id == *id)
         });
         let Some(id) = wanted else {
             self.hide_preview();
-            self.preview_state.reset();
+            self.state.preview_state.reset();
             return;
         };
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             self.hide_preview();
-            self.preview_state.reset();
+            self.state.preview_state.reset();
             return;
         };
         let stamp = item_stamp(item);
         let revision = item.revision;
-        if !self.preview_state.observe(Some(id), revision, stamp, now) {
+        if !self
+            .state
+            .preview_state
+            .observe(Some(id), revision, stamp, now)
+        {
             return;
         }
-        let version = self.preview_state.version();
+        let version = self.state.preview_state.version();
         let Some(card) = self.current_card_px(id) else {
             return;
         };
         let Some(screen) = self.screen else {
             return;
         };
-        let scale = self.overlay.as_ref().map(Overlay::scale).unwrap_or(1.0);
+        let scale = self
+            .windows
+            .overlay
+            .as_ref()
+            .map(Overlay::scale)
+            .unwrap_or(1.0);
         // The preview hangs below the card *and its hover controls*, so the
         // Copy/Open row stays visible and clickable (the WPF app's HoverFrame
         // did the same). Without this the big image covers the buttons.
@@ -3604,7 +2027,7 @@ impl App {
                                 bounds,
                                 dpi,
                             });
-                            window::wake(HWND::default());
+                            window::wake();
                         }
                         None => logging::error("note preview render failed"),
                     }
@@ -3624,7 +2047,7 @@ impl App {
                         bounds,
                         dpi,
                     });
-                    window::wake(HWND::default());
+                    window::wake();
                 }
                 Err(error) => logging::error(format!("preview decode: {error}")),
             });
@@ -3632,10 +2055,10 @@ impl App {
 
     /// Hides the preview and releases its texture. Idempotent.
     fn hide_preview(&mut self) {
-        if let Some(preview) = self.preview.as_mut() {
+        if let Some(preview) = self.windows.preview.as_mut() {
             if preview.is_visible() {
                 preview.hide();
-                self.preview_idle_at = Some(win32::now_seconds());
+                self.windows.preview_idle_at = Some(win32::now_seconds());
             }
         }
     }
@@ -3648,20 +2071,20 @@ impl App {
         bounds: RectI,
         dpi: u32,
     ) {
-        if !self.preview_state.is_current(version) || self.hover != Some(id) {
+        if !self.state.preview_state.is_current(version) || self.state.hover != Some(id) {
             return;
         }
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
-        if !item.path.exists() || !self.is_present || !self.is_revealed {
+        if !item.path.exists() || !self.state.is_present || !self.state.is_revealed {
             return;
         }
         let note = item.note;
-        if self.preview.is_none() {
+        if self.windows.preview.is_none() {
             match Preview::create() {
                 Ok(preview) => {
-                    self.preview = Some(preview);
+                    self.windows.preview = Some(preview);
                     logging::trace("preview window created");
                 }
                 Err(error) => {
@@ -3670,13 +2093,13 @@ impl App {
                 }
             }
         }
-        if let Some(preview) = self.preview.as_mut() {
+        if let Some(preview) = self.windows.preview.as_mut() {
             if note {
                 preview.show_note_content(image, bounds, dpi);
             } else {
                 preview.show(image, bounds, dpi);
             }
-            self.preview_idle_at = None;
+            self.windows.preview_idle_at = None;
         }
     }
 
@@ -3684,7 +2107,7 @@ impl App {
 
     /// `Ctrl+Alt+N`: the clipboard text hangs as a sticky note.
     fn note_shortcut(&mut self) {
-        if self.note_editor.is_some() {
+        if self.windows.note_editor.is_some() {
             logging::trace("note shortcut ignored while the note editor is open");
             return;
         }
@@ -3701,6 +2124,7 @@ impl App {
         }
         // The same text again brings the note already hanging back into view.
         if self
+            .line
             .items
             .iter()
             .any(|item| item.note && item.text.as_deref() == Some(text.as_str()))
@@ -3724,7 +2148,7 @@ impl App {
                             && notes::read(&path).as_deref() == Some(text.as_str())
                         {
                             let _ = tx.send(Event::NoteExisting { path });
-                            window::wake(HWND::default());
+                            window::wake();
                             return;
                         }
                     }
@@ -3744,7 +2168,7 @@ impl App {
                     }
                 };
                 let _ = tx.send(Event::NoteReady { path, text, image });
-                window::wake(HWND::default());
+                window::wake();
             });
     }
 
@@ -3755,17 +2179,17 @@ impl App {
             .unwrap_or("Ctrl+Alt+N")
             .to_string();
         let body = i18n::s().clipboard_empty.replace("{}", &shortcut);
-        if let Some(tray) = self.tray.as_mut() {
+        if let Some(tray) = self.windows.tray.as_mut() {
             tray.show_balloon("Pegline", &body);
         }
         logging::trace("note shortcut: clipboard has no text");
     }
 
     fn on_note_ready(&mut self, path: PathBuf, text: String, image: ImageData, now: f64) {
-        if self.items.iter().any(|item| item.path == path) {
+        if self.line.items.iter().any(|item| item.path == path) {
             return;
         }
-        if self.items.len() >= layout::capacity(100_000.0) {
+        if self.line.items.len() >= layout::capacity(100_000.0) {
             return;
         }
         let id = self.alloc_id();
@@ -3783,8 +2207,8 @@ impl App {
             color,
             Some(text.clone()),
         );
-        self.recent.retain(|recent| recent.path != path);
-        self.recent.push(Recent {
+        self.capture.recent.retain(|recent| recent.path != path);
+        self.capture.recent.push(Recent {
             at: now,
             path,
             own: true,
@@ -3799,7 +2223,7 @@ impl App {
 
     /// Re-renders a note in `color` on a worker and redraws the card.
     fn recolour_note(&mut self, id: CardId, color: usize) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let Some(text) = item.text.clone() else {
@@ -3811,13 +2235,13 @@ impl App {
             .spawn(move || {
                 if let Some(image) = notes::render(&text, color) {
                     let _ = tx.send(Event::NoteImage { id, image });
-                    window::wake(HWND::default());
+                    window::wake();
                 }
             });
     }
 
     fn set_note_color(&mut self, id: CardId, color: usize) {
-        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) else {
             return;
         };
         if !item.note || item.color == color {
@@ -3835,7 +2259,7 @@ impl App {
     /// Opens a hanging note in the WYSIWYG editor. The card stays on the line
     /// (pinned) so the committed note has a slot to land in.
     fn open_note_editor(&mut self, id: CardId) {
-        if self.note_editor.is_some() || self.editor.is_some() {
+        if self.windows.note_editor.is_some() || self.windows.editor.is_some() {
             logging::trace("note editor ignored: another editor is open");
             return;
         }
@@ -3843,7 +2267,7 @@ impl App {
         self.cancel_note_hover();
         // Opening the editor interrupts whatever the flight window was doing.
         self.release_flying_card();
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let Some(text) = item.text.clone().or_else(|| notes::read(&item.path)) else {
@@ -3865,17 +2289,18 @@ impl App {
         });
         match NoteEditor::open_hidden(original.clone(), color, monitor.dpi, monitor, notify) {
             Ok(editor) => {
-                self.note_editor = Some(editor);
-                self.note_editing = Some(EditingNote {
+                self.windows.note_editor = Some(editor);
+                self.sessions.note_editing = Some(EditingNote {
                     path: Some(path),
                     card: Some(id),
                     original,
                     color,
                 });
-                self.note_committing = false;
+                self.sessions.note_committing = false;
                 self.present();
                 self.reveal(true, 0.0);
                 let image = self
+                    .windows
                     .note_editor
                     .as_mut()
                     .and_then(NoteEditor::take_flight_image)
@@ -3883,26 +2308,29 @@ impl App {
                 let to = self.note_editor_card_px();
                 let dpi = monitor.dpi;
                 let launched = match (from, to) {
-                    (Some(from), Some(to)) => self.ensure_flight().is_some_and(|flight| {
-                        flight.fly_entry(
-                            NOTE_FLIGHT_TOKEN,
-                            FlightImage::Ready(image),
-                            Some(card_image),
-                            from,
-                            to,
-                            angle,
-                            PinMode::Leave,
-                            dpi,
-                            true,
-                        )
-                    }),
+                    (Some(from), Some(to)) => self
+                        .windows
+                        .ensure_flight(&self.events_tx)
+                        .is_some_and(|flight| {
+                            flight.fly_entry(
+                                NOTE_FLIGHT_TOKEN,
+                                FlightImage::Ready(image),
+                                Some(card_image),
+                                from,
+                                to,
+                                angle,
+                                PinMode::Leave,
+                                dpi,
+                                true,
+                            )
+                        }),
                     _ => false,
                 };
                 if launched {
-                    self.flight_idle_at = None;
-                    self.note_show_at = Some(win32::now_seconds() + 1.5);
+                    self.windows.flight_idle_at = None;
+                    self.book.note_show_at = Some(win32::now_seconds() + 1.5);
                 } else {
-                    if let Some(editor) = self.note_editor.as_mut() {
+                    if let Some(editor) = self.windows.note_editor.as_mut() {
                         editor.show();
                     }
                     // No flight (the strip is gone or the flight window could
@@ -3915,158 +2343,6 @@ impl App {
         }
     }
 
-    /// `--note-storage-demo`: create a temporary note, edit it through the real
-    /// card editor, save it, archive it through `discard`, and clean up.
-    fn start_note_storage_demo(&mut self) {
-        let text = "storage demo\nline two".to_string();
-        let path = match notes::create(&text) {
-            Ok(path) => path,
-            Err(error) => {
-                logging::error(format!("storage demo create: {error}"));
-                return;
-            }
-        };
-        let Some(image) = notes::render(&text, 0) else {
-            let _ = std::fs::remove_file(&path);
-            logging::error("storage demo render failed");
-            return;
-        };
-        let id = self.alloc_id();
-        self.add_item(
-            id,
-            path.clone(),
-            true,
-            (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
-            image,
-            None,
-            true,
-            false,
-            true,
-            0,
-            Some(text),
-        );
-        self.note_storage_id = Some(id);
-        self.note_storage_path = Some(path.clone());
-        logging::trace(format!("storage demo: created {}", path.display()));
-        self.open_note_editor(id);
-    }
-
-    /// `--note-preview-demo`: one note on an otherwise empty line, with a
-    /// synthetic pointer parked on its card. It makes the note hover preview of
-    /// BEHAVIOR §7 reproducible by hand and by the visual acceptance run.
-    fn start_note_preview_demo(&mut self) {
-        let directory = win32::local_dir().join("demo");
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            logging::error(format!("note preview demo dir: {error}"));
-            return;
-        }
-        let text = "# 便签预览\n\n- 第一项\n- [x] 已完成\n- [ ] 待办\n\n1. 有序一项\n2. 有序二项\n\n> 引用 `代码` 和 **粗体**。\n\nA longer line of English text so the preview wraps inside the sheet."
-            .to_string();
-        let path = directory.join("note-preview-demo.txt");
-        if let Err(error) = std::fs::write(&path, text.as_bytes()) {
-            logging::error(format!("note preview demo write: {error}"));
-            return;
-        }
-        let Some(image) = notes::render(&text, 0) else {
-            logging::error("note preview demo render failed");
-            return;
-        };
-        let id = self.alloc_id();
-        self.note_preview_demo_card = Some(id);
-        self.add_item(
-            id,
-            path,
-            false,
-            (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
-            image,
-            None,
-            false,
-            false,
-            true,
-            0,
-            Some(text),
-        );
-        self.present();
-        self.reveal(true, 0.0);
-        logging::trace("note preview demo: card hung");
-    }
-
-    fn verify_note_storage_save(&self) {
-        let Some(id) = self.note_storage_id else {
-            return;
-        };
-        let item = self.items.iter().find(|item| item.id == id);
-        let text = item.and_then(|item| item.text.clone()).unwrap_or_default();
-        let bytes = self
-            .note_storage_path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .unwrap_or_default();
-        let has_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
-        let has_crlf = bytes.windows(2).any(|pair| pair == b"\r\n");
-        logging::trace(format!(
-            "storage demo save: has_card={} text_has_edit={} bytes={} bom={has_bom} crlf={has_crlf}",
-            item.is_some(),
-            text.contains("edited"),
-            bytes.len()
-        ));
-    }
-
-    fn finish_note_storage_demo(&mut self) {
-        if let Some(archived) = self.note_storage_archived.take() {
-            logging::trace(format!(
-                "storage demo archive: exists={} path={}",
-                archived.exists(),
-                archived.display()
-            ));
-            let _ = std::fs::remove_file(&archived);
-        }
-        if let Some(path) = self.note_storage_path.take() {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-        if let Some(id) = self.note_storage_id.take() {
-            if self.items.iter().any(|item| item.id == id) {
-                self.remove_item(id);
-            }
-        }
-        self.save_pegged();
-        logging::trace("storage demo complete");
-    }
-
-    /// `--note-editor-demo`: show the editor with a document that exercises the
-    /// v1 Markdown subset and the active-line reveal.
-    fn open_note_demo(&mut self) {
-        if self.note_editor.is_some() {
-            return;
-        }
-        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
-            return;
-        };
-        let text = "# Pegline\n\nA note that edits **in place**: the caret line shows its source and the rest is Markdown.\n\n## Lists\n- first item\n- [x] done\n- [ ] to do\n1. one\n2. two\n\n> A quote.\n\n`inline code` and [a link](https://example.com).\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n\n中文便签：光标所在行显示原文，其余行实时渲染。"
-            .to_string();
-        let tx = self.events_tx.clone();
-        let notify = Box::new(move |event| {
-            let _ = tx.send(Event::NoteEditor(event));
-        });
-        match NoteEditor::open(text.clone(), 0, monitor.dpi, monitor, notify) {
-            Ok(editor) => {
-                self.note_editor = Some(editor);
-                self.note_editing = Some(EditingNote {
-                    path: None,
-                    card: None,
-                    original: text,
-                    color: 0,
-                });
-                self.note_committing = false;
-                self.present();
-                self.reveal(true, 0.0);
-            }
-            Err(error) => logging::error(format!("note editor demo: {error}")),
-        }
-    }
-
     fn on_note_editor_event(&mut self, event: NoteEditorEvent) {
         match event {
             NoteEditorEvent::Copy(text) => {
@@ -4075,16 +2351,16 @@ impl App {
                 }
             }
             NoteEditorEvent::Commit { text, image } => {
-                if self.note_demo {
+                if self.dev.note_demo {
                     // The visual acceptance run needs the window to stay up
                     // while the desktop is captured; a stray click must not
                     // close it.
-                    if let Some(editor) = self.note_editor.as_mut() {
+                    if let Some(editor) = self.windows.note_editor.as_mut() {
                         editor.resume();
                     }
                     return;
                 }
-                self.note_return_image = image;
+                self.sessions.note_return_image = image;
                 self.commit_note(text);
             }
         }
@@ -4093,10 +2369,10 @@ impl App {
     /// Saves the note the editor asked to commit. The window stays open and
     /// disabled until the worker reports.
     fn commit_note(&mut self, text: String) {
-        if self.note_committing || self.note_tumbling {
+        if self.sessions.note_committing || self.sessions.note_tumbling {
             return;
         }
-        let Some(editing) = self.note_editing.as_ref() else {
+        let Some(editing) = self.sessions.note_editing.as_ref() else {
             return;
         };
         logging::trace(format!(
@@ -4126,7 +2402,7 @@ impl App {
             self.fly_note_back_unchanged();
             return;
         }
-        self.note_committing = true;
+        self.sessions.note_committing = true;
         let tx = self.events_tx.clone();
         let _ = std::thread::Builder::new()
             .name("pegline-note-save".to_string())
@@ -4159,7 +2435,7 @@ impl App {
                         });
                     }
                 }
-                window::wake(HWND::default());
+                window::wake();
             });
     }
 
@@ -4168,7 +2444,7 @@ impl App {
     /// close the editor. A brand-new note never reaches this path (empty text
     /// is discarded, typed text is saved).
     fn fly_note_back_unchanged(&mut self) {
-        let Some(editing) = self.note_editing.as_ref() else {
+        let Some(editing) = self.sessions.note_editing.as_ref() else {
             self.close_note_editor();
             return;
         };
@@ -4176,17 +2452,17 @@ impl App {
             self.close_note_editor();
             return;
         };
-        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+        let Some(index) = self.line.items.iter().position(|item| item.id == id) else {
             self.close_note_editor();
             return;
         };
         let (card_image, tilt, card_size) = {
-            let item = &self.items[index];
+            let item = &self.line.items[index];
             (item.thumb.clone(), item.tilt, item.card_size)
         };
-        let image = self.note_return_image.take().unwrap_or(card_image);
+        let image = self.sessions.note_return_image.take().unwrap_or(card_image);
         let from = self.note_editor_card_px();
-        let target = self.card_slot_px(index, self.items.len(), card_size);
+        let target = self.card_slot_px(index, self.line.items.len(), card_size);
         let dpi = self.screen_dpi();
         if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
             logging::trace(format!("unchanged note {id} flies back to its slot"));
@@ -4203,21 +2479,21 @@ impl App {
         image: Option<ImageData>,
         error: Option<String>,
     ) {
-        self.note_committing = false;
-        let return_image = self.note_return_image.take();
+        self.sessions.note_committing = false;
+        let return_image = self.sessions.note_return_image.take();
         if let Some(error) = error {
             logging::error(format!("note save: {error}"));
             // The window keeps the text, flashes its border red and gets its
             // input back (NOTE-EDITOR.md §3.3 step 4, §5.6). No message box:
             // that would lose focus and commit again.
-            if let Some(editor) = self.note_editor.as_mut() {
+            if let Some(editor) = self.windows.note_editor.as_mut() {
                 editor.error();
             }
             return;
         }
         let Some(image) = image else {
             logging::error("note saved but the card bitmap failed to render");
-            if let Some(editor) = self.note_editor.as_mut() {
+            if let Some(editor) = self.windows.note_editor.as_mut() {
                 editor.error();
             }
             return;
@@ -4230,20 +2506,22 @@ impl App {
                     .and_then(|meta| meta.modified())
                     .unwrap_or(UNIX_EPOCH);
                 let tilt = self
+                    .line
                     .items
                     .iter()
                     .find(|item| item.id == id)
                     .map(|item| item.tilt)
                     .unwrap_or(0.0);
                 let target = self
+                    .line
                     .items
                     .iter()
                     .position(|item| item.id == id)
                     .and_then(|index| {
-                        let card_size = self.items[index].card_size;
-                        self.card_slot_px(index, self.items.len(), card_size)
+                        let card_size = self.line.items[index].card_size;
+                        self.card_slot_px(index, self.line.items.len(), card_size)
                     });
-                if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+                if let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) {
                     item.text = Some(text);
                     item.path = path;
                     item.last_write = write;
@@ -4260,19 +2538,20 @@ impl App {
             None => {
                 let id = self.alloc_id();
                 let color = self
+                    .sessions
                     .note_editing
                     .as_ref()
                     .map(|editing| editing.color)
                     .unwrap_or(0);
                 let card_size = layout::card_size(notes::CARD_WIDTH, notes::CARD_HEIGHT);
-                let index = self.items.len();
+                let index = self.line.items.len();
                 let tilt = pseudo_random(id) * 5.0 - 2.5;
                 let target = self.flight_target_px(index, index + 1, card_size);
                 let mut flying = false;
                 let flight_image = return_image.unwrap_or_else(|| image.clone());
                 if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
                     self.release_flying_card();
-                    if let Some(flight) = self.ensure_flight() {
+                    if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
                         let slide_dip = if index == 0 {
                             0.0
                         } else {
@@ -4289,9 +2568,9 @@ impl App {
                             dpi,
                         );
                         if flying {
-                            self.flight_idle_at = None;
-                            self.flying_card = Some(id);
-                            self.flying_rehang = false;
+                            self.windows.flight_idle_at = None;
+                            self.book.flying_card = Some(id);
+                            self.book.flying_rehang = false;
                         }
                     }
                 }
@@ -4331,12 +2610,12 @@ impl App {
         self.present();
         self.reveal(false, PEEK_SECONDS);
         self.send_scene(Command::SetRehang { id, flying: true });
-        if let Some(flight) = self.ensure_flight() {
+        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
             if flight.fly_decorated(id, image, from, target, tilt, 0.0, PinMode::Arrive, dpi) {
-                self.flight_idle_at = None;
-                self.flying_card = Some(id);
-                self.flying_rehang = true;
-                if let Some(flight) = self.flight.as_ref() {
+                self.windows.flight_idle_at = None;
+                self.book.flying_card = Some(id);
+                self.book.flying_rehang = true;
+                if let Some(flight) = self.windows.flight.as_ref() {
                     // `present`/`reveal` may have put the strip above the
                     // flight window; the landing note must stay on top.
                     win32::set_topmost(flight.hwnd());
@@ -4352,8 +2631,8 @@ impl App {
     /// visible in the scene again. The command differs for a new arrival (the
     /// row is waiting to glide) and a returning note (the row never moved).
     fn release_flying_card(&mut self) {
-        if let Some(previous) = self.flying_card.take() {
-            let command = if self.flying_rehang {
+        if let Some(previous) = self.book.flying_card.take() {
+            let command = if self.book.flying_rehang {
                 Command::SetRehang {
                     id: previous,
                     flying: false,
@@ -4366,13 +2645,13 @@ impl App {
             };
             self.send_scene(command);
         }
-        self.flying_rehang = false;
+        self.book.flying_rehang = false;
     }
 
     /// Empty text on an existing note: move its file into `Notes\Archive` and
     /// take the card down (NOTE-EDITOR.md §3.3, §8.3).
     fn archive_note(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let path = item.path.clone();
@@ -4382,14 +2661,14 @@ impl App {
             .spawn(move || {
                 let result = notes::archive(&path);
                 let _ = tx.send(Event::NoteArchived { id, result });
-                window::wake(HWND::default());
+                window::wake();
             });
     }
 
     fn on_note_archived(&mut self, id: CardId, result: Result<PathBuf, String>) {
-        if self.note_storage_id == Some(id) {
+        if self.dev.note_storage_id == Some(id) {
             if let Ok(archived) = &result {
-                self.note_storage_archived = Some(archived.clone());
+                self.dev.note_storage_archived = Some(archived.clone());
             }
         }
         match result {
@@ -4401,7 +2680,7 @@ impl App {
             }
             Err(error) => {
                 logging::error(format!("archive note: {error}"));
-                if let Some(tray) = self.tray.as_mut() {
+                if let Some(tray) = self.windows.tray.as_mut() {
                     tray.show_balloon("Pegline", i18n::s().archive_failed);
                 }
                 // The file is untouched and the card stays; close the empty
@@ -4415,32 +2694,41 @@ impl App {
     /// editor. `SetRehang` hides it in place, so the row keeps the slot the
     /// note will fly back to.
     fn hide_note_card(&mut self) {
-        if let Some(id) = self.note_editing.as_ref().and_then(|editing| editing.card) {
+        if let Some(id) = self
+            .sessions
+            .note_editing
+            .as_ref()
+            .and_then(|editing| editing.card)
+        {
             self.send_scene(Command::SetRehang { id, flying: true });
         }
     }
 
     fn close_note_editor(&mut self) {
         logging::trace("note editor closed");
-        self.note_committing = false;
-        self.note_tumbling = false;
-        self.note_show_at = None;
-        self.note_return_image = None;
+        self.sessions.note_committing = false;
+        self.sessions.note_tumbling = false;
+        self.book.note_show_at = None;
+        self.sessions.note_return_image = None;
         // The card was hidden for the duration of the edit. A return flight
         // that is already carrying it will reveal it on landing; any other
         // close path (a failed save, a failed archive) must put it back here.
-        let card = self.note_editing.as_ref().and_then(|editing| editing.card);
+        let card = self
+            .sessions
+            .note_editing
+            .as_ref()
+            .and_then(|editing| editing.card);
         if let Some(id) = card {
-            let carried = self.flying_rehang && self.flying_card == Some(id);
+            let carried = self.book.flying_rehang && self.book.flying_card == Some(id);
             if !carried {
                 self.send_scene(Command::SetRehang { id, flying: false });
             }
         }
-        self.note_editing = None;
-        if let Some(mut editor) = self.note_editor.take() {
+        self.sessions.note_editing = None;
+        if let Some(mut editor) = self.windows.note_editor.take() {
             editor.shutdown();
         }
-        self.pinned = false;
+        self.state.pinned = false;
     }
 
     /// Throws an empty new note away: the paper shrinks, spins in a random
@@ -4449,7 +2737,7 @@ impl App {
     /// The editor hides at once so the flight is the only thing on screen; the
     /// editor is released when the flight reports it is done.
     fn discard_new_note(&mut self) {
-        let Some(editor) = self.note_editor.as_ref() else {
+        let Some(editor) = self.windows.note_editor.as_ref() else {
             return;
         };
         let Some(paper) = self.note_editor_paper_px() else {
@@ -4458,6 +2746,7 @@ impl App {
         };
         let dpi = win32::window_dpi(editor.hwnd()).max(96);
         let color = self
+            .sessions
             .note_editing
             .as_ref()
             .map(|note| note.color)
@@ -4490,30 +2779,33 @@ impl App {
         // the paper never blinks out between the two windows.
         self.release_flying_card();
         let launched = match image {
-            Some(image) => self.ensure_flight().is_some_and(|flight| {
-                flight.tumble(
-                    TUMBLE_FLIGHT_TOKEN,
-                    image,
-                    from,
-                    spin,
-                    (sideways, lift),
-                    dpi,
-                )
-            }),
+            Some(image) => self
+                .windows
+                .ensure_flight(&self.events_tx)
+                .is_some_and(|flight| {
+                    flight.tumble(
+                        TUMBLE_FLIGHT_TOKEN,
+                        image,
+                        from,
+                        spin,
+                        (sideways, lift),
+                        dpi,
+                    )
+                }),
             None => false,
         };
         if launched {
-            self.flight_idle_at = None;
-            self.note_tumbling = true;
-            self.note_tumble_until = win32::now_seconds() + 2.5;
-            self.pinned = true;
+            self.windows.flight_idle_at = None;
+            self.sessions.note_tumbling = true;
+            self.sessions.note_tumble_until = win32::now_seconds() + 2.5;
+            self.state.pinned = true;
         } else {
             self.close_note_editor();
         }
     }
 
     fn on_thumbnail(&mut self, id: CardId, image: ImageData) {
-        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) else {
             return;
         };
         item.thumb = image.clone();
@@ -4524,16 +2816,16 @@ impl App {
     /// Once a second: a picture or note changed on disk (Paint, Notepad) is
     /// re-decoded so the card and its preview follow (BEHAVIOR §4.5, §7.6).
     fn reload_edited(&mut self, now: f64) {
-        if now - self.last_reload < 1.0 {
+        if now - self.capture.last_reload < 1.0 {
             return;
         }
-        self.last_reload = now;
-        if self.demo {
+        self.capture.last_reload = now;
+        if self.dev.demo {
             return;
         }
         let mut jobs: Vec<(CardId, PathBuf, bool, usize, u32)> = Vec::new();
         let thumb_max = self.thumb_max();
-        for item in &mut self.items {
+        for item in &mut self.line.items {
             let Ok(metadata) = std::fs::metadata(&item.path) else {
                 continue;
             };
@@ -4562,7 +2854,7 @@ impl App {
                     match image {
                         Some(image) => {
                             let _ = tx.send(Event::ThumbnailReady { id, image, text });
-                            window::wake(HWND::default());
+                            window::wake();
                         }
                         None => logging::error(format!("reload {}", path.display())),
                     }
@@ -4576,11 +2868,11 @@ impl App {
     /// saved PNG replaces that card's file and the card reloads in place; a
     /// cancel leaves the file untouched (BEHAVIOR §9.5, §11).
     fn annotate_item(&mut self, id: CardId) {
-        if self.editor.is_some() {
+        if self.windows.editor.is_some() {
             logging::trace("annotate ignored: an editor is already open");
             return;
         }
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         // Notes keep the old "Edit" verb, which opens the WYSIWYG note editor;
@@ -4617,14 +2909,14 @@ impl App {
         area: Option<RectI>,
         source_size: (u32, u32),
     ) {
-        if self.editor.is_some() {
+        if self.windows.editor.is_some() {
             return;
         }
         let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
             return;
         };
         let from = card.and_then(|id| self.current_card_px(id));
-        let item = card.and_then(|id| self.items.iter().find(|item| item.id == id));
+        let item = card.and_then(|id| self.line.items.iter().find(|item| item.id == id));
         let tilt = item.map(|item| item.tilt).unwrap_or(0.0);
         let angle = card
             .and_then(|id| self.current_card_angle(id))
@@ -4635,14 +2927,14 @@ impl App {
         let tx = self.events_tx.clone();
         let notify = Box::new(move |event: EditorEvent| {
             let _ = tx.send(Event::Editor(event));
-            window::wake(HWND::default());
+            window::wake();
         });
         match Editor::open(&path, source_size, monitor.dpi, monitor, !flight, notify) {
             Ok(editor) => {
                 let card_rect = editor.card_px();
                 logging::trace(format!("editor opened for {}", path.display()));
-                self.editor = Some(editor);
-                self.editing = Some(EditingCapture {
+                self.windows.editor = Some(editor);
+                self.sessions.editing = Some(EditingCapture {
                     path,
                     card,
                     own,
@@ -4656,8 +2948,10 @@ impl App {
                     self.present();
                     self.reveal(true, 0.0);
                     let launched = match (from, card_rect, fallback) {
-                        (Some(from), Some(to), Some(fallback)) => {
-                            self.ensure_flight().is_some_and(|flight| {
+                        (Some(from), Some(to), Some(fallback)) => self
+                            .windows
+                            .ensure_flight(&self.events_tx)
+                            .is_some_and(|flight| {
                                 flight.fly_entry(
                                     ANNOTATE_OPEN_TOKEN,
                                     FlightImage::File {
@@ -4673,15 +2967,14 @@ impl App {
                                     monitor.dpi,
                                     false,
                                 )
-                            })
-                        }
+                            }),
                         _ => false,
                     };
                     if launched {
-                        self.flight_idle_at = None;
-                        self.annotate_show_at = Some(win32::now_seconds() + 1.5);
+                        self.windows.flight_idle_at = None;
+                        self.book.annotate_show_at = Some(win32::now_seconds() + 1.5);
                     } else {
-                        if let Some(editor) = self.editor.as_mut() {
+                        if let Some(editor) = self.windows.editor.as_mut() {
                             editor.show();
                         }
                         self.hide_annotated_card();
@@ -4697,7 +2990,12 @@ impl App {
     /// Hides the picture being annotated while the editor is open; the row
     /// keeps its slot (`SetRehang`), so the flight has somewhere to land.
     fn hide_annotated_card(&mut self) {
-        if let Some(id) = self.editing.as_ref().and_then(|editing| editing.card) {
+        if let Some(id) = self
+            .sessions
+            .editing
+            .as_ref()
+            .and_then(|editing| editing.card)
+        {
             self.send_scene(Command::SetRehang { id, flying: true });
         }
     }
@@ -4709,7 +3007,7 @@ impl App {
         flight_image: ImageData,
         now: f64,
     ) {
-        let Some(editing) = self.editing.take() else {
+        let Some(editing) = self.sessions.editing.take() else {
             logging::error("editor saved without an open picture");
             return;
         };
@@ -4721,7 +3019,7 @@ impl App {
         }
         // The watcher may see the same file if the card lives in the screenshots
         // folder; the edit must refresh the existing card, never hang a twin.
-        self.recently_saved.push((target.clone(), now));
+        self.capture.recently_saved.push((target.clone(), now));
         if let Some(id) = editing.card {
             // The landing card must already wear the marks: hand the scene the
             // preview, then let the worker upload the card-sized decode.
@@ -4729,7 +3027,7 @@ impl App {
                 id,
                 image: preview.clone(),
             });
-            if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            if let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) {
                 item.thumb = preview.clone();
                 item.revision = item.revision.wrapping_add(1);
             }
@@ -4737,7 +3035,7 @@ impl App {
             self.fly_picture_back(id, editing.card_rect, editing.tilt, flight_image);
             return;
         }
-        self.recent.retain(|recent| recent.path != target);
+        self.capture.recent.retain(|recent| recent.path != target);
         let own = editing.own || target.starts_with(win32::inbox_dir());
         self.spawn_capture(target, own, editing.area);
         self.close_editor();
@@ -4746,7 +3044,7 @@ impl App {
     /// Re-decodes one card's picture after the annotation editor wrote it.
     fn reload_item_picture(&mut self, id: CardId, path: &Path) {
         let thumb_max = self.thumb_max();
-        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+        if let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) {
             // The one-second disk poll must not decode the same file again.
             item.last_write = std::fs::metadata(path)
                 .and_then(|meta| meta.modified())
@@ -4773,7 +3071,7 @@ impl App {
                             image,
                             text: None,
                         });
-                        window::wake(HWND::default());
+                        window::wake();
                     }
                     Err(error) => logging::error(format!("reload {}: {error}", path.display())),
                 }
@@ -4781,7 +3079,7 @@ impl App {
     }
 
     fn on_editor_cancelled(&mut self, flight_image: Option<ImageData>) {
-        let Some(editing) = self.editing.take() else {
+        let Some(editing) = self.sessions.editing.take() else {
             return;
         };
         if let Some(id) = editing.card {
@@ -4798,7 +3096,9 @@ impl App {
         }
         // A demo capture may own a file to clean up.
         if editing.own {
-            self.recent.retain(|recent| recent.path != editing.path);
+            self.capture
+                .recent
+                .retain(|recent| recent.path != editing.path);
             if let Err(error) = std::fs::remove_file(&editing.path) {
                 logging::error(format!(
                     "editor cancel remove {}: {error}",
@@ -4813,12 +3113,12 @@ impl App {
     /// under the flight and shown on landing; the editor is hidden as soon as
     /// the flight's first frame is up and released when it finishes.
     fn fly_picture_back(&mut self, id: CardId, from: Option<RectI>, tilt: f32, image: ImageData) {
-        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+        let Some(index) = self.line.items.iter().position(|item| item.id == id) else {
             self.close_editor();
             return;
         };
-        let card_size = self.items[index].card_size;
-        let target = self.card_slot_px(index, self.items.len(), card_size);
+        let card_size = self.line.items[index].card_size;
+        let target = self.card_slot_px(index, self.line.items.len(), card_size);
         let from = from.or_else(|| self.current_card_px(id));
         let dpi = self.screen_dpi();
         let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) else {
@@ -4831,7 +3131,7 @@ impl App {
         self.present();
         self.reveal(false, PEEK_SECONDS);
         self.send_scene(Command::SetRehang { id, flying: true });
-        if let Some(flight) = self.ensure_flight() {
+        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
             if flight.fly_decorated(
                 ANNOTATE_CLOSE_TOKEN,
                 image,
@@ -4842,11 +3142,11 @@ impl App {
                 PinMode::Full,
                 dpi,
             ) {
-                self.flight_idle_at = None;
-                self.flying_card = Some(id);
-                self.flying_rehang = true;
-                self.annotate_close_at = Some(win32::now_seconds() + 2.0);
-                if let Some(flight) = self.flight.as_ref() {
+                self.windows.flight_idle_at = None;
+                self.book.flying_card = Some(id);
+                self.book.flying_rehang = true;
+                self.book.annotate_close_at = Some(win32::now_seconds() + 2.0);
+                if let Some(flight) = self.windows.flight.as_ref() {
                     // `present`/`reveal` may have put the strip above the
                     // flight window; the landing picture must stay on top.
                     win32::set_topmost(flight.hwnd());
@@ -4860,38 +3160,22 @@ impl App {
 
     /// Releases the annotation window (hidden or not) and its bookkeeping.
     fn close_editor(&mut self) {
-        self.annotate_show_at = None;
-        self.annotate_close_at = None;
-        self.editing = None;
-        if let Some(mut editor) = self.editor.take() {
+        self.book.annotate_show_at = None;
+        self.book.annotate_close_at = None;
+        self.sessions.editing = None;
+        if let Some(mut editor) = self.windows.editor.take() {
             editor.shutdown();
         }
         // A return flight that is still running owns the card; any other path
         // must make it visible again. A capture flight started by a saved
         // demo picture is not ours: leave its bookkeeping alone.
-        if self.flying_rehang {
-            if let Some(id) = self.flying_card.take() {
+        if self.book.flying_rehang {
+            if let Some(id) = self.book.flying_card.take() {
                 self.send_scene(Command::SetRehang { id, flying: false });
             }
-            self.flying_rehang = false;
+            self.book.flying_rehang = false;
         }
-        self.pinned = false;
-    }
-
-    // ---- drag ghost -------------------------------------------------------
-
-    /// Moves the drag preview with the pointer; driven by a 15 ms timer while
-    /// `DoDragDrop` pumps messages.
-    fn follow_ghost(&mut self) {
-        if !self.ghost_follow {
-            return;
-        }
-        let (Some(cursor), Some(screen)) = (win32::cursor_pos(), self.pointer_screen()) else {
-            return;
-        };
-        if let Some(ghost) = self.ghost.as_mut() {
-            ghost.move_to(cursor, screen.dpi);
-        }
+        self.state.pinned = false;
     }
 
     /// The one-time first-run question from the WPF app: may Pegline take over
@@ -4902,6 +3186,7 @@ impl App {
         let body = win32::wide(i18n::s().catch_body);
         // SAFETY: our own hidden window is the owner; both strings are alive
         // for the call. The box is modal to this thread only.
+        let _modal = window::ModalGuard::enter();
         let answer = unsafe {
             MessageBoxW(
                 // No owner: the line's hidden window is no-activate, and a box
@@ -4925,7 +3210,7 @@ impl App {
     }
 
     fn open_item(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         if let Err(error) = win32::shell_open(&item.path) {
@@ -4936,7 +3221,7 @@ impl App {
     /// Long press: Paint for pictures, the WYSIWYG editor for notes. The
     /// right-click "Edit" command uses the same path (NOTE-EDITOR.md §3.2).
     fn edit_item(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         if item.note {
@@ -4957,7 +3242,7 @@ impl App {
     }
 
     fn save_to_desktop(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         // Follow OneDrive/known-folder redirection: USERPROFILE\Desktop is not
@@ -4981,7 +3266,7 @@ impl App {
     }
 
     fn discard(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         // Notes are never recycled: taking one down moves it to Notes\Archive
@@ -5010,7 +3295,7 @@ impl App {
     /// "Move to Recycle Bin": recycles the file even when it is not ours, then
     /// takes the card down (BEHAVIOR §8.2).
     fn trash_item(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let path = item.path.clone();
@@ -5029,7 +3314,7 @@ impl App {
 
     /// Starts the falling animation for a card that is leaving the line.
     fn start_fall(&mut self, id: CardId) {
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let thumb = item.thumb.clone();
@@ -5044,15 +3329,20 @@ impl App {
         // A drop interrupts a flight in progress; the card left behind must be
         // visible at its slot before it falls.
         self.release_flying_card();
-        if let Some(flight) = self.ensure_flight() {
+        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
             if flight.drop_card(id, thumb, rect, tilt, dpi) {
-                self.flight_idle_at = None;
+                self.windows.flight_idle_at = None;
             }
         }
     }
 
     fn clear_line(&mut self) {
-        let ids: Vec<(CardId, bool)> = self.items.iter().map(|item| (item.id, item.note)).collect();
+        let ids: Vec<(CardId, bool)> = self
+            .line
+            .items
+            .iter()
+            .map(|item| (item.id, item.note))
+            .collect();
         for (id, note) in ids {
             if note {
                 // "Take everything down" archives notes; pictures just leave
@@ -5078,6 +3368,7 @@ impl App {
         }
         self.sound(Cue::Rustle);
         for id in self
+            .line
             .items
             .iter()
             .filter(|item| item.own && !item.note)
@@ -5098,12 +3389,14 @@ impl App {
             });
     }
 
+    // ---- drag ghost -------------------------------------------------------
+
     fn start_drag(&mut self, id: CardId) {
         logging::trace(format!("drag start card {id}"));
-        self.pressed = None;
+        self.state.pressed = None;
         self.hide_preview();
-        self.preview_state.reset();
-        let Some(item) = self.items.iter().find(|item| item.id == id) else {
+        self.state.preview_state.reset();
+        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
             return;
         };
         let path = item.path.clone();
@@ -5116,7 +3409,7 @@ impl App {
         }
         // Click-through while dragging so the drop target under the pointer is
         // reachable; the strip stays visible.
-        if let Some(overlay) = self.overlay.as_mut() {
+        if let Some(overlay) = self.windows.overlay.as_mut() {
             overlay.set_click_through(true);
         }
         self.send_scene(Command::Dragging(Some(id)));
@@ -5125,52 +3418,42 @@ impl App {
         // timer below runs during the modal drag and moves the window.
         if let Some(cursor) = win32::cursor_pos() {
             let dpi = self.screen_dpi().unwrap_or(96);
-            if self.ghost.is_none() {
+            if self.windows.ghost.is_none() {
                 match Ghost::create() {
                     Ok(ghost) => {
-                        self.ghost = Some(ghost);
+                        self.windows.ghost = Some(ghost);
                         logging::trace("drag ghost created");
                     }
                     Err(error) => logging::error(format!("drag ghost: {error}")),
                 }
             }
-            if let Some(ghost) = self.ghost.as_mut() {
+            if let Some(ghost) = self.windows.ghost.as_mut() {
                 ghost.show(&thumb, card_size, cursor, dpi);
-                self.ghost_idle_at = None;
-            }
-            self.ghost_follow = self.ghost.is_some();
-            if self.ghost_follow {
-                // SAFETY: our own window and timer id.
-                unsafe {
-                    let _ = SetTimer(Some(self.hwnd), TIMER_GHOST, GHOST_MS, None);
-                }
+                self.windows.ghost_idle_at = None;
             }
         }
 
-        // A note drags as its text file; only pictures have a PNG payload.
-        let png = if note {
-            Vec::new()
-        } else {
-            std::fs::read(&path).unwrap_or_default()
-        };
+        // A note drags as its text file; only pictures have a PNG payload, and
+        // only when the file is small enough that reading it here is not a
+        // stall. `drag_file` takes ownership so the bytes are not copied again.
+        let png = if note { Vec::new() } else { drag_png(&path) };
         let image = ImageData::new(1, 1, vec![0, 0, 0, 0]);
-        self.dragging = true;
-        let effect = match crate::dragdrop::drag_file(self.hwnd, &path, &image, &png) {
+        self.state.dragging = true;
+        // `DoDragDrop` pumps this thread's messages while `&mut self` is live;
+        // the ghost follows the pointer from its own render thread, so nothing
+        // else has to run in here.
+        let _modal = window::ModalGuard::enter();
+        let effect = match crate::dragdrop::drag_file(self.hwnd, &path, &image, png) {
             Ok(effect) => effect,
             Err(error) => {
                 logging::error(format!("drag: {error}"));
                 0
             }
         };
-        self.dragging = false;
-        self.ghost_follow = false;
-        // SAFETY: the timer was created above on this thread.
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), TIMER_GHOST);
-        }
-        if let Some(ghost) = self.ghost.as_mut() {
+        self.state.dragging = false;
+        if let Some(ghost) = self.windows.ghost.as_mut() {
             ghost.hide();
-            self.ghost_idle_at = Some(win32::now_seconds());
+            self.windows.ghost_idle_at = Some(win32::now_seconds());
         }
         self.send_scene(Command::Dragging(None));
         // Clear the backlog of hook events produced during the modal drag loop.
@@ -5185,7 +3468,7 @@ impl App {
     }
 
     fn show_card_menu(&mut self, id: CardId, x: i32, y: i32) -> Option<CardAction> {
-        let item = self.items.iter().find(|item| item.id == id)?;
+        let item = self.line.items.iter().find(|item| item.id == id)?;
         let (own, note) = (item.own, item.note);
         let strings = i18n::s();
         // Notes keep "Edit" (the note editor); pictures get "Annotate", which
@@ -5219,8 +3502,11 @@ impl App {
                 add(strings.take_down, 7);
                 add(strings.move_to_recycle, 8);
             }
-            self.menu_open = true;
+            self.windows.menu_open = true;
             let _ = SetForegroundWindow(self.hwnd);
+            // The menu runs a nested message loop on this thread while `&mut
+            // self` is live; keep every other message away from `App`.
+            let _modal = window::ModalGuard::enter();
             let chosen = TrackPopupMenu(
                 menu,
                 TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
@@ -5237,7 +3523,7 @@ impl App {
             if let Ok(mut queue) = mouse_queue().lock() {
                 queue.clear();
             }
-            self.menu_open = false;
+            self.windows.menu_open = false;
             match chosen.0 as usize {
                 1 => Some(CardAction::Copy),
                 2 => Some(CardAction::Open),
@@ -5330,7 +3616,7 @@ impl App {
                     twin: None,
                     clip_hash: Some(hash),
                 });
-                window::wake(HWND::default());
+                window::wake();
                 let _ = now;
             });
     }
@@ -5350,7 +3636,7 @@ impl App {
     }
 
     fn send_scene(&self, command: Command) {
-        if let Some(overlay) = self.overlay.as_ref() {
+        if let Some(overlay) = self.windows.overlay.as_ref() {
             overlay.send(command);
         }
     }
@@ -5359,26 +3645,41 @@ impl App {
         if self.quit {
             return;
         }
-        self.quit = true;
-        self.keep_open = false;
         // A note being edited gets up to two seconds to commit; losing the
-        // window without a write would throw the text away (NOTE-EDITOR.md §8.5).
-        if self.note_editor.is_some() {
-            if let Some(editor) = self.note_editor.as_mut() {
+        // window without a write would throw the text away (NOTE-EDITOR.md
+        // §8.5). The wait is polled from the frame loop rather than slept on
+        // here: the UI thread must never block, and the commit result arrives
+        // as a normal `Event` on the next tick.
+        if self.windows.note_editor.is_some() {
+            if let Some(editor) = self.windows.note_editor.as_mut() {
                 editor.commit();
             }
-            let deadline = win32::now_seconds() + 2.0;
-            while win32::now_seconds() < deadline && self.note_editor.is_some() {
-                self.drain_events(win32::now_seconds());
-                if self.note_editor.is_none() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if let Some(mut editor) = self.note_editor.take() {
-                logging::error("note editor still open at quit; its text was not saved");
-                editor.shutdown();
-            }
+            self.state.keep_open = false;
+            self.quit_at = Some(win32::now_seconds() + QUIT_GRACE_SECONDS);
+            return;
+        }
+        self.finish_quit();
+    }
+
+    /// Advances a pending quit: waits, without blocking, for the note editor's
+    /// commit result or for its deadline.
+    fn poll_quit(&mut self, now: f64) {
+        let expired = self.quit_at.is_some_and(|deadline| now >= deadline);
+        if self.windows.note_editor.is_some() && !expired {
+            return;
+        }
+        if self.windows.note_editor.is_some() {
+            logging::error("note editor still open at quit; its text was not saved");
+        }
+        self.finish_quit();
+    }
+
+    /// Closes every window and ends the message loop.
+    fn finish_quit(&mut self) {
+        self.quit = true;
+        self.state.keep_open = false;
+        if let Some(mut editor) = self.windows.note_editor.take() {
+            editor.shutdown();
         }
         if !self.destroyed {
             // SAFETY: our own window.
@@ -5390,130 +3691,8 @@ impl App {
         }
     }
 
-    /// `--editor-demo`: a generated picture in the real annotation editor, so
-    /// the window, the GPU stack and the toolbar can be checked without a real
-    /// capture.
-    /// `--editor-hold` keeps it open for interactive (manual or scripted)
-    /// checks instead of the four-second smoke test.
-    fn install_editor_demo(&mut self) {
-        let (w, h) = (900u32, 600u32);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let index = ((y * w + x) * 4) as usize;
-                pixels[index] = (40 + x * 180 / w) as u8;
-                pixels[index + 1] = (60 + y * 150 / h) as u8;
-                pixels[index + 2] = 200u8.saturating_sub((x * 120 / w) as u8);
-                pixels[index + 3] = 255;
-            }
-        }
-        let image = ImageData::new(w, h, pixels);
-        let encoded = match wic::encode_png_bytes(&image) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                logging::error(format!("editor demo encode: {error}"));
-                return;
-            }
-        };
-        let directory = win32::local_dir();
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            logging::error(format!("editor demo dir: {error}"));
-            return;
-        }
-        let path = directory.join("editor-demo.png");
-        if let Err(error) = wic::write_png_bytes(&path, &encoded) {
-            logging::error(format!("editor demo write: {error}"));
-            return;
-        }
-        self.open_editor_for(path, false, None, (w, h));
-        let hold = std::env::args().any(|arg| arg == "--editor-hold");
-        self.editor_demo_at = if hold {
-            None
-        } else {
-            Some(win32::now_seconds() + 4.0)
-        };
-    }
-
-    /// The first card that belongs to the development demo folder, if any.
-    /// `--annotate-demo` only ever edits one of these, never a user picture.
-    fn demo_card_id(&self) -> Option<CardId> {
-        let directory = win32::local_dir().join("demo");
-        self.items
-            .iter()
-            .find(|item| item.path.starts_with(&directory))
-            .map(|item| item.id)
-    }
-
-    fn install_demo_cards(&mut self) {
-        let directory = win32::local_dir().join("demo");
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            logging::error(format!("demo dir: {error}"));
-        }
-        for index in 0..3u32 {
-            let (w, h) = match index {
-                0 => (480, 270),
-                1 => (270, 480),
-                _ => (300, 300),
-            };
-            let mut pixels = vec![0u8; (w * h * 4) as usize];
-            for y in 0..h {
-                for x in 0..w {
-                    let i = ((y * w + x) * 4) as usize;
-                    pixels[i] = (40 + (x * 180 / w)) as u8;
-                    pixels[i + 1] = (80 + (y * 120 / h)) as u8;
-                    pixels[i + 2] = 180 + (index * 20) as u8;
-                    pixels[i + 3] = 255;
-                }
-            }
-            let id = self.alloc_id();
-            let size_px = (w, h);
-            let card_size = layout::card_size(w as f32, h as f32);
-            let tilt = pseudo_random(id) * 5.0 - 2.5;
-            // Demo cards use real files so the hover preview, copy and open
-            // exercise the same decode path as a real capture. `own` stays
-            // false: the files belong to the demo folder, not the user.
-            let file = directory.join(format!("demo-{index}.png"));
-            let path = match wic::encode_png_bytes(&ImageData::new(w, h, pixels.clone()))
-                .and_then(|bytes| wic::write_png_bytes(&file, &bytes))
-            {
-                Ok(()) => file,
-                Err(error) => {
-                    logging::error(format!("demo card {index}: {error}"));
-                    PathBuf::from(format!("demo://card{index}"))
-                }
-            };
-            self.items.push(Item {
-                id,
-                path,
-                own: false,
-                note: false,
-                color: 0,
-                text: None,
-                size_px,
-                card_size,
-                tilt,
-                thumb: ImageData::new(w, h, pixels.clone()),
-                missing: 0,
-                last_write: UNIX_EPOCH,
-                revision: 1,
-                captured_at: 0.0,
-            });
-            self.send_scene(Command::AddCard(CardSpec {
-                id,
-                card_size,
-                tilt,
-                arriving: false,
-                image: Some(ImageData::new(w, h, pixels)),
-                note: false,
-            }));
-        }
-        self.present();
-        self.keep_open = true;
-        self.reveal(true, 0.0);
-    }
-
     fn shutdown(&mut self) {
-        if let Some(hook) = self.hook.take() {
+        if let Some(hook) = self.windows.hook.take() {
             // SAFETY: the hook was installed by this thread.
             unsafe {
                 let _ = UnhookWindowsHookEx(hook);
@@ -5524,25 +3703,25 @@ impl App {
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_TOGGLE);
             let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_NOTE);
         }
-        if let Some(tray) = self.tray.as_mut() {
+        if let Some(tray) = self.windows.tray.as_mut() {
             tray.remove();
         }
-        if let Some(overlay) = self.overlay.as_mut() {
+        if let Some(overlay) = self.windows.overlay.as_mut() {
             overlay.shutdown();
         }
-        if let Some(flight) = self.flight.as_mut() {
+        if let Some(flight) = self.windows.flight.as_mut() {
             flight.shutdown();
         }
-        if let Some(preview) = self.preview.as_mut() {
+        if let Some(preview) = self.windows.preview.as_mut() {
             preview.shutdown();
         }
-        if let Some(ghost) = self.ghost.as_mut() {
+        if let Some(ghost) = self.windows.ghost.as_mut() {
             ghost.shutdown();
         }
-        if let Some(mut editor) = self.editor.take() {
+        if let Some(mut editor) = self.windows.editor.take() {
             editor.shutdown();
         }
-        if let Some(watcher) = self.watcher.as_mut() {
+        if let Some(watcher) = self.capture.watcher.as_mut() {
             watcher.stop();
         }
         if !self.destroyed && !self.hwnd.is_invalid() {
@@ -5586,6 +3765,23 @@ unsafe extern "system" fn hidden_wndproc(
             windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
         )
     } as *mut App;
+
+    if !pointer.is_null() && window::in_modal_loop() {
+        // A menu, message box, OLE drag or the shortcut recorder is pumping
+        // messages on this thread, and the frame that entered it still holds
+        // `&mut App`. Dereferencing the pointer here would create a second
+        // mutable reference to the same object: undefined behaviour.
+        //
+        // Timers re-arm themselves, so dropping them costs at most one tick.
+        // The rest is queued and re-posted when the outermost loop exits.
+        if matches!(
+            message,
+            WM_CLIPBOARDUPDATE | WM_HOTKEY | WM_TRAY_CALLBACK | WM_APP_WAKE | WM_CLOSE
+        ) {
+            window::defer_message(hwnd, message, wparam, lparam);
+        }
+        return LRESULT(0);
+    }
 
     if !pointer.is_null() {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -5641,6 +3837,25 @@ fn post_note_text(hwnd: HWND, text: &str) {
             }
         }
     }
+}
+
+/// The encoded PNG a drag offers under the registered `PNG` clipboard format.
+///
+/// Empty for anything the UI thread should not read: a note (which drags as its
+/// text file) or a picture too large to read without stalling the pointer.
+fn drag_png(path: &Path) -> Vec<u8> {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Vec::new();
+    };
+    if metadata.len() > DRAG_PNG_MAX {
+        logging::trace(format!(
+            "drag: {} is {} bytes; offering the file only",
+            path.display(),
+            metadata.len()
+        ));
+        return Vec::new();
+    }
+    std::fs::read(path).unwrap_or_default()
 }
 
 /// A file's last write time as whole seconds since the epoch; 0 when unknown.
@@ -5796,15 +4011,6 @@ fn tilted_card_hits(
     let local_x = dx * cos + dy * sin;
     let local_y = -dx * sin + dy * cos;
     local_x.abs() <= half_w && local_y.abs() <= half_h
-}
-
-/// Parses `PEGLINE_NOTE_DEMO_POINTER` (`x,y`, DIP). A malformed value keeps the
-/// default pointer instead of failing the launch.
-fn parse_demo_pointer(text: &str) -> Option<(f32, f32)> {
-    let (x, y) = text.split_once(',')?;
-    let x = x.trim().parse::<f32>().ok()?;
-    let y = y.trim().parse::<f32>().ok()?;
-    (x.is_finite() && y.is_finite()).then_some((x, y))
 }
 
 /// Keeps a hover-note centre far enough inside the work area that the whole
@@ -5980,8 +4186,8 @@ mod tests {
         let mut app = App::new();
         let mut card = twin_card(false, 0.0, before);
         card.path = path.clone();
-        app.items.push(card);
-        app.editing = Some(EditingCapture {
+        app.line.items.push(card);
+        app.sessions.editing = Some(EditingCapture {
             path: path.clone(),
             card: Some(1),
             own: false,
@@ -5995,8 +4201,12 @@ mod tests {
         let marked = wic::encode_png_bytes(&after).expect("encode after");
         app.on_editor_saved(marked, after.clone(), after, 1.0);
 
-        assert!(app.editing.is_none(), "the edit must finish");
-        assert_eq!(app.items.len(), 1, "an annotation must not hang a twin");
+        assert!(app.sessions.editing.is_none(), "the edit must finish");
+        assert_eq!(
+            app.line.items.len(),
+            1,
+            "an annotation must not hang a twin"
+        );
         assert_eq!(
             wic::pixel_size(&path).expect("saved file"),
             (3, 2),
@@ -6074,7 +4284,6 @@ mod tests {
             angle: 0.0,
             spin: 0.0,
             float_start: 0.0,
-            color: 0,
             dpi: 96,
             last: 0.0,
             trace_at: 0.0,
@@ -6210,14 +4419,5 @@ mod tests {
         assert!(!tilted_card_hits((0.0, 0.0), 68.0, 44.0, 5.0, -67.0, -43.0));
         // ...while the paper's own rotated corner is.
         assert!(tilted_card_hits((0.0, 0.0), 68.0, 44.0, 5.0, -60.0, -46.0));
-    }
-
-    #[test]
-    fn the_demo_pointer_parses_only_two_finite_numbers() {
-        assert_eq!(parse_demo_pointer("78,80"), Some((78.0, 80.0)));
-        assert_eq!(parse_demo_pointer(" -78 , -80 "), Some((-78.0, -80.0)));
-        assert_eq!(parse_demo_pointer("78"), None);
-        assert_eq!(parse_demo_pointer("a,80"), None);
-        assert_eq!(parse_demo_pointer("78,NaN"), None);
     }
 }

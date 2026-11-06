@@ -90,15 +90,6 @@ impl RectF {
             self.bottom * factor,
         )
     }
-
-    pub fn round_px(&self) -> RectI {
-        RectI {
-            left: self.left.round() as i32,
-            top: self.top.round() as i32,
-            right: self.right.round() as i32,
-            bottom: self.bottom.round() as i32,
-        }
-    }
 }
 
 /// A rectangle in device pixels, as the desktop reports it.
@@ -202,11 +193,6 @@ impl ImageData {
             && self.height > 0
             && self.bgra.len() == self.width as usize * self.height as usize * 4
     }
-
-    /// Longest side, in pixels. Used for the "don't upscale" rules.
-    pub fn longest_side(&self) -> u32 {
-        self.width.max(self.height)
-    }
 }
 
 impl std::fmt::Debug for ImageData {
@@ -249,6 +235,11 @@ pub enum ActionKind {
 }
 
 /// One card's hit boxes in window DIP, published by the render thread.
+///
+/// The boxes are unrotated: they are expressed in the same frame the card is
+/// laid out in, before the scene swings it. [`HitCard::angle`] and
+/// [`HitCard::pin`] say how it was swung, and the hit tests undo that rotation
+/// so a click lands where the card is drawn.
 #[derive(Clone, Debug, Default)]
 pub struct HitCard {
     pub id: CardId,
@@ -267,6 +258,10 @@ pub struct HitCard {
     /// The card's current visual angle, degrees, swing plus its fixed tilt.
     /// The annotations flight starts from this angle and settles upright.
     pub angle: f32,
+    /// The rotation origin of that angle, in window DIP: the clothespin at the
+    /// top of the frame. The card is drawn swung about this point, so the hit
+    /// tests turn the pointer back around it.
+    pub pin: (f32, f32),
     /// The four colour dots, in colour order; empty unless the note is hovered.
     pub swatches: [RectF; 4],
 }
@@ -287,9 +282,31 @@ pub struct FrameSnapshot {
     pub note_entry_x: Option<f32>,
 }
 
+impl HitCard {
+    /// The pointer in the card's own frame, where its boxes live.
+    ///
+    /// The scene draws the card swung by [`HitCard::angle`] about
+    /// [`HitCard::pin`], so a hit test has to rotate the pointer back by the
+    /// same amount before testing the unrotated rectangles. At rest the angle
+    /// is 0 and this is the identity, so an upright card is tested exactly as
+    /// before.
+    fn in_card_frame(&self, x_dip: f32, y_dip: f32) -> (f32, f32) {
+        if self.angle == 0.0 {
+            return (x_dip, y_dip);
+        }
+        let (sin, cos) = self.angle.to_radians().sin_cos();
+        let dx = x_dip - self.pin.0;
+        let dy = y_dip - self.pin.1;
+        (
+            self.pin.0 + dx * cos + dy * sin,
+            self.pin.1 - dx * sin + dy * cos,
+        )
+    }
+}
+
 impl FrameSnapshot {
     pub fn card_at(&self, x_dip: f32, y_dip: f32) -> Option<CardId> {
-        self.card_at_impl(x_dip, y_dip, 10.0)
+        self.card_at_impl(x_dip, y_dip, crate::layout::HIT_TOLERANCE)
     }
 
     /// The same lookup without the generous hover margin. Clicks and context
@@ -304,20 +321,19 @@ impl FrameSnapshot {
         self.cards
             .iter()
             .find(|card| {
-                if card.frame.inflated(tolerance).contains(x_dip, y_dip) {
+                // The tolerance is in DIP and stays so: it is applied to the
+                // box in the card's own frame, not to the rotated result.
+                let (x, y) = card.in_card_frame(x_dip, y_dip);
+                if card.frame.inflated(tolerance).contains(x, y) {
                     return true;
                 }
                 if tolerance > 0.0 {
                     // Hovering may span the whole action row, including the gap
                     // between the two pills.
-                    if !card.actions.is_empty()
-                        && card.actions.inflated(tolerance).contains(x_dip, y_dip)
-                    {
+                    if !card.actions.is_empty() && card.actions.inflated(tolerance).contains(x, y) {
                         return true;
                     }
-                } else if card.primary_button.contains(x_dip, y_dip)
-                    || card.open_button.contains(x_dip, y_dip)
-                {
+                } else if card.primary_button.contains(x, y) || card.open_button.contains(x, y) {
                     // A click in the 6 DIP gap between the pills is not a
                     // button press and should not fall through to the card
                     // either.
@@ -325,7 +341,7 @@ impl FrameSnapshot {
                 }
                 card.swatches
                     .iter()
-                    .any(|swatch| swatch.inflated(tolerance).contains(x_dip, y_dip))
+                    .any(|swatch| swatch.inflated(tolerance).contains(x, y))
             })
             .map(|card| card.id)
     }
@@ -336,10 +352,12 @@ impl FrameSnapshot {
     /// swallowed by either of them.
     pub fn action_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, ActionKind)> {
         for card in &self.cards {
-            if card.primary_button.contains(x_dip, y_dip) {
+            // The pills are drawn inside the card's swing like the rest of it.
+            let (x, y) = card.in_card_frame(x_dip, y_dip);
+            if card.primary_button.contains(x, y) {
                 return Some((card.id, card.primary_action));
             }
-            if card.open_button.contains(x_dip, y_dip) {
+            if card.open_button.contains(x, y) {
                 return Some((card.id, ActionKind::Open));
             }
         }
@@ -349,8 +367,9 @@ impl FrameSnapshot {
     /// The note colour dot under the pointer, if any.
     pub fn swatch_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, usize)> {
         for card in &self.cards {
+            let (x, y) = card.in_card_frame(x_dip, y_dip);
             for (index, swatch) in card.swatches.iter().enumerate() {
-                if swatch.contains(x_dip, y_dip) {
+                if swatch.contains(x, y) {
                     return Some((card.id, index));
                 }
             }
@@ -373,6 +392,8 @@ mod tests {
             open_button: RectF::new(186.0, 206.0, 280.0, 232.0),
             note: false,
             angle: 0.0,
+            // The clothespin sits PIN_ABOVE the frame's top, on the centre.
+            pin: (200.0, 36.0),
             swatches: [RectF::default(); 4],
         }
     }
@@ -414,5 +435,57 @@ mod tests {
         assert_eq!(snapshot.action_at(183.0, 220.0), None);
         assert_eq!(snapshot.card_at_exact(183.0, 220.0), None);
         assert_eq!(snapshot.card_at(183.0, 220.0), Some(7));
+    }
+
+    /// A point of the card's own frame, placed where the scene draws it: swung
+    /// about the pin by `angle`, the same matrix `Scene::draw_card` sets.
+    fn drawn(card: &HitCard, x: f32, y: f32) -> (f32, f32) {
+        let rotation = windows_numerics::Matrix3x2::rotation_around(
+            card.angle,
+            windows_numerics::Vector2 {
+                X: card.pin.0,
+                Y: card.pin.1,
+            },
+        );
+        (
+            x * rotation.M11 + y * rotation.M21 + rotation.M31,
+            x * rotation.M12 + y * rotation.M22 + rotation.M32,
+        )
+    }
+
+    #[test]
+    fn a_swinging_card_is_hit_where_it_is_drawn() {
+        let tilted = FrameSnapshot {
+            cards: vec![HitCard {
+                angle: 18.0,
+                ..card(7)
+            }],
+            ..snapshot()
+        };
+        let card = &tilted.cards[0];
+
+        // The bottom corners of a card swung 18° about its pin sit about 50 DIP
+        // away from the upright box. They are on the card the pointer is over,
+        // so a click there has to find it.
+        for (x, y) in [(103.0, 197.0), (297.0, 197.0)] {
+            let (x, y) = drawn(card, x, y);
+            assert_eq!(tilted.card_at_exact(x, y), Some(7), "corner at {x}, {y}");
+        }
+
+        // The upright box is not the card any more: its old bottom-right corner
+        // is well outside the swung frame, even with the hover slop.
+        assert_eq!(tilted.card_at(290.0, 190.0), None);
+        assert_eq!(tilted.card_at_exact(290.0, 190.0), None);
+
+        // The slop still applies, still 10 DIP, and is measured along the card:
+        // 4 DIP left of the swung edge hovers but does not click.
+        let (x, y) = drawn(card, 96.0, 150.0);
+        assert_eq!(tilted.card_at(x, y), Some(7));
+        assert_eq!(tilted.card_at_exact(x, y), None);
+
+        // The hover pills swing with the card, so an "Annotate" that is drawn
+        // to the left of the upright row is still a press on that pill.
+        let (x, y) = drawn(card, 150.0, 219.0);
+        assert_eq!(tilted.action_at(x, y), Some((7, ActionKind::Annotate)));
     }
 }

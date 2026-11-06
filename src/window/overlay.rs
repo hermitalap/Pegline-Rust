@@ -394,8 +394,14 @@ fn render_thread(
             continue;
         }
 
-        // Optional frame cap: sleep out the rest of the period, then let
+        // Optional frame cap: wait out the rest of the period, then let
         // `Present(1, 0)` block on the next vertical blank.
+        //
+        // `thread::sleep` is only as precise as the process timer resolution.
+        // Measured on this machine it lands within ~0.4 ms of the request
+        // (`probe --mode=timer`), because Windows raises the resolution for a
+        // process with a window. A high-resolution waitable timer was tried and
+        // made no measurable difference, so it was not kept.
         if frame_cap > 0.0 {
             let since = win32::now_seconds() - last_present;
             if since < frame_cap {
@@ -430,12 +436,21 @@ fn render_thread(
         needs_frame = animating;
 
         if lost > 0 {
-            // Rebuild the device; the scene keeps its layout and springs but
-            // loses its textures, so the UI is asked to resend the cards.
+            // Rebuild the device at the size the line is at *now*, not the size
+            // it started at: a monitor switch may have resized it since.
+            //
+            // The scene keeps its layout but loses every uploaded bitmap, so the
+            // line comes back empty. There is no reload channel from the render
+            // thread yet; the next capture or a restart re-hangs the cards.
             if lost > 3 {
                 logging::error("overlay renderer lost too many times; stopping");
                 break;
             }
+            let (width_px, height_px, dpi) = (
+                renderer.width_px,
+                renderer.height_px,
+                renderer.dpi.round().max(96.0) as u32,
+            );
             match crate::render::Renderer::new(hwnd.0, width_px, height_px, dpi) {
                 Ok(rebuilt) => {
                     renderer = rebuilt;
@@ -471,6 +486,23 @@ fn handle(
 ) -> bool {
     match command {
         Command::Stop => false,
+        Command::Layout {
+            width_px,
+            height_px,
+            dpi,
+        } => {
+            // The UI thread already resized the window, so the swap chain must
+            // follow: DXGI_SCALING_STRETCH would otherwise stretch the old
+            // surface across the new window, which blurs the line and puts the
+            // cards off the pixel grid after a DPI change.
+            if let Err(error) = renderer.resize(width_px, height_px, dpi) {
+                // Not fatal: the next `Present` reports the device loss and the
+                // rebuild path recreates the swap chain at the current size.
+                logging::error(format!("overlay resize: {error}"));
+            }
+            scene.set_layout(width_px, height_px, dpi);
+            true
+        }
         Command::SetVisible(on) => {
             *visible = on;
             scene.apply(Command::SetVisible(on), renderer, win32::now_seconds());
@@ -492,6 +524,28 @@ fn handle(
 /// SAFETY: the window is created and destroyed on the UI thread; this procedure
 /// only reads message parameters.
 unsafe extern "system" fn overlay_wndproc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // A panic may not unwind out of an `extern "system"` function: it aborts the
+    // whole process. Contain it so one bad message cannot take the tray icon
+    // down with it.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        overlay_wndproc_inner(hwnd, message, wparam, lparam)
+    })) {
+        Ok(result) => result,
+        Err(_) => {
+            crate::logging::error("panic in overlay_wndproc");
+            LRESULT(0)
+        }
+    }
+}
+
+/// The real handler. A plain `unsafe fn` on purpose: a panic must unwind into
+/// the guard above instead of hitting the non-unwinding ABI boundary.
+unsafe fn overlay_wndproc_inner(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,

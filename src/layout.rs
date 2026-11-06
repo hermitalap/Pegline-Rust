@@ -42,8 +42,6 @@ pub const PHOTO_RADIUS: f32 = CARD_RADIUS - PHOTO_INSET;
 pub const CARD_OFFSET_BELOW_TOP: f32 = 26.0 - 12.0;
 /// Slide offset when the line is fully hidden, DIP.
 pub const HIDDEN_SLIDE: f32 = -(PANEL_HEIGHT + 12.0);
-/// Diameter of the discard cross, DIP.
-pub const CROSS_SIZE: f32 = 20.0;
 /// Margin of the discard cross inside the card, DIP.
 pub const CROSS_MARGIN: f32 = 3.0;
 /// The cross is clickable over a slightly larger square, DIP.
