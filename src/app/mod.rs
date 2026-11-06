@@ -3776,11 +3776,24 @@ unsafe extern "system" fn hidden_wndproc(
         // The rest is queued and re-posted when the outermost loop exits.
         if matches!(
             message,
-            WM_CLIPBOARDUPDATE | WM_HOTKEY | WM_TRAY_CALLBACK | WM_APP_WAKE | WM_CLOSE
+            WM_CLIPBOARDUPDATE
+                | WM_HOTKEY
+                | WM_APP_QUIT
+                | WM_TRAY_CALLBACK
+                | WM_APP_WAKE
+                | WM_CLOSE
         ) {
             window::defer_message(hwnd, message, wparam, lparam);
+            return LRESULT(0);
         }
-        return LRESULT(0);
+        // Everything else still has to reach the default procedure, which needs
+        // no `App`. A menu's owner must answer `WM_ENTERIDLE`, `WM_ACTIVATEAPP`
+        // and `WM_SETCURSOR` while the menu runs; returning 0 for those made
+        // USER32 paint the popup's frame, separators and hover pill but no item
+        // text, so the card and tray menus came up as blank white boxes.
+        return unsafe {
+            windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, message, wparam, lparam)
+        };
     }
 
     if !pointer.is_null() {

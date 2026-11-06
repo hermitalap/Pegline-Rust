@@ -579,6 +579,32 @@
 - 未重新做帧率/内存测量：组合布局只在每个拼音键重建一次（和文字布局同一套
   DWrite 缓存），没有新增常驻资源。
 
+### 3.17 菜单变成一整块白板（2026-11-06）
+
+用户报告：卡片右键菜单和托盘菜单**显示一片白色、看不到任何文字**，但可以点击，
+点击也有对应动作。本机 6016×3384 @200%，release 构建。
+
+复现与定位（都同一台机器、同一个进程状态）：
+
+| 步骤 | 结果 |
+|:--|:--|
+| 绕开鼠标，直接向 `PeglineMessage` 投递 `WM_TRAY_CALLBACK` 打开托盘菜单，截屏 | 圆角菜单框、两条分隔线、悬停高亮都在，**没有任何文字**；`GetWindowRect` 380×394 |
+| `PrintWindow` 把菜单画进位图 | 同样只有背景和分隔线：不是合成问题，是**根本没画字** |
+| 同一台机器另开一个 PowerShell 进程，用同样的 `CreatePopupMenu`/`AppendMenuW`/`TrackPopupMenu`（中文标签、同一台显示器） | 文字正常 —— 机器和字体都没问题 |
+| `probe --mode=menu`：同 crate、同 `WS_EX_NOREDIRECTIONBITMAP` 窗口、同 D3D/DComp/D2D/DWrite、同 DPI 感知、同 `OleInitialize`、GUI 子系统、0×0 隐藏所有者 | 文字正常 —— 图形栈、DPI、所有者窗口、OLE 都不是原因 |
+| 主程序里给每个启动步骤（定时器、热键、鼠标钩子、剪贴板、托盘、线带、目录监视、恢复挂图）加 `PEGLINE_SKIP`，全跳过 | 仍是白板 —— 与启动步骤无关 |
+| 去掉 `debug_menu` 里的 `ModalGuard::enter()` | **文字回来了** |
+| 保留 `ModalGuard`，把模态期间收到的消息记进 `trace.log` | `WM_TIMER`、`WM_ACTIVATEAPP`、`WM_SETCURSOR`、`WM_ENTERMENULOOP`、`WM_ENTERIDLE` 等全部被回 0 |
+| 这些消息改交 `DefWindowProcW` | 文字、勾选、分隔线全部正常；菜单尺寸也从 380×394 变成 455×472 |
+
+- 根因：`hidden_wndproc` 在模态期间为了不重入 `&mut App` 而**对所有消息返回 0**，
+  连菜单所有者必须回答的 `WM_ENTERIDLE` / `WM_ACTIVATEAPP` / `WM_SETCURSOR` 也一起
+  吞了，USER32 于是按 0.835 倍（380/455，394/472）的尺寸建立菜单并画出无字的框。
+- 修法：延迟队列之外的消息转给 `DefWindowProcW`（它不需要 `App`，没有重入风险）。
+  卡片菜单与托盘菜单共用同一个所有者窗口和同一条 `TrackPopupMenu` 路径，一处修复
+  两者同时恢复。
+- 证据：`visual/menu-blank-before.png`（修复前，同一菜单）、
+  `visual/menu-fixed-after.png`（修复后，含勾选与分隔线）。
 ## 4. 逐帧结果
 
 - **放下**：0.3 s 悬停后开始，约 0.65 s 内从 -222 DIP 弹到 0，轻微过冲
