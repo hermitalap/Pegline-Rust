@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.3.1 — 2026-11-07
+
+### Fixes
+
+- **The card and tray menus came up as blank white boxes.** The popup drew its
+  frame, separators and hover pill but not one character of its item text, and
+  clicks still ran the right command. While a menu — or a message box, an OLE
+  drag, the shortcut recorder — pumped this thread, the app's window procedure
+  answered **every** message with 0 so it could not touch the `App` borrowed by
+  the frame that entered the loop. A menu's owner still has to answer
+  `WM_ENTERIDLE`, `WM_ACTIVATEAPP` and `WM_SETCURSOR`; without them USER32 laid
+  the popup out at 0.835× and painted no glyphs. Undelivered messages now reach
+  the default procedure, which never touches `App`. The same tray menu went from
+  380×394 with no text to 455×472 with its Chinese labels, check marks and
+  separators. `WM_APP_QUIT` also joins the queue of messages replayed after the
+  loop, so a quit requested while a menu is open is no longer dropped. See
+  `docs/VISUAL-TESTS.md` §3.17 and `docs/DECISIONS.md` D11.
+
+### Changes
+
+- The app, editor, flight and scene modules were split into submodules with no
+  public path changes, and the review behind the split fixed the window
+  lifecycles, the drag ghost's following and the DPI placement of a revealed
+  line. Measured against 2.3.0: unchanged frame rate, draw time and memory
+  (`PLAN.md` §10).
+
 ## 2.3.0 — 2026-11-06
 
 ### Changes
