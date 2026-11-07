@@ -25,6 +25,9 @@ pub(super) struct LineState {
     pub(super) band_suppressed: bool,
     /// Keep the line down regardless of the pointer (a menu, an editor).
     pub(super) keep_open: bool,
+    /// The line was put away on purpose while "Keep line on screen" is on.
+    /// The automatic rule leaves it down until a reveal clears this flag.
+    pub(super) resident_hidden: bool,
     /// While set, the line stays down after a launch until this deadline.
     pub(super) startup_until: Option<f64>,
     /// When to show the one-time "let Pegline handle your screenshots?" box.

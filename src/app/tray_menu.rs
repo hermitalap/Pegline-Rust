@@ -50,6 +50,7 @@ impl super::App {
     pub(super) fn menu_state(&self) -> MenuState {
         MenuState {
             revealed: self.state.is_revealed,
+            line_always: self.settings.line_always(),
             catch_clipboard: self.settings.catch_clipboard(),
             sound_on: !self.settings.sound_off(),
             autostart: win32::autostart_enabled(),
@@ -78,6 +79,10 @@ impl super::App {
     pub(super) fn apply(&mut self, command: MenuCommand) {
         match command {
             MenuCommand::ToggleReveal => self.toggle(),
+            MenuCommand::LineAlways => {
+                let on = !self.settings.line_always();
+                self.set_line_always(on);
+            }
             MenuCommand::CatchScreenshots => {
                 let on = !self.settings.catch_clipboard();
                 self.settings.set_catch_clipboard(on);

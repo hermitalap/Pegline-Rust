@@ -19,6 +19,7 @@ pub mod keys {
     pub const CATCH_OFFERED: &str = "catchOffered";
     pub const CATCH_CLIPBOARD: &str = "catchClipboard";
     pub const SOUND_OFF: &str = "soundOff";
+    pub const LINE_ALWAYS: &str = "lineAlways";
     pub const NOTE_KEY: &str = "noteKey";
     pub const FPS: &str = "fps";
     /// Prefix of the per-note colour keys (`noteColor:<file name>`).
@@ -193,6 +194,17 @@ impl Settings {
         self.save();
     }
 
+    /// "Keep line on screen": the rope stays down even when empty or after the
+    /// pointer moves away. Off unless `lineAlways=1`.
+    pub fn line_always(&self) -> bool {
+        self.bool(keys::LINE_ALWAYS)
+    }
+
+    pub fn set_line_always(&mut self, on: bool) {
+        self.set_bool(keys::LINE_ALWAYS, on);
+        self.save();
+    }
+
     pub fn fps_cap(&self) -> FpsCap {
         FpsCap::parse(self.string(keys::FPS).unwrap_or("auto"))
     }
@@ -273,6 +285,19 @@ mod tests {
         assert!(!settings.bool("c"));
         assert!(settings.bool("d"));
         assert!(!settings.bool("missing"));
+    }
+
+    #[test]
+    fn line_always_defaults_off_and_accepts_true() {
+        let mut settings = Settings {
+            values: parse(""),
+            path: PathBuf::new(),
+        };
+        assert!(!settings.line_always());
+        settings.set_bool(keys::LINE_ALWAYS, true);
+        assert!(settings.line_always());
+        settings.set_bool(keys::LINE_ALWAYS, false);
+        assert!(!settings.line_always());
     }
 
     #[test]

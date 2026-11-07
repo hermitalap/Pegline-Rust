@@ -51,11 +51,13 @@ const ID_OPEN_FOLDER: u32 = 9;
 const ID_SOUND: u32 = 10;
 const ID_AUTOSTART: u32 = 11;
 const ID_EXIT: u32 = 12;
+const ID_LINE_ALWAYS: u32 = 13;
 
 /// The tray menu items, in the order the WPF app showed them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuCommand {
     ToggleReveal,
+    LineAlways,
     Note,
     NoteKey,
     ClearLine,
@@ -71,6 +73,7 @@ pub enum MenuCommand {
 #[derive(Clone, Debug)]
 pub struct MenuState {
     pub revealed: bool,
+    pub line_always: bool,
     pub catch_clipboard: bool,
     pub sound_on: bool,
     pub autostart: bool,
@@ -83,6 +86,7 @@ impl Default for MenuState {
     fn default() -> Self {
         Self {
             revealed: false,
+            line_always: false,
             catch_clipboard: true,
             sound_on: true,
             autostart: false,
@@ -332,6 +336,17 @@ fn build_menu(menu: HMENU, state: &MenuState) -> Result<(), String> {
         strings.show_line
     };
     append_item(menu, MenuCommand::ToggleReveal, toggle, MF_UNCHECKED)?;
+    let line_always = if state.line_always {
+        MF_CHECKED
+    } else {
+        MF_UNCHECKED
+    };
+    append_item(
+        menu,
+        MenuCommand::LineAlways,
+        strings.keep_line_on_screen,
+        line_always,
+    )?;
     append_item(menu, MenuCommand::Note, strings.hang_note, MF_UNCHECKED)?;
 
     let note = shortcut_label(
@@ -414,6 +429,7 @@ fn delete_caught_label(template: &str, count: usize) -> String {
 fn menu_id(command: MenuCommand) -> u32 {
     match command {
         MenuCommand::ToggleReveal => ID_TOGGLE_REVEAL,
+        MenuCommand::LineAlways => ID_LINE_ALWAYS,
         MenuCommand::Note => ID_NOTE,
         MenuCommand::NoteKey => ID_NOTE_KEY,
         MenuCommand::ClearLine => ID_CLEAR_LINE,
@@ -430,6 +446,7 @@ fn menu_id(command: MenuCommand) -> u32 {
 fn command_for_id(id: u32) -> Option<MenuCommand> {
     match id {
         ID_TOGGLE_REVEAL => Some(MenuCommand::ToggleReveal),
+        ID_LINE_ALWAYS => Some(MenuCommand::LineAlways),
         ID_NOTE => Some(MenuCommand::Note),
         ID_NOTE_KEY => Some(MenuCommand::NoteKey),
         ID_CLEAR_LINE => Some(MenuCommand::ClearLine),
@@ -447,8 +464,9 @@ fn command_for_id(id: u32) -> Option<MenuCommand> {
 mod tests {
     use super::*;
 
-    const ALL: [MenuCommand; 10] = [
+    const ALL: [MenuCommand; 11] = [
         MenuCommand::ToggleReveal,
+        MenuCommand::LineAlways,
         MenuCommand::Note,
         MenuCommand::NoteKey,
         MenuCommand::ClearLine,

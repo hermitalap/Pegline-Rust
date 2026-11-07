@@ -15,7 +15,44 @@ use crate::win32::{self, Monitor};
 
 impl super::App {
     pub(super) fn wanted(&self) -> bool {
-        !self.line.items.is_empty() || self.state.keep_open || self.dev.demo
+        !self.line.items.is_empty()
+            || self.state.keep_open
+            || self.settings.line_always()
+            || self.dev.demo
+    }
+
+    /// Whether the automatic "keep line on screen" rule should act. The user
+    /// putting the line away on purpose clears it until something reveals the
+    /// line again.
+    pub(super) fn resident_active(&self) -> bool {
+        self.settings.line_always() && !self.state.resident_hidden
+    }
+
+    /// Stores and applies the tray's "Keep line on screen" switch.
+    pub(super) fn set_line_always(&mut self, on: bool) {
+        self.settings.set_line_always(on);
+        self.state.resident_hidden = false;
+        if on {
+            self.update_resident();
+        }
+    }
+
+    /// Brings the line back when the switch is on but the line is down for a
+    /// reason other than an explicit hide: the strip was dismissed because a
+    /// full-screen app owned the screen, or a reveal was skipped while one did.
+    pub(super) fn update_resident(&mut self) {
+        if !self.resident_active() || self.state.hide_at.is_some() {
+            return;
+        }
+        if self.state.is_present && self.state.is_revealed {
+            return;
+        }
+        if !self.state.is_present {
+            self.present();
+        }
+        if self.state.is_present {
+            self.reveal(false, 0.0);
+        }
     }
 
     pub(super) fn present(&mut self) {
@@ -50,6 +87,11 @@ impl super::App {
     }
 
     pub(super) fn reveal(&mut self, pin: bool, peek: f64) {
+        // A reveal is the user (or a capture) asking for the line: it also
+        // cancels a pending hide and resumes the resident rule after the line
+        // was put away on purpose.
+        self.state.resident_hidden = false;
+        self.state.hide_at = None;
         if !self.state.is_present {
             return;
         }
@@ -95,6 +137,11 @@ impl super::App {
 
     pub(super) fn toggle(&mut self) {
         if self.state.is_revealed {
+            if self.settings.line_always() {
+                // Keep the switch on, but do not fight the user: the resident
+                // rule stays quiet until the next reveal.
+                self.state.resident_hidden = true;
+            }
             self.dismiss(win32::now_seconds());
             // An empty line opened on purpose is dismissed on purpose too; it
             // must not linger forever behind the 0.7 s empty-line rule.

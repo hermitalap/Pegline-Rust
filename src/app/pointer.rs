@@ -208,6 +208,11 @@ impl super::App {
         logging::trace(format!("band click at {x},{y}"));
         if self.state.is_revealed && self.hit_test(x, y).is_none() {
             self.state.pinned = false;
+            if self.settings.line_always() {
+                // A top-band click must be able to get the line out of the way;
+                // the resident rule resumes on the next reveal.
+                self.state.resident_hidden = true;
+            }
             self.set_revealed(false);
         }
     }
@@ -337,6 +342,7 @@ impl super::App {
             }
             let busy = self.state.pinned
                 || self.state.note_pin
+                || self.settings.line_always()
                 || self.state.pressed.is_some()
                 || self.windows.menu_open
                 || now < self.state.peek_until

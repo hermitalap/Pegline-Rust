@@ -38,6 +38,9 @@ pub struct Strings {
     /// Tray menu.
     pub hide_line: &'static str,
     pub show_line: &'static str,
+    /// Tray check item: keep the rope down even when empty or after the
+    /// pointer moves away.
+    pub keep_line_on_screen: &'static str,
     pub hang_note: &'static str,
     pub note_shortcut: &'static str,
     pub none: &'static str,
@@ -106,6 +109,7 @@ const EN: Strings = Strings {
     archive: "Archive",
     hide_line: "Hide line",
     show_line: "Show line",
+    keep_line_on_screen: "Keep line on screen",
     hang_note: "Hang copied text as a note",
     note_shortcut: "Note shortcut",
     none: "none",
@@ -139,7 +143,7 @@ const EN: Strings = Strings {
     cancel: "Cancel",
     line_width: "Line width",
     save_failed: "Pegline could not save this screenshot.",
-    note_placeholder: "Write something…",
+    note_placeholder: "Write something… (basic Markdown supported)",
     new_note: "New note",
     archive_failed: "Pegline could not archive this note.",
     shortcut_hint: "Press the keys you want to use. Include Ctrl, Alt, Shift or Win, or use F1–F24 or PrtScn on their own.",
@@ -165,6 +169,7 @@ const ES: Strings = Strings {
     archive: "Archivar",
     hide_line: "Ocultar tendedero",
     show_line: "Mostrar tendedero",
+    keep_line_on_screen: "Tendedero siempre visible",
     hang_note: "Colgar el texto copiado como nota",
     note_shortcut: "Atajo de nota",
     none: "ninguno",
@@ -198,7 +203,7 @@ const ES: Strings = Strings {
     cancel: "Cancelar",
     line_width: "Grosor",
     save_failed: "Pegline no pudo guardar esta captura.",
-    note_placeholder: "Escribe algo…",
+    note_placeholder: "Escribe algo… (compatible con Markdown básico)",
     new_note: "Nueva nota",
     archive_failed: "Pegline no pudo archivar esta nota.",
     shortcut_hint: "Pulsa las teclas que quieras usar. Incluye Ctrl, Alt, Mayús o Win, o usa F1–F24 o ImprPant solas.",
@@ -224,6 +229,7 @@ const ZH: Strings = Strings {
     archive: "归档",
     hide_line: "收起绳子",
     show_line: "放下绳子",
+    keep_line_on_screen: "挂绳常驻",
     hang_note: "把复制的文字挂成便签",
     note_shortcut: "便签快捷键",
     none: "未设置",
@@ -257,7 +263,7 @@ const ZH: Strings = Strings {
     cancel: "取消",
     line_width: "线宽",
     save_failed: "Pegline 无法保存这张截图。",
-    note_placeholder: "写点什么…",
+    note_placeholder: "写点什么…（支持 Markdown 基本语法）",
     new_note: "新建便签",
     archive_failed: "Pegline 无法归档这张便签。",
     shortcut_hint: "直接按下想用的组合键。需要包含 Ctrl、Alt、Shift 或 Win；F1–F24、PrtScn 可以单独使用。",
@@ -312,6 +318,7 @@ mod tests {
         for strings in [&EN, &ES, &ZH] {
             assert!(!strings.hint.is_empty());
             assert!(!strings.quit.is_empty());
+            assert!(!strings.keep_line_on_screen.is_empty());
             assert!(!strings.annotate.is_empty());
             assert!(!strings.edit.is_empty());
             assert_eq!(strings.delete_caught.matches("{}").count(), 1);

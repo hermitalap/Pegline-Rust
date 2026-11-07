@@ -965,6 +965,7 @@ impl App {
         }
         self.drain_mouse(now);
         self.update_pointer(now);
+        self.update_resident();
         self.update_note_entry(now);
         self.update_timers(now);
         self.update_preview(now);
@@ -1268,12 +1269,16 @@ impl App {
             if now >= until {
                 self.state.startup_until = None;
                 self.state.keep_open = false;
-                if self.line.items.is_empty() {
+                if self.line.items.is_empty() && !self.resident_active() {
                     self.dismiss(now);
                 }
             }
         }
-        if self.line.items.is_empty() && !self.state.keep_open && self.state.is_present {
+        if self.line.items.is_empty()
+            && !self.state.keep_open
+            && !self.resident_active()
+            && self.state.is_present
+        {
             let since = *self.state.empty_since.get_or_insert(now);
             if now - since >= EMPTY_DELAY {
                 self.state.empty_since = None;
