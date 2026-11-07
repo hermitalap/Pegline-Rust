@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.2 — 2026-11-07
+
+### Changes
+
+- **The line can stay down on its own.** A new **Keep line on screen** tray
+  toggle (Chinese “挂绳常驻”, off by default, `lineAlways` in `settings.ini`)
+  keeps the rope down and the strip present when the pointer moves away and when
+  there are no cards. A full-screen app still takes precedence and the line
+  comes back when it leaves; “Hide line” and a click on the top band put it away
+  until the next reveal without clearing the switch.
+- **The note editor's placeholder mentions Markdown.** It now reads “Write
+  something… (basic Markdown supported)” / “Escribe algo… (compatible con
+  Markdown básico)” / “写点什么…（支持 Markdown 基本语法）”, so the Markdown
+  editing the note has always supported is discoverable from the empty paper.
+
 ## 2.3.1 — 2026-11-07
 
 ### Fixes

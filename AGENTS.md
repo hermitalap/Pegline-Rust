@@ -78,13 +78,20 @@ the WYSIWYG note editor, the card button/click changes and the editor-flight
 round below, plus the removal of the M0 spike binary. The tag is `v2.2.0`; the
 portable package is built with `pwsh tools\package-release.ps1`.
 
-**2.3.1 is the current version (2026-11-07)**: it ships the module split, the
+**2.3.1 was released on 2026-11-07**: it ships the module split, the
 window-lifecycle fixes and the blank-menu fix in `docs/DECISIONS.md` D11, and
 measures the same frame rate, draw time and memory as 2.3.0 (`PLAN.md` §10).
 Menus, the message-box confirmations, the shortcut recorder and OLE drags all
 depend on the rule recorded there: while a modal loop runs, the window procedure
 must hand every message it does not queue to `DefWindowProcW` — returning 0 for
 those made USER32 paint the popup with no text at all.
+
+**2.3.2 is the current version (2026-11-07)**: it adds the tray's **Keep line
+on screen** switch (Chinese “挂绳常驻”, `lineAlways`, off by default) and says
+Markdown is supported in the note editor's placeholder. The switch keeps the
+rope down when empty and after the pointer leaves; a full-screen app still takes
+precedence, and hiding the line by hand or clicking the top band pauses the rule
+until the next reveal. `src/app/reveal.rs` owns the rule.
 
 **The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
 `docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the

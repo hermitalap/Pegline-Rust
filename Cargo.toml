@@ -1,6 +1,6 @@
 [package]
 name = "pegline"
-version = "2.3.1"
+version = "2.3.2"
 edition = "2024"
 rust-version = "1.85"
 description = "Screenshots hanging on a clothesline at the top of the screen"
