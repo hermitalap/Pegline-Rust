@@ -536,7 +536,7 @@ fn paint_preview_card(
         card.bottom - inset,
     );
     renderer.draw_shadow(card, 0.18, false);
-    renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
+    renderer.draw_glass(card, layout::CARD_RADIUS, false);
     renderer.draw_photo(bitmap, content, layout::PHOTO_RADIUS);
     renderer.stroke_card(card, layout::CARD_RADIUS, 0.75);
 }

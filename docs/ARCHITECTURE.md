@@ -308,6 +308,7 @@ src/
     device.rs        D3D11 / D2D / DComp / DWrite / 交换链创建（唯一一份）
   render/
     mod.rs           Renderer：设备、交换链、帧提交、绘制原语、画刷/几何缓存
+  mica.rs            壁纸派生的 Mica 纹理：解码、模糊、着色、进程级缓存（2.4.0）
   scene/             线的动画模型
     mod.rs           Scene / Card / 弹簧 / apply / update / publish
     paint.rs         整个场景的绘制

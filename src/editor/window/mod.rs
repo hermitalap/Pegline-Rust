@@ -13,6 +13,7 @@
 
 mod paint;
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -2600,6 +2601,8 @@ struct Surface {
     card_props: D2D1_BITMAP_PROPERTIES1,
     /// The card's baked shadow, the same texture the line uses.
     shadow: Option<crate::render::ShadowBake>,
+    /// Wallpaper Mica for the card frame and the floating pills.
+    mica: RefCell<crate::mica::Mica>,
     width_px: u32,
     height_px: u32,
     dpi: f32,
@@ -2676,6 +2679,7 @@ impl Surface {
             card: None,
             card_props,
             shadow: Some(shadow),
+            mica: RefCell::new(crate::mica::Mica::new(hwnd, dpi_f)),
             width_px,
             height_px,
             dpi: dpi_f,
@@ -2836,6 +2840,7 @@ impl Surface {
             // the opaque card bitmap.
             self.context
                 .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            self.mica.borrow_mut().refresh(&self.context);
             self.context.BeginDraw();
             self.context.Clear(Some(&D2D1_COLOR_F {
                 r: 0.0,

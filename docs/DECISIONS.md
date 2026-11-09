@@ -187,3 +187,51 @@ WPF 版一次飞行一条时间线；Rust 版加了 generation 计数：新的�
 
 同一条托盘菜单：修复前 380×394 无字，修复后 455×472，中文、勾选、分隔线齐全；
 过程与证据在 `docs/VISUAL-TESTS.md` §3.17。
+
+## D12 全局 Mica：壁纸派生的材质，而不是系统背景（2026-11-09）
+
+用户要求把 Fluent Design 的 Acrylic/Mica 用到本项目所有玻璃表面。调研（`docs/research/ACRYLIC-MICA.md`）
+和实测（`probe` 的 `wuc-host` / `wuc-mica` / `dwm-*` 模式）确认：
+
+- `DWMWA_SYSTEMBACKDROP_TYPE` 的 Mica/Acrylic 是**整窗**材质，Mica 不透明，窗口失活时回退为
+  纯色，且只在 Win11 22H2+ 可用；线带是 `WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED |
+  WS_EX_NOACTIVATE` 的点击穿透窗口，系统材质既盖不住它，也不能按卡片/药丸分别应用。
+- WinUI 的 `SystemBackdropElement` 能按元素应用，但要求 WinAppSDK 2.0 运行时，本项目明确拒绝。
+- `Windows.UI.Composition` 的 `CreateHostBackdropBrush` 能在这种窗口上做**实时**背景采样，
+  但要把整条渲染路径迁到 WUC（第二套合成栈、DispatcherQueue、线程模型），代价是 2–3 周，
+  并且首版没有自定义 effect 图；这不是本轮要承担的风险。
+- 壁纸派生的 L1 方案只需要现有 D2D 路径：读壁纸、缩放、CPU 模糊一次、着色、缓存，再在屏幕
+  坐标里采样。它不会采样实时窗口，但能提供 Mica 的“随桌面变化”的观感，Win10 也能用。
+
+实现：
+
+- `src/mica.rs`：`SPI_GETDESKWALLPAPER` → `capture::wic::decode_scaled(1024)` → 按虚拟屏幕
+  等比 cover 到 `TEXTURE_SCALE = 0.17`（6K 屏约 1023×575）→ 3 次盒式模糊（半径 8）→
+  72 % `#F7F7F7` + 28 % 壁纸，叠 ±2 噪声；`MicaImage` 进程级缓存，`GENERATION` 在壁纸或
+  显示布局变化时递增。
+- `Renderer::draw_glass`：优先用 `Mica::fill`（屏幕锚定、随卡片旋转/缩放反向变换），失败时
+  回退 `Brush::Glass`/`GlassLit`。线带卡片/露角/色板/药丸、飞行框、悬停预览、拖拽幽灵和
+  `probe` 的全部玻璃原语都走这个入口。
+- 标注编辑器有自己的 `Surface`：`mica: RefCell<Mica>`，`paint_chrome` / `paint_pill` /
+  悬停按钮先试 Mica，失败才用 `chrome.glass`；选中的工具按钮仍用实色强调色。
+- 便签编辑器只有 1.5 DIP 的玻璃边框、没有填充玻璃面，本轮不替换。
+- `WM_SETTINGCHANGE(SPI_SETDESKWALLPAPER)` 和 `WM_DISPLAYCHANGE` 会递增 generation 并唤醒
+  渲染线程；每个 `Renderer` 在 `begin()` 里检查一次，变化时重建纹理。
+- 透明度关闭（`EnableTransparency=0`）时 `Mica::new` 直接禁用，保留旧的实色玻璃。
+
+取舍与代价：
+
+- **不采样实时窗口**：壁纸方案在壁纸前是“真 Mica”，在窗口前不是 Acrylic；这是 L1 的边界，
+  不是实现缺陷。要实时模糊只能走 WUC，见调研报告。
+- **壁纸样式假设 Fill/cover**：当前按虚拟屏幕等比 cover 裁剪；Center/Tile/Span 等样式会
+  出现位置或重复差异。Win11 默认 Fill 下正确，其他样式留待后续。
+- **4 DIP 相框放不下材质**：卡片玻璃环只有 4 DIP（200 % 下 8 px），Mica 在卡片上几乎不可见；
+  真正能看出材质的是编辑器药丸、预览和线带药丸。没有为此加宽相框。
+- **首帧成本**：壁纸解码+模糊+上传约 54 ms，发生在启动/首次创建 renderer 时；之后的帧
+  只做一次纹理采样。没有把它挪到后台线程，以避免首帧复杂的并发/回退状态。
+- **内存**：每个 renderer 一份约 2.3 MB 的纹理（6K 虚拟屏，0.17 缩放），进程级共享 CPU
+  图像；`probe` 实测 line 97.0 MB（2.3.2 基线 92.2–92.5），static 66.0 MB（58.8），
+  flight 81.4 MB（76.7）；app 的 `--demo` 在 6 s 时 170.3 → **178.8 MB**（+8.5 MB），
+  因为每个窗口的 renderer 各上传一份约 2.3 MB 的纹理。
+- **绘制**：line 的 draw p50 1.635 ms（基线 0.80），仍远低于 8.3 ms 预算；card6 原语
+  0.323 ms。没有做进一步的 bitmap-brush 优化，因为尚未接近预算。

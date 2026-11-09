@@ -13,9 +13,10 @@ use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
-    IDC_ARROW, IDC_HAND, LoadCursorW, MA_NOACTIVATE, SW_HIDE, SetCursor, SetWindowLongPtrW,
-    ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    IDC_ARROW, IDC_HAND, LoadCursorW, MA_NOACTIVATE, SPI_SETDESKWALLPAPER, SW_HIDE, SetCursor,
+    SetWindowLongPtrW, ShowWindow, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -42,6 +43,9 @@ unsafe impl Send for SendHwnd {}
 #[derive(Default)]
 struct CursorState {
     hand: AtomicBool,
+    /// Set once the render channel exists; `WM_SETTINGCHANGE` uses it to wake
+    /// an idle line after a wallpaper change.
+    commands: Mutex<Option<Sender<Command>>>,
 }
 
 /// The line window as seen by the UI thread.
@@ -107,6 +111,9 @@ impl Overlay {
 
         let snapshot = Arc::new(Mutex::new(FrameSnapshot::default()));
         let (tx, rx) = mpsc::channel();
+        if let Ok(mut slot) = cursor.commands.lock() {
+            *slot = Some(tx.clone());
+        }
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread_snapshot = Arc::clone(&snapshot);
         let send_hwnd = SendHwnd(hwnd);
@@ -543,6 +550,24 @@ unsafe extern "system" fn overlay_wndproc(
     }
 }
 
+/// Rebuilds the wallpaper texture and wakes the render thread. Used for both
+/// `SPI_SETDESKWALLPAPER` and display-layout changes, which move the virtual
+/// screen the texture is aligned to.
+unsafe fn notify_mica(hwnd: HWND) {
+    crate::mica::notify_changed();
+    // SAFETY: GWLP_USERDATA holds the live `CursorState`; the lock is
+    // uncontended and released before returning.
+    let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const CursorState;
+    if raw.is_null() {
+        return;
+    }
+    if let Ok(slot) = unsafe { (*raw).commands.lock() } {
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send(Command::WallpaperChanged);
+        }
+    }
+}
+
 /// The real handler. A plain `unsafe fn` on purpose: a panic must unwind into
 /// the guard above instead of hitting the non-unwinding ABI boundary.
 unsafe fn overlay_wndproc_inner(
@@ -554,6 +579,16 @@ unsafe fn overlay_wndproc_inner(
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => return LRESULT(1),
+        WM_SETTINGCHANGE if wparam.0 == SPI_SETDESKWALLPAPER.0 as usize => {
+            // SAFETY: the window is live and its user data is the CursorState.
+            unsafe { notify_mica(hwnd) };
+            return LRESULT(0);
+        }
+        WM_DISPLAYCHANGE => {
+            // SAFETY: the window is live and its user data is the CursorState.
+            unsafe { notify_mica(hwnd) };
+            return LRESULT(0);
+        }
         WM_SETCURSOR if (lparam.0 as u32 & 0xFFFF) == HTCLIENT => {
             // SAFETY: GWLP_USERDATA holds the live `CursorState` while the
             // overlay exists; the pointer is only read on this thread.

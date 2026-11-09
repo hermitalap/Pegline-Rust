@@ -603,3 +603,31 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 真正能通过共享设备省下的更少。而且应用**已经**用"池化窗口空闲 10–30 s 后销毁"把这块
 内存还回去了 —— 共享设备反而会削弱那条路径（丢窗口不再释放设备）。改动要横跨 6 种
 窗口与全部 `Surface`，风险高、收益被现有机制吃掉，最终放弃，只留下这个可复现的测量。
+
+## 11. 全局 Mica（2026-11-09）
+
+2.4.0 把所有有填充玻璃的表面换成壁纸派生的 Mica；决策与边界见 `docs/DECISIONS.md` D12，
+调研见 `docs/research/ACRYLIC-MICA.md`。
+
+- 实现：`src/mica.rs`（壁纸解码/cover/模糊/着色/缓存），`Renderer::draw_glass`，标注编辑器
+  `Surface` 的 `RefCell<Mica>`；壁纸/显示变化通过 `WM_SETTINGCHANGE` / `WM_DISPLAYCHANGE`
+  触发重烘焙。
+- 采样的是壁纸，不是实时窗口；透明度关闭、壁纸读取失败时回退旧实色玻璃；便签编辑器没有
+  填充玻璃面，保持 1.5 DIP 边框。
+- 实测（release，6016×3384 @200%，Intel Arc B390，6 卡）：
+
+| 模式 | 2.3.2 | 2.4.0 | 备注 |
+| --- | --- | --- | --- |
+| line 私有内存 | 92.2–92.5 MB | **97.0 MB** | +4.5–4.8 MB |
+| line 帧率 | 59.95 | 59.95 | p50 16.66 ms |
+| line draw p50 | 0.80 ms | **1.635 ms** | 仍 < 8.3 ms 预算 |
+| static 私有内存 | 58.8 MB | **66.0 MB** | +7.2 MB；首帧 draw 54.276 ms |
+| flight 私有内存 | 76.7 MB | **81.4 MB** | +4.7 MB |
+| app `--demo` 私有内存（6 s） | 170.3 MB | **178.8 MB** | +8.5 MB；每个窗口 renderer 一份纹理 |
+| card6 draw p50 | — | **0.323 ms** | 6 个原语卡片 |
+| exe | 1,799,168 B | **1,819,136 B** | +20 KB |
+
+- 已知限制：4 DIP 卡片相框几乎看不出材质；壁纸按 cover 处理，Center/Tile/Span 样式未适配；
+  首帧 54 ms 未后台化；没有实时窗口背景采样。
+- 视觉证据：`docs/visual/mica-editor-testwall.png`（编辑器药丸随红/绿/蓝壁纸变色）、
+  `docs/visual/mica-line-testwall.png`（线带卡片）、`docs/visual/mica-line.png`（深色壁纸）。

@@ -72,7 +72,7 @@ impl super::Scene {
                 * windows_numerics::Matrix3x2::translation(cx, cy),
         );
         let frame = RectF::from_xywh(-card_w * 0.5, -card_h * 0.5, card_w, card_h);
-        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
+        renderer.draw_glass(frame, layout::CARD_RADIUS, false);
         let paper = RectF::new(
             frame.left + layout::PHOTO_INSET,
             frame.top + layout::PHOTO_INSET,
@@ -133,7 +133,7 @@ impl super::Scene {
         let pushed = renderer.push_opacity(bounds, card.opacity);
 
         renderer.draw_shadow(frame, if hovered { 0.26 } else { 0.18 }, hovered);
-        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
+        renderer.draw_glass(frame, layout::CARD_RADIUS, false);
         if let Some(image) = card.image.as_ref() {
             let photo = RectF::from_xywh(
                 frame.left + layout::PHOTO_INSET,
@@ -184,7 +184,7 @@ impl super::Scene {
                 // The colour dots sit above the buttons in their own glass pill.
                 let pill = layout::swatch_pill(card_h).offset(0.0, lift);
                 let pushed = renderer.push_opacity(pill.inflated(8.0), card.actions_alpha);
-                renderer.fill_round(pill, pill.height() * 0.5, crate::render::Brush::Glass);
+                renderer.draw_glass(pill, pill.height() * 0.5, false);
                 renderer.stroke_card(pill, pill.height() * 0.5, 0.75);
                 for dot in 0..4 {
                     renderer.draw_swatch(

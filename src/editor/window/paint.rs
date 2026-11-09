@@ -58,9 +58,11 @@ impl super::EditorState {
         }
         let card = self.layout.card;
         let frame = rounded(card, layout::CARD_RADIUS);
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            rt.FillRoundedRectangle(&frame, &self.chrome.glass);
+        if !self.fill_glass(card, layout::CARD_RADIUS, false) {
+            // SAFETY: the brushes and the render target are alive.
+            unsafe {
+                rt.FillRoundedRectangle(&frame, &self.chrome.glass);
+            }
         }
         if let Some(bitmap) = self.surface.card.as_ref() {
             self.paint_card_bitmap(bitmap);
@@ -121,15 +123,31 @@ impl super::EditorState {
 
     fn paint_pill(&self, pill: RectF) {
         let rounded = rounded(pill, layout::PILL_RADIUS);
-        // SAFETY: the brushes and the render target are alive.
+        if !self.fill_glass(pill, layout::PILL_RADIUS, false) {
+            // SAFETY: the brushes and the render target are alive.
+            unsafe {
+                self.assets
+                    .rt
+                    .FillRoundedRectangle(&rounded, &self.chrome.glass);
+            }
+        }
+        // SAFETY: the border brush and the render target are alive.
         unsafe {
-            self.assets
-                .rt
-                .FillRoundedRectangle(&rounded, &self.chrome.glass);
             self.assets
                 .rt
                 .DrawRoundedRectangle(&rounded, &self.chrome.border, 0.75, None);
         }
+    }
+
+    /// Tries the wallpaper Mica; false means the caller keeps its solid glass.
+    fn fill_glass(&self, rect: RectF, radius: f32, lit: bool) -> bool {
+        self.surface.mica.borrow().fill(
+            &self.surface.context,
+            rect,
+            radius,
+            Matrix3x2::identity(),
+            lit,
+        )
     }
 
     fn paint_pin(&self) {
@@ -482,29 +500,28 @@ impl super::EditorState {
 
     fn paint_button(&self, rect: RectF, selected: bool, hovered: bool) {
         let rounded = rounded(rect, Self::button_radius(rect));
-        let fill = if selected {
-            Some(if hovered {
+        if selected {
+            let fill = if hovered {
                 &self.chrome.accent_hover
             } else {
                 &self.chrome.accent
-            })
-        } else if hovered {
-            Some(&self.chrome.glass_lit)
-        } else {
-            None
-        };
-        // SAFETY: the brushes and the render target are alive.
-        unsafe {
-            if let Some(fill) = fill {
+            };
+            // SAFETY: the brushes and the render target are alive.
+            unsafe {
                 self.assets.rt.FillRoundedRectangle(&rounded, fill);
-            }
-            if selected {
                 self.assets.rt.DrawRoundedRectangle(
                     &rounded,
                     &self.chrome.accent_border,
                     1.0,
                     None,
                 );
+            }
+        } else if hovered && !self.fill_glass(rect, Self::button_radius(rect), true) {
+            // SAFETY: the brush and the render target are alive.
+            unsafe {
+                self.assets
+                    .rt
+                    .FillRoundedRectangle(&rounded, &self.chrome.glass_lit);
             }
         }
     }

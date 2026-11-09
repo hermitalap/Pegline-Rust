@@ -49,10 +49,13 @@ fn main() {
         }
     };
     win32::ensure_dpi_awareness();
-    if let Err(error) = pegline::window::ComGuard::apartment() {
-        eprintln!("probe: {error}");
-        std::process::exit(1);
-    }
+    let _com = match pegline::window::ComGuard::apartment() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("probe: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let result = match config.mode {
         Mode::Line | Mode::Idle | Mode::Static | Mode::Clear | Mode::Primitive => run_line(&config),
@@ -732,14 +735,23 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
         "nothing" => {}
         "rope" => renderer.draw_rope(3008.0),
         "shadow" => renderer.draw_shadow(rect, 0.18, false),
-        "fill" => renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass),
+        "fill" | "panel" => {
+            let panel = if kind == "panel" {
+                pegline::types::RectF::from_xywh(1200.0, 30.0, 600.0, 150.0)
+            } else {
+                rect
+            };
+            renderer.draw_shadow(panel, 0.18, false);
+            renderer.draw_glass(panel, 16.0, false);
+            renderer.stroke_card(panel, 16.0, 0.75);
+        }
         "text" => renderer.draw_hint(1504.0, 120.0),
         "card6" => {
             for index in 0..6 {
                 let x = 300.0 + index as f32 * 400.0;
                 let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
                 renderer.draw_shadow(r, 0.18, false);
-                renderer.fill_round(r, 16.0, pegline::render::Brush::Glass);
+                renderer.draw_glass(r, 16.0, false);
                 renderer.stroke_card(r, 16.0, 0.75);
             }
         }
@@ -747,13 +759,13 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
             for index in 0..6 {
                 let x = 300.0 + index as f32 * 400.0;
                 let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
-                renderer.fill_round(r, 16.0, pegline::render::Brush::Glass);
+                renderer.draw_glass(r, 16.0, false);
                 renderer.stroke_card(r, 16.0, 0.75);
             }
         }
         "card" => {
             renderer.draw_shadow(rect, 0.18, false);
-            renderer.fill_round(rect, 16.0, pegline::render::Brush::Glass);
+            renderer.draw_glass(rect, 16.0, false);
             renderer.stroke_card(rect, 16.0, 0.75);
         }
         _ => {}

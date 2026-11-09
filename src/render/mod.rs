@@ -388,6 +388,8 @@ pub struct Renderer {
     layers: Vec<ID2D1Layer>,
     layer_depth: usize,
     current: Matrix3x2,
+    /// Wallpaper-derived Mica; falls back to `Brush::Glass` when unavailable.
+    mica: crate::mica::Mica,
     /// Kept alive for as long as the swap chain is attached to the visual.
     _dcomp: IDCompositionDevice,
     _visual: IDCompositionVisual,
@@ -451,6 +453,7 @@ impl Renderer {
                 SHADOW_HOVER_OFFSET_DIP,
             )?,
         };
+        let mica = crate::mica::Mica::new(hwnd, dpi_f);
         let pin_shadow = create_blurred_rect(
             &context,
             dpi_f,
@@ -480,6 +483,7 @@ impl Renderer {
             layers,
             layer_depth: 0,
             current: Matrix3x2::identity(),
+            mica,
             _dcomp: dcomp,
             _visual: visual,
             _target: target,
@@ -624,6 +628,9 @@ impl Renderer {
                 self.context.SetDpi(self.dpi, self.dpi);
                 self.context.SetTransform(&Matrix3x2::identity());
                 self.current = Matrix3x2::identity();
+                // Needs the context before BeginDraw; rebuilding the texture
+                // creates D2D resources, which is not a per-frame cost.
+                self.mica.refresh(&self.context);
                 self.context.BeginDraw();
                 self.context.Clear(Some(&D2D1_COLOR_F {
                     r: 0.0,
@@ -668,7 +675,22 @@ impl Renderer {
         self.set_transform(Matrix3x2::identity());
     }
 
-    /// Fills a rounded rectangle in DIP.
+    /// Fills a rounded rectangle with the wallpaper Mica; the old solid glass
+    /// is the fallback when there is no wallpaper or transparency is off.
+    pub fn draw_glass(&mut self, rect: RectF, radius: f32, lit: bool) {
+        if self
+            .mica
+            .fill(&self.context, rect, radius, self.current, lit)
+        {
+            return;
+        }
+        self.fill_round(
+            rect,
+            radius,
+            if lit { Brush::GlassLit } else { Brush::Glass },
+        );
+    }
+
     pub fn fill_round(&self, rect: RectF, radius: f32, brush: Brush) {
         let rounded = rounded(rect, radius);
         let brush = self.palette.solid(brush);
@@ -873,7 +895,7 @@ impl Renderer {
             center.0 + radius,
             center.1 + radius,
         );
-        self.fill_round(circle, radius, Brush::Glass);
+        self.draw_glass(circle, radius, false);
         self.stroke_card(circle, radius, 0.75);
         let glyph = 6.0 * scale * 0.5;
         let ink = self.palette.solid(Brush::CrossInk);
@@ -997,11 +1019,7 @@ impl Renderer {
     /// `lit` is the hover state: the original paints the pill nearly white.
     pub fn draw_pill(&mut self, rect: RectF, label: TextId, lit: bool) {
         let radius = rect.height() * 0.5;
-        self.fill_round(
-            rect,
-            radius,
-            if lit { Brush::GlassLit } else { Brush::Glass },
-        );
+        self.draw_glass(rect, radius, lit);
         self.stroke_card(rect, radius, 0.75);
         let (width, height) = self.text_size(label);
         self.draw_text(
@@ -1024,7 +1042,7 @@ impl Renderer {
             height + 11.0,
         );
         let radius = 14.0;
-        self.fill_round(pill, radius, Brush::Glass);
+        self.draw_glass(pill, radius, false);
         self.stroke_card(pill, radius, 0.75);
         self.draw_text(
             TextId::Hint,
@@ -1441,7 +1459,7 @@ fn ribbon(
         .cast()
         .map_err(|e| format!("PathGeometry -> ID2D1Geometry: {e}"))
 }
-fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
+pub(crate) fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
         rect: d2d_rect(rect),
         radiusX: radius,

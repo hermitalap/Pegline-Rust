@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.4.0 — 2026-11-09
+
+### Changes
+
+- **The glass now carries the desktop wallpaper.** Every filled glass surface —
+  line cards, the peek note, action and colour pills, the flight frame, the
+  hover preview, the drag ghost and the annotation editor's card and floating
+  pills — samples a wallpaper-derived Mica texture instead of one flat
+  `#B8F7F7F7` fill. The texture is decoded once, cover-fitted to the virtual
+  screen, blurred, tinted 72 % toward the app's white glass and given a faint
+  grain; it is cached across windows and rebuilt after a wallpaper or display
+  change. When transparency is off or the wallpaper cannot be read, the old
+  solid glass is the fallback. The note editor has no filled glass panel, so
+  its 1.5 DIP border is unchanged.
+
+### Performance
+
+- `probe --mode=line`: 97.0 MB private, 59.95 fps, draw p50 1.635 ms
+  (2.3.2: 92.2–92.5 MB, 0.80 ms). The first frame after startup spends about
+  54 ms building the texture; later frames are unaffected. Details and the
+  per-surface limits are in `docs/DECISIONS.md` D12 and `PLAN.md` §11.
+
 ## 2.3.2 — 2026-11-07
 
 ### Changes

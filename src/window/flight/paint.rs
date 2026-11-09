@@ -10,7 +10,7 @@
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::layout;
-use crate::render::{Brush, Renderer};
+use crate::render::Renderer;
 use crate::spring::ease;
 use crate::types::RectF;
 
@@ -165,7 +165,7 @@ pub(super) fn draw_flight_card(
         // Draw the frame even when the group is fully opaque: push_opacity
         // skips the layer (and returns false) at opacity 1.
         let pushed = renderer.push_opacity(frame.inflated(8.0), chrome);
-        renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
+        renderer.draw_glass(frame, layout::CARD_RADIUS, false);
         renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
         if pushed {
             renderer.pop_opacity();

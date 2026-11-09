@@ -24,7 +24,7 @@ use windows::core::{PCWSTR, w};
 
 use crate::layout;
 use crate::logging;
-use crate::render::{Brush, Present, Renderer};
+use crate::render::{Present, Renderer};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
@@ -334,7 +334,7 @@ fn show_frame(
     renderer.begin()?;
     // The whole card fades as one group: glass, photo and border.
     let layered = renderer.push_opacity(card.inflated(2.0), GHOST_OPACITY);
-    renderer.fill_round(card, layout::CARD_RADIUS, Brush::Glass);
+    renderer.draw_glass(card, layout::CARD_RADIUS, false);
     if let Some(bitmap) = texture.as_ref() {
         renderer.draw_photo(bitmap, photo, layout::PHOTO_RADIUS);
     }

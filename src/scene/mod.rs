@@ -74,6 +74,8 @@ pub enum Command {
     Copied(CardId),
     /// A gust of wind (also fired by the internal timer).
     Gust,
+    /// The desktop wallpaper changed; repaint so the Mica texture is rebuilt.
+    WallpaperChanged,
     /// Cap the frame rate to `1 / period` Hz; 0 follows the display.
     SetFrameCap(f64),
     /// Stop the render thread.
@@ -629,6 +631,7 @@ impl Scene {
                 self.dirty = true;
             }
             Command::Gust => self.gust(now),
+            Command::WallpaperChanged => self.dirty = true,
             Command::SetFrameCap(_) | Command::Stop => {}
         }
     }

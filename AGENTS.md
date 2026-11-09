@@ -86,12 +86,20 @@ depend on the rule recorded there: while a modal loop runs, the window procedure
 must hand every message it does not queue to `DefWindowProcW` — returning 0 for
 those made USER32 paint the popup with no text at all.
 
-**2.3.2 is the current version (2026-11-07)**: it adds the tray's **Keep line
+**2.3.2 (2026-11-07)**: it adds the tray's **Keep line
 on screen** switch (Chinese “挂绳常驻”, `lineAlways`, off by default) and says
 Markdown is supported in the note editor's placeholder. The switch keeps the
 rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
+
+**2.4.0 is the current version (2026-11-09)**: it replaces every filled glass
+surface with a wallpaper-derived Mica material (`src/mica.rs`, `Renderer::draw_glass`,
+the annotation editor's `Surface`), refreshed on wallpaper/display changes and
+falling back to the old `#B8F7F7F7` fill when wallpaper or transparency is
+unavailable. It samples the wallpaper, not live windows; 4 DIP card frames stay
+subtle. The decision and measured costs are in `docs/DECISIONS.md` D12 and
+`PLAN.md` §11; release notes in `docs/RELEASE-2.4.0.md`.
 
 **The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
 `docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the
