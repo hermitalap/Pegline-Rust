@@ -1,0 +1,266 @@
+diff --git a/src/editor/window/mod.rs b/src/editor/window/mod.rs
+index 1b1bc53..264c95e 100644
+--- a/src/editor/window/mod.rs
++++ b/src/editor/window/mod.rs
+@@ -1439,6 +1439,8 @@ struct EditorState {
+     glass_backdrop: RefCell<Option<ImageData>>,
+     /// Baked capsule lenses for the floating pills, keyed by their DIP rect.
+     glass_cache: RefCell<HashMap<(u32, u32, u32, u32), ID2D1Bitmap>>,
++    /// The card's glass ring, baked from the source image when it is set.
++    card_ring: Option<ID2D1Bitmap>,
+     chrome: Chrome,
+     assets: Assets,
+     labels: Labels,
+@@ -1508,6 +1510,7 @@ impl EditorState {
+             surface,
+             glass_backdrop: RefCell::new(None),
+             glass_cache: RefCell::new(HashMap::new()),
++            card_ring: None,
+             chrome,
+             assets,
+             labels,
+@@ -2547,6 +2550,30 @@ impl Assets {
+         .map_err(|error| format!("CreateBitmap(source): {error}"))?;
+         self.source = Some(bitmap);
+         self.source_size = (image.width, image.height);
++        self.card_ring = None;
++        let scale = self.dpi.max(96.0) / 96.0;
++        let ring = crate::glass::card_overlay(
++            image,
++            self.layout.card.width(),
++            self.layout.card.height(),
++            scale,
++        );
++        let properties = D2D1_BITMAP_PROPERTIES {
++            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
++            dpiX: 96.0,
++            dpiY: 96.0,
++        };
++        // SAFETY: `ring.bgra` is alive for the call and D2D copies the pixels.
++        if let Ok(bitmap) = unsafe {
++            self.rt.CreateBitmap(
++                size_u(ring.width, ring.height),
++                Some(ring.bgra.as_ptr() as *const c_void),
++                ring.width * 4,
++                &properties,
++            )
++        } {
++            self.card_ring = Some(bitmap);
++        }
+         Ok(())
+     }
+ 
+diff --git a/src/editor/window/paint.rs b/src/editor/window/paint.rs
+index b6d7ddb..9a6ea06 100644
+--- a/src/editor/window/paint.rs
++++ b/src/editor/window/paint.rs
+@@ -61,16 +61,32 @@ impl super::EditorState {
+         }
+         let card = self.layout.card;
+         let frame = rounded(card, layout::CARD_RADIUS);
+-        // SAFETY: the brushes and the render target are alive.
+-        unsafe {
+-            rt.FillRoundedRectangle(&frame, &self.chrome.glass);
++        if self.card_ring.is_none() {
++            // SAFETY: the brushes and the render target are alive.
++            unsafe {
++                rt.FillRoundedRectangle(&frame, &self.chrome.glass);
++            }
+         }
+         if let Some(bitmap) = self.surface.card.as_ref() {
+             self.paint_card_bitmap(bitmap);
+         }
+-        // SAFETY: as above.
+-        unsafe {
+-            rt.DrawRoundedRectangle(&frame, &self.chrome.border, 0.75, None);
++        if let Some(ring) = self.card_ring.as_ref() {
++            let destination = d2d_rect(card);
++            // SAFETY: the cached ring and the target are alive for the draw.
++            unsafe {
++                rt.DrawBitmap(
++                    ring,
++                    Some(&destination),
++                    1.0,
++                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
++                    None,
++                );
++            }
++        } else {
++            // SAFETY: as above.
++            unsafe {
++                rt.DrawRoundedRectangle(&frame, &self.chrome.border, 0.75, None);
++            }
+         }
+         self.paint_pin();
+         for pill in self.layout.top_pills {
+diff --git a/src/scene/mod.rs b/src/scene/mod.rs
+index 6729028..4940c98 100644
+--- a/src/scene/mod.rs
++++ b/src/scene/mod.rs
+@@ -344,6 +344,8 @@ pub struct Scene {
+     cards: Vec<Card>,
+     /// Baked action-pill lenses for the hovered card, captured from the desktop.
+     action_glass: RefCell<Option<ActionGlass>>,
++    /// The entry note's peeking-corner ring, baked once from its paper colour.
++    note_peek_glass: RefCell<Option<ID2D1Bitmap1>>,
+     hover: Option<CardId>,
+     hover_action: Option<(CardId, ActionKind)>,
+     pressed: Option<CardId>,
+@@ -390,6 +392,7 @@ impl Scene {
+             note_peek_x: Spring::new(ROW_RESPONSE, ROW_DAMPING, note_peek_x),
+             cards: Vec::new(),
+             action_glass: RefCell::new(None),
++            note_peek_glass: RefCell::new(None),
+             hover: None,
+             hover_action: None,
+             pressed: None,
+diff --git a/src/scene/paint.rs b/src/scene/paint.rs
+index 9d3c223..02e03cc 100644
+--- a/src/scene/paint.rs
++++ b/src/scene/paint.rs
+@@ -73,7 +73,25 @@ impl super::Scene {
+                 * windows_numerics::Matrix3x2::translation(cx, cy),
+         );
+         let frame = RectF::from_xywh(-card_w * 0.5, -card_h * 0.5, card_w, card_h);
+-        renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
++        if self.note_peek_glass.borrow().is_none() {
++            let argb = crate::notes::color(0).paper;
++            let mut pixels = Vec::with_capacity((card_w * card_h * 4.0) as usize);
++            for _ in 0..(card_w * card_h) as usize {
++                pixels.push((argb & 0xFF) as u8);
++                pixels.push(((argb >> 8) & 0xFF) as u8);
++                pixels.push(((argb >> 16) & 0xFF) as u8);
++                pixels.push(255);
++            }
++            let paper_image = crate::types::ImageData::new(card_w as u32, card_h as u32, pixels);
++            let ring = crate::glass::card_overlay(&paper_image, card_w, card_h, self.scale);
++            if let Ok(bitmap) = renderer.upload(&ring) {
++                *self.note_peek_glass.borrow_mut() = Some(bitmap);
++            }
++        }
++        let ring = self.note_peek_glass.borrow().clone();
++        if ring.is_none() {
++            renderer.fill_round(frame, layout::CARD_RADIUS, crate::render::Brush::Glass);
++        }
+         let paper = RectF::new(
+             frame.left + layout::PHOTO_INSET,
+             frame.top + layout::PHOTO_INSET,
+@@ -81,7 +99,11 @@ impl super::Scene {
+             frame.bottom - layout::PHOTO_INSET,
+         );
+         renderer.fill_round(paper, layout::PHOTO_RADIUS, crate::render::Brush::NotePaper);
+-        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
++        if let Some(ring) = ring {
++            renderer.draw_overlay(&ring, frame);
++        } else {
++            renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
++        }
+         renderer.set_transform(windows_numerics::Matrix3x2::translation(
+             0.0,
+             self.slide.value,
+diff --git a/src/window/flight/mod.rs b/src/window/flight/mod.rs
+index a3a7443..4a0b5e3 100644
+--- a/src/window/flight/mod.rs
++++ b/src/window/flight/mod.rs
+@@ -823,6 +823,8 @@ struct FlightTextures {
+     card: ID2D1Bitmap1,
+     /// The card's own bitmap, dissolved into `card` at the start.
+     start: Option<ID2D1Bitmap1>,
++    /// The tuned glass ring, baked from the image that travels.
++    ring: Option<ID2D1Bitmap1>,
+ }
+ 
+ /// Everything one flight needs to know, built once before the frame loop.
+@@ -965,9 +967,17 @@ fn prepare(
+         following: false,
+         last_elapsed: 0.0,
+     };
++    let ring = crate::glass::card_overlay(
++        &request.image,
++        pre_roll_card.width(),
++        pre_roll_card.height(),
++        scale,
++    );
++    let ring = renderer.upload(&ring).ok();
+     let textures = FlightTextures {
+         card: texture,
+         start: start_texture,
++        ring,
+     };
+     Ok((plan, textures))
+ }
+@@ -1256,6 +1266,7 @@ fn run_drop(
+         draw_flight_card(
+             renderer,
+             &texture,
++            None,
+             RectF::from_xywh(0.0, 0.0, width, height),
+             1.0,
+             1.0,
+@@ -1364,6 +1375,7 @@ fn run_tumble(
+         draw_flight_card(
+             renderer,
+             &texture,
++            None,
+             RectF::from_xywh(0.0, 0.0, width, height),
+             1.0,
+             1.0,
+diff --git a/src/window/flight/paint.rs b/src/window/flight/paint.rs
+index f3ce071..3042741 100644
+--- a/src/window/flight/paint.rs
++++ b/src/window/flight/paint.rs
+@@ -33,6 +33,7 @@ pub(super) fn paint(
+     draw_flight_card(
+         renderer,
+         &textures.card,
++        textures.ring.as_ref(),
+         pose.card,
+         pose.chrome,
+         pose.alpha,
+@@ -83,6 +84,7 @@ pub(super) fn paint_pre_roll(
+     draw_flight_card(
+         renderer,
+         &textures.card,
++        textures.ring.as_ref(),
+         pose.card,
+         1.0,
+         1.0,
+@@ -134,6 +136,7 @@ pub(super) fn drop_pose(t: f32, left: f32, top: f32, width: f32, tilt: f32) -> (
+ pub(super) fn draw_flight_card(
+     renderer: &mut Renderer,
+     texture: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
++    ring: Option<&windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+     card: RectF,
+     chrome: f32,
+     alpha: f32,
+@@ -164,14 +167,25 @@ pub(super) fn draw_flight_card(
+         }
+         // Draw the frame even when the group is fully opaque: push_opacity
+         // skips the layer (and returns false) at opacity 1.
+-        let pushed = renderer.push_opacity(frame.inflated(8.0), chrome);
+-        renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
+-        renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
+-        if pushed {
+-            renderer.pop_opacity();
++        if ring.is_none() {
++            let pushed = renderer.push_opacity(frame.inflated(8.0), chrome);
++            renderer.fill_round(frame, layout::CARD_RADIUS, Brush::Glass);
++            renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
++            if pushed {
++                renderer.pop_opacity();
++            }
+         }
+     }
+     renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
++    if let Some(ring) = ring {
++        if chrome > 0.01 {
++            let pushed = renderer.push_opacity(card.inflated(8.0), chrome);
++            renderer.draw_overlay(ring, card);
++            if pushed {
++                renderer.pop_opacity();
++            }
++        }
++    }
+     if pin > 0.01 && chrome > 0.01 {
+         // The card rotates about this point, exactly like the real card on the
+         // line: the pin top, not the frame top (which is 14 DIP lower).
