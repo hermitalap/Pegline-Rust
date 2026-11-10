@@ -43,9 +43,19 @@ jobs:
       - name: Test
         run: cargo test
 
-      - name: Package portable build
+      - name: Build release
+        run: cargo build --release
+
+      - name: Verify executable version
         shell: pwsh
-        run: pwsh -NoProfile -File tools/package-release.ps1 -SkipTests
+        run: |
+          $match = Select-String -LiteralPath Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw 'cannot read the version from Cargo.toml' }
+          $version = $match.Matches[0].Groups[1].Value
+          $info = (Get-Item -LiteralPath target/release/pegline.exe).VersionInfo
+          if ($info.ProductVersion -ne "$version.0") {
+            throw "embedded version $($info.ProductVersion) does not match Cargo.toml $version"
+          }
 
       - name: Report binary size
         shell: pwsh
@@ -53,11 +63,9 @@ jobs:
           $exe = Get-Item -LiteralPath target/release/pegline.exe
           "pegline.exe: {0:N0} bytes" -f $exe.Length
 
-      - name: Upload portable build
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: Pegline-portable
-          path: |
-            dist/Pegline-*-win-x64.zip
-            dist/Pegline-*-win-x64.zip.sha256
+          name: pegline-win-x64
+          path: target/release/pegline.exe
           if-no-files-found: error

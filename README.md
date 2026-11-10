@@ -35,13 +35,12 @@ Pegline-Rust 是 [Pegline](https://github.com/2829632740/Pegline) 的 **Rust 重
 ## 下载
 
 [**最新版本**](https://github.com/hermitalap/Pegline-Rust/releases/latest) ·
-下载 `Pegline-<version>-win-x64.zip`，解压后运行 `pegline.exe`。
+下载 `pegline.exe`，双击运行。
 
 - 单文件、绿色版：约 1.8 MB，无需安装，也不需要 .NET 或 VC++ 运行时。
 - 系统要求：Windows 10 1809+ / Windows 11，x64。
 - 数据位置：设置与日志在 `%APPDATA%\Pegline`，便签在 `%LOCALAPPDATA%\Pegline`，与 WPF 版共用，
   可以直接互换。
-- 每个 zip 旁边有 `.sha256` 校验文件。
 
 ## 从源码构建
 
@@ -54,13 +53,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-生成便携发布包（会先跑测试和 clippy，并校验嵌入的版本资源与 `Cargo.toml` 一致）：
-
-```powershell
-pwsh tools\package-release.ps1
-```
-
-产物是 `dist\Pegline-<version>-win-x64.zip` 和对应的 `.sha256`。
+发布由 GitHub Actions 完成：推送 `v*` 标签后，流水线校验标签与 `Cargo.toml`、exe 版本资源一致，
+构建并直接发布 `pegline.exe`。
 
 ## 开发
 
@@ -77,15 +71,15 @@ pwsh tools\package-release.ps1
 | `src/` | 应用（`main.rs`、`app/`、`window/`、`editor/`、`note_editor/`、…）与测量工具 `probe` |
 | `assets/` | 图标、DPI manifest、资源脚本、Lucide 工具图标 |
 | `docs/` | 行为规范、架构、实现决策、技术栈与截图 |
-| `tools/` | 打包、压测与可视化检查脚本 |
+| `tools/` | 压测与可视化检查脚本 |
 | `.github/workflows/` | CI 与发布流水线 |
 
 ## CI / CD
 
 - **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR，在 `windows-latest` 上跑
-  `cargo fmt --check`、`clippy -D warnings`、`cargo test` 和 release 构建。
-- **Release**（`.github/workflows/release.yml`）：推送 `v*` 标签时校验标签与 `Cargo.toml` 版本一致，
-  打包 zip + sha256，提取 `CHANGELOG.md` 对应段落，用 `gh` 创建 GitHub Release。
+  `cargo fmt --check`、`clippy -D warnings`、`cargo test` 和 release 构建，并上传 exe artifact。
+- **Release**（`.github/workflows/release.yml`）：推送 `v*` 标签时校验标签与 `Cargo.toml`、exe 版本资源
+  一致，构建后用 `gh` 直接发布 `pegline.exe`，说明取自 `CHANGELOG.md` 对应段落。
 
 ## 文档
 
@@ -94,7 +88,7 @@ pwsh tools\package-release.ps1
 | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | 完整的用户可见行为规范（数值来自 WPF 原版） |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 线程模型与 Win32 + DirectComposition 架构 |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | 实现决策、被否决的优化与被修正的行为 |
-| [docs/RUST-STACK.md](docs/RUST-STACK.md) | 工具链、crate、构建与打包约定 |
+| [docs/RUST-STACK.md](docs/RUST-STACK.md) | 工具链、crate、构建与发布约定 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
 
 > 文档目前为中文；行为规范是 Rust 版与 WPF 版逐条对照的依据。

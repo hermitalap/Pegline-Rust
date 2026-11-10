@@ -40,11 +40,22 @@ jobs:
           $version = $match.Matches[0].Groups[1].Value
           $tag = '${{ github.ref_name }}'
           if ($tag -ne "v$version") { throw "tag $tag does not match Cargo.toml version $version" }
-          Write-Host "packaging Pegline $version"
+          Write-Host "release Pegline $version"
 
-      - name: Build and package
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Verify executable version
         shell: pwsh
-        run: pwsh -NoProfile -File tools/package-release.ps1
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $info = (Get-Item -LiteralPath target/release/pegline.exe).VersionInfo
+          if ($info.ProductVersion -ne "$version.0") {
+            throw "embedded version $($info.ProductVersion) does not match tag $version"
+          }
 
       - name: Extract release notes
         shell: pwsh
@@ -58,15 +69,6 @@ jobs:
           $section | Set-Content -LiteralPath $body -Encoding utf8
           Write-Host $section
 
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Pegline-win-x64
-          path: |
-            dist/Pegline-*-win-x64.zip
-            dist/Pegline-*-win-x64.zip.sha256
-          if-no-files-found: error
-
       - name: Publish GitHub release
         shell: pwsh
         env:
@@ -74,8 +76,7 @@ jobs:
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
           gh release create '${{ github.ref_name }}' `
-            "dist/Pegline-$version-win-x64.zip" `
-            "dist/Pegline-$version-win-x64.zip.sha256" `
+            target/release/pegline.exe `
             --title "Pegline $version" `
             --notes-file (Join-Path $env:RUNNER_TEMP 'RELEASE_BODY.md') `
             --verify-tag
