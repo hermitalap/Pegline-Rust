@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.1
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Package portable build
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/package-release.ps1 -SkipTests
+
+      - name: Report binary size
+        shell: pwsh
+        run: |
+          $exe = Get-Item -LiteralPath target/release/pegline.exe
+          "pegline.exe: {0:N0} bytes" -f $exe.Length
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pegline-portable
+          path: |
+            dist/Pegline-*-win-x64.zip
+            dist/Pegline-*-win-x64.zip.sha256
+          if-no-files-found: error
