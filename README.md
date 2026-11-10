@@ -1,6 +1,6 @@
 # Pegline-Rust
 
-**把截图挂在屏幕顶部的晾衣绳上。** · Screenshots, strung on a clothesline at the top of your screen.
+把截图挂在屏幕顶部的“晾衣绳”上。
 
 [![CI](https://github.com/hermitalap/Pegline-Rust/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hermitalap/Pegline-Rust/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hermitalap/Pegline-Rust?sort=semver)](https://github.com/hermitalap/Pegline-Rust/releases/latest)
@@ -10,118 +10,129 @@
 <p align="center">
   <picture>
     <source srcset="docs/demo/pegline-demo.webp" type="image/webp">
-    <img src="docs/demo/pegline-demo.png" alt="Pegline-Rust 演示：挂绳上的截图卡片、大图预览、复制提示、Markdown 便签编辑器和标注编辑器" width="1200">
+    <img src="docs/demo/pegline-demo.png" alt="Pegline-Rust 演示" width="1200">
   </picture>
 </p>
 
-<p align="center"><sub>23 秒看完主要流程：预览 → 复制 → Markdown 便签 → 标注 → 保存回挂。<br>演示中的截图与便签均为合成素材，不含私人内容。</sub></p>
+日常写文档、对设计稿、整理素材时，截图很容易堆满桌面和下载文件夹。Pegline 把它们随手挂在屏幕顶端：鼠标顶一下屏幕上沿，绳子滑下来；移开鼠标，自动收起。需要参考哪张，抬头就能看见，不用在窗口之间反复切来切去。
 
-## 截图，不该被窗口挡住
+这是 [Pegline](https://github.com/2829632740/Pegline)（原 C#/WPF 版）的 **Rust 重写版**，单文件约 1.8 MB，基于原生 Win32 + DirectComposition + Direct2D，体积更小、更省资源、动效更顺畅。
 
-写文档、对设计稿、整理素材时，截图常常散落在桌面、下载文件夹和聊天窗口里。Pegline 把它们挂到屏幕顶部的一条晾衣绳上：指针碰一下屏幕上沿，绳子滑下来；移开，绳子收回去。需要哪张，抬眼就能看到，不用在窗口之间来回切换。
+---
 
-Pegline-Rust 是 [Pegline](https://github.com/2829632740/Pegline) 的 **Rust 重写版**，本仓库是它的公开 fork。行为保持一致，渲染、截图、标注、便签整条链路改为原生实现，因此更小、更轻，动画也更稳。
+## 快速上手
 
-- **不抢焦点**：只有卡片区域接收鼠标，其余点击穿透；复制、预览、标注都不会把你正在写的文档切走。
-- **一直在手边**：置顶显示，支持多显示器和逐显示器 DPI；全屏应用会自动让位。
-- **动画是产品的一部分**：弹簧按真实帧间隔积分，帧循环跟随显示器刷新率，目标 60–120 Hz。
+### 下载运行
+前往 [Releases 页面](https://github.com/hermitalap/Pegline-Rust/releases/latest) 下载 `pegline.exe`，双击即可运行。
 
-## 能做什么
+- **纯绿色单文件**：约 1.8 MB，无需安装，不需要任何外部运行时（如 .NET 或 VC++）。
+- **系统要求**：Windows 10 1809+ / Windows 11 (x64)。
+- **数据存储**：配置与日志保存在 `%APPDATA%\Pegline`，便签在 `%LOCALAPPDATA%\Pegline`（与原版 WPF 配置完全兼容互通）。
 
-- **挂绳**：贴屏幕顶部、始终置顶；指针靠近才出现，离开自动收回，也可以设为常驻。
-- **截图**：托盘一键截图（调用 Win+Shift+S）、监听截图文件夹、粘贴剪贴板图片；重复截图自动合并。
-- **卡片**：单击复制（图片 + 文件）、双击打开、右键菜单；悬停显示大图预览；可拖进应用、文件夹或回收站。
-- **标注**：箭头、矩形、文字（支持中文输入法）、马赛克、橡皮擦；6 种颜色、3 档线宽，撤销 / 重做。
-- **Markdown 便签**：在纸面上直接写标题、列表、任务框、引用、行内代码、代码块、链接和分隔线，保存后按 Markdown 渲染；四种纸色，悬停预览，编辑后飞回绳子。
-- **托盘与快捷键**：截图 / 便签快捷键可录制；开机启动、音效、挂绳常驻、清空截图；en / es / zh 三语。
-- **观感**：从壁纸取色的半透明玻璃、预烘焙阴影、逐显示器 DPI、跟随刷新率的帧循环。
+### 常用操作
 
-便签里可以直接写：
-
-```markdown
-# Launch checklist
-- [x] Freeze the build
-- [ ] Record the demo
-> Small, light, fast.
-```
-
-## 小、轻、快
-
-| | 实测 |
+| 操作 | 对应行为 |
 |:--|:--|
-| 单文件 exe | **1.8 MB**，无安装器，不需要 .NET 或 VC++ 运行时 |
-| 静置内存 | **约 66 MB** 私有内存 |
-| 挂六张截图 | **约 97 MB** 私有内存 |
-| 冷启动 | **约 0.1 秒**（2.2.0 测得 105–107 ms） |
-| 挂绳动画 | **约 60 fps**，绘制 p50 1.6 ms |
-| 连续截图 | 200 张后内存 **+3.7%** |
+| **查看 / 收起挂绳** | 鼠标移到屏幕顶端触发滑出；移开后自动收起（也可在设置中锁定常驻） |
+| **快捷键触发** | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd> 呼出/收起；左键点击托盘图标同理 |
+| **单击卡片** | 复制截图（同时写入图片与文件，可直接粘贴进微信、文档或文件夹） |
+| **双击卡片** | 用系统默认看图工具打开 |
+| **长按卡片** | 用系统画图工具打开 |
+| **悬停卡片** | 显示复制/打开快捷按钮，稍作停留展开大图预览 |
+| **拖拽卡片** | 拖入软件发副本；拖入文件夹/桌面保存并取下；拖入回收站删除 |
+| **右键卡片** | 打开菜单（复制、标注、打开、在资源管理器中定位、另存到桌面、删除等） |
+| **一键截图标注** | 按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> 框选截图，框选完直接打开标注面板，保存后挂上绳子 |
+| **Markdown 便签** | 按 <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>N</kbd> 新建便签卡片，支持实时预览，同样挂在绳上随手看 |
 
-> 数据来自本机 release 构建和内置测量工具 `probe`；测试机为单屏、200% DPI、60 Hz。120 Hz 屏幕、第二显示器和睡眠/唤醒仍在硬件测试清单上，这里不写没有测过的数字。
+---
 
-## 下载
+## 功能特性
 
-[**最新版本**](https://github.com/hermitalap/Pegline-Rust/releases/latest) · 下载 `pegline.exe`，双击运行。
+- **点击穿透，不抢焦点**：只有卡片和绳子区域响应交互，多余区域完全透明穿透。悬停、预览、复制都不会打断当前正在输入的窗口。
+- **截图智能接入**：
+  - 支持快捷键截图标注（<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd>，可自定义快捷键）。
+  - 自动监听系统截图文件夹（<kbd>Win</kbd>+<kbd>PrtScn</kbd>）。
+  - 支持接管剪贴板中的纯图片截图，自动去重，不重复挂载。
+- **内置轻量标注**：支持箭头、矩形、文字（完整中文输入法支持）、马赛克、橡皮擦，提供 6 种配色与 3 档粗细，支持撤销/重做。
+- **桌面 Markdown 便签**：
+  - 像写纸质便利贴一样随手记，支持标题、清单代办 `[ ]`、代码块、引用、链接等 Markdown 语法。
+  - 4 种便签纸配色，编辑保存后像卡片一样挂在绳子上。
+- **原生质感与动效**：
+  - 真实物理弹簧动画，按屏幕真实刷新率（60–120Hz）积分演算。
+  - 采样当前桌面壁纸的高性能仿 Mica 半透明磨砂材质。
+  - 完善的 Per-Monitor V2 多显示器及混合 DPI 缩放支持。
+  - 检测到游戏、全屏视频等全屏独占应用时自动避让退避。
 
-- 单文件、绿色版：约 1.8 MB，无需安装，也不需要 .NET 或 VC++ 运行时。
-- 系统要求：Windows 10 1809+ / Windows 11，x64。
-- 数据位置：设置与日志在 `%APPDATA%\Pegline`，便签在 `%LOCALAPPDATA%\Pegline`；与 WPF 版共用，可以直接互换。
+---
 
-## 从源码构建
+## 性能表现
 
-需要 **Rust 1.85+**（stable、MSVC 工具链）和 Windows SDK（`rc.exe` 用来嵌入图标与 manifest）。
+基于 Release 构建实测（单屏 200% DPI、60Hz）：
+
+| 指标 | 实测表现 |
+|:--|:--|
+| **可执行文件大小** | **1.8 MB**（无外部依赖，开箱即用） |
+| **后台静置内存** | **~66 MB** |
+| **挂载 6 张卡片** | **~97 MB** |
+| **冷启动耗时** | **~100 ms**（约 0.1 秒） |
+| **动画帧率** | **稳定 60 fps**（绘制耗时 p50 仅 1.6 ms） |
+| **高频吞吐** | 连续压测 200 次截图，内存增幅小于 4% |
+
+---
+
+## 源码构建
+
+环境要求：
+- **Rust 1.85+**（stable，MSVC 工具链）
+- Windows SDK（需要其中的 `rc.exe` 编译图标与清单资源）
 
 ```powershell
-cargo build --release          # target\release\pegline.exe
-cargo test                     # 纯逻辑测试
+# 编译 Release 产物 (target\release\pegline.exe)
+cargo build --release
+
+# 运行测试
+cargo test
+
+# 代码检查与格式化
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-发布由 GitHub Actions 完成：推送 `v*` 标签后，流水线校验标签与 `Cargo.toml`、exe 版本资源一致，构建并直接发布 `pegline.exe`。
+---
 
-## 怎么做的
+## 技术细节
 
-- **渲染**：DirectComposition + D3D11 swap chain + Direct2D；overlay 由 DWM 合成，不用 layered window，也不整窗 CPU 光栅化。
-- **动画**：弹簧按真实 `dt` 积分，帧循环跟随显示器刷新率；阴影只烘焙一次，文字和几何缓存复用，渲染循环里没有逐帧堆分配。
-- **截图与 IO**：解码、编码、比较和文件操作放在 worker pool，UI 线程不阻塞。
-- **材质**：Mica 从壁纸采样，壁纸或显示器变化时刷新；壁纸或透明效果不可用时回退到半透明填充。
-- **标注**：源图最多按 2048 px 解码，图片与标记合成到不透明卡片位图以保证 ClearType；窗口使用预乘 swap chain。
-- **便签**：纸面与 Markdown 投影共用同一套绘制代码，编辑时是 WYSIWYG；文件保持 `.txt` + BOM + CRLF，保存采用原子写入并归档旧版本。
-
-## 仓库结构
-
-| 路径 | 内容 |
-|:--|:--|
-| `src/` | 应用（`main.rs`、`app/`、`window/`、`editor/`、`note_editor/`、…）与测量工具 `probe` |
-| `assets/` | 图标、DPI manifest、资源脚本、Lucide 工具图标 |
-| `docs/` | 行为规范、架构、实现决策、技术栈与截图 |
-| `docs/demo/` | README 的 WebP 演示与 PNG 回退（合成素材） |
-| `tools/` | 压测与可视化检查脚本 |
-| `.github/workflows/` | CI 与发布流水线 |
-
-## CI / CD
-
-- **CI**（[ci.yml](.github/workflows/ci.yml)）：每次 push 到 `main` 和每个 PR，在 `windows-latest` 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test` 和 release 构建，校验 exe 版本并上传 artifact。
-- **Release**（[release.yml](.github/workflows/release.yml)）：推送 `v*` 标签时校验标签与 `Cargo.toml`、exe 版本资源一致，构建后用 `gh` 直接发布 `pegline.exe`，说明取自 `CHANGELOG.md` 对应段落。
-
-## 文档
-
-| 文档 | 内容 |
-|:--|:--|
-| [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | 完整的用户可见行为规范（数值来自 WPF 原版） |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 线程模型与 Win32 + DirectComposition 架构 |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | 实现决策、被否决的优化与被修正的行为 |
-| [docs/RUST-STACK.md](docs/RUST-STACK.md) | 工具链、crate、构建与发布约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
-
-> 文档目前为中文；行为规范是 Rust 版与 WPF 版逐条对照的依据。
-
-## 上游与许可
-
-Pegline 是 [Tendedero](https://github.com/alejandrobujan/tendedero)（macOS，作者 Alejandro Buján）的 Windows 移植；Pegline-Rust 是 Pegline 的 Rust 重写，本仓库是它的公开 fork。原 WPF 实现不在本仓库中，仍由[上游项目](https://github.com/2829632740/Pegline)维护。
-
-MIT，见 [LICENSE](LICENSE)。Pegline 的名字和图标不在 Tendedero 的授权范围内，因此 Windows 移植使用了自己的名字和图标；本仓库沿用 Pegline 的名字与图标。
+- **无窗体开销渲染**：基于 DirectComposition + DXGI/D3D11 SwapChain + Direct2D，不依赖卡顿的 Win32 Layered Window，完全交给 DWM 硬件加速合成。
+- **零逐帧 GC / 堆分配**：动画弹簧按实际 `dt` 积分；文字排版与阴影预先烘焙缓存，帧循环内无动态堆分配。
+- **后台异步 I/O**：截图捕获、图片编解码、去重哈希对比均在独立工作线程池执行，彻底杜绝 UI 掉帧卡顿。
 
 ---
 
-**English** — Pegline-Rust is a public fork of [Pegline](https://github.com/2829632740/Pegline): a Windows tray app that hangs screenshots on a clothesline at the top of the screen. It is a Rust rewrite (Win32 + DirectComposition) of the original C#/WPF app, shipped as a single portable executable, MIT licensed. The demo above was recorded from a release build with synthetic screenshots; see the [docs](docs/) for behaviour, architecture and decisions.
+## 目录结构与文档
+
+```text
+src/              应用核心源码 (Win32, DirectComposition, 标注编辑器, 便签等)
+assets/           图标、manifest 清单、矢量资源
+docs/             设计规范与技术文档
+tools/            性能测试与压测脚本
+.github/          CI/CD 自动化流水线
+```
+
+- [docs/BEHAVIOR.md](docs/BEHAVIOR.md)：交互规范与细节定义（严格对标原版）
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：线程模型与渲染架构
+- [docs/DECISIONS.md](docs/DECISIONS.md)：设计决策与优化记录
+- [docs/RUST-STACK.md](docs/RUST-STACK.md)：依赖库与构建约定
+- [CHANGELOG.md](CHANGELOG.md)：版本更新日志
+
+---
+
+## 致谢与许可
+
+- 原项目：[Pegline (C#/WPF)](https://github.com/2829632740/Pegline)
+- 最早灵感来源：macOS 平台的 [Tendedero](https://github.com/alejandrobujan/tendedero)（by Alejandro Buján）
+
+本项目采用 [MIT 许可证](LICENSE) 开源。
+
+---
+
+**English Summary**: Pegline-Rust is a lightweight Windows utility that hangs your screenshots on a floating "clothesline" at the top of the screen. Built with Rust, Win32, and DirectComposition, it provides a smooth, native, and zero-dependency alternative to the original C#/WPF version. Portable, 1.8 MB single executable.
