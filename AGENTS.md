@@ -93,13 +93,18 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
-**2.4.0 is the current version (2026-11-09)**: it replaces every filled glass
-surface with a wallpaper-derived Mica material (`src/mica.rs`, `Renderer::draw_glass`,
-the annotation editor's `Surface`), refreshed on wallpaper/display changes and
-falling back to the old `#B8F7F7F7` fill when wallpaper or transparency is
-unavailable. It samples the wallpaper, not live windows; 4 DIP card frames stay
-subtle. The decision and measured costs are in `docs/DECISIONS.md` D12 and
-`PLAN.md` §11; release notes in `docs/RELEASE-2.4.0.md`.
+**2.4.1 is the current version (2026-11-10)**: it fixes the annotation editor's
+disabled Undo/Redo labels, which used `#9A9A9A` and nearly vanished on the light
+Mica pills; disabled actions now use `#4A4A4A`, enabled ones stay `#1E1E1E`.
+No layout, animation or memory change; see `docs/RELEASE-2.4.1.md`.
+
+**2.4.0 (2026-11-09)** replaced every filled glass surface with a wallpaper-derived
+Mica material (`src/mica.rs`, `Renderer::draw_glass`, the annotation editor's
+`Surface`), refreshed on wallpaper/display changes and falling back to the old
+`#B8F7F7F7` fill when wallpaper or transparency is unavailable. It samples the
+wallpaper, not live windows; 4 DIP card frames stay subtle. The decision and
+measured costs are in `docs/DECISIONS.md` D12 and `PLAN.md` §11; release notes in
+`docs/RELEASE-2.4.0.md`.
 
 **The WYSIWYG note editor is implemented on 2026-11-04** (`docs/NOTE-EDITOR.md`,
 `docs/DECISIONS.md` D9): `src/note_editor/{model,display,render,window}.rs`, the

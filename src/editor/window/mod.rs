@@ -149,6 +149,9 @@ const CHROME_GLASS_LIT_ALPHA: f32 = 0xF2 as f32 / 255.0;
 const CHROME_BORDER_ALPHA: f32 = 0x70 as f32 / 255.0;
 const CHROME_INK: u32 = 0x1E_1E_1E;
 const CHROME_INK_DIM: u32 = 0x9A_9A_9A;
+/// Disabled action labels: dark enough to stay legible on the light Mica pill,
+/// still clearly quieter than the enabled ink.
+const CHROME_INK_MUTED: u32 = 0x4A_4A_4A;
 const CHROME_ACCENT: u32 = 0x0E_63_9C;
 const CHROME_ACCENT_HOVER: u32 = 0x11_77_BB;
 const CHROME_ACCENT_BORDER: u32 = 0x82_C4_FF;

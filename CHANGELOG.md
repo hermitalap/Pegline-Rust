@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.1 — 2026-11-10
+
+### Fixes
+
+- **Disabled Undo/Redo labels are readable on the Mica pills.** The annotation
+  editor drew disabled action labels in `#9A9A9A`, which nearly disappeared on
+  the light wallpaper glass; they now use `#4A4A4A`. Enabled actions stay at
+  `#1E1E1E`. No layout, animation or memory change.
+
 ## 2.4.0 — 2026-11-09
 
 ### Changes

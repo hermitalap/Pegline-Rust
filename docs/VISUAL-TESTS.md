@@ -630,7 +630,7 @@
 ### 3.18 全局 Mica（2026-11-09）
 
 **做法**：新增 `src/mica.rs`，用 `SPI_GETDESKWALLPAPER` 取当前壁纸，WIC 解码到
-2048 px，按虚拟屏幕 cover 到 0.17 缩放（6K 屏约 1023×575），3 次盒式模糊
+1024 px，按虚拟屏幕 cover 到 0.17 缩放（6K 屏约 1023×575），3 次盒式模糊
 （半径 8），按 72% `#F7F7F7` + 28% 壁纸着色并叠 ±2 噪声。每个 renderer 上传
 一份 `ID2D1Bitmap1`，用屏幕锚定的 brush transform 采样；`Renderer::draw_glass`
 失败时回退 `#B8F7F7F7`。
@@ -665,3 +665,16 @@
 
 **结论**：Mica 在可观察的大表面上工作，线带卡片上刻意保持很轻；首帧 54 ms
 和 +4.7–7.2 MB 是已测量代价，记录在 `docs/RELEASE-2.4.0.md`。
+
+### 3.19 标注编辑器禁用操作标签（2026-11-10）
+
+**问题**：无可撤销/重做时，底部左侧胶囊的“撤销/重做”使用 `#9A9A9A`，落在
+浅色 Mica 胶囊上几乎看不见；截图见 `docs/visual/editor-disabled-actions.png`
+（修复后）。
+
+**修复**：禁用标签改用 `#4A4A4A`，可用标签仍是 `#1E1E1E`；没有改布局、按钮
+尺寸或交互，只在 `Chrome` 中新增 `ink_muted` 画刷。
+
+**验证**：`--editor-demo --editor-hold` 打开 900×600 源图，在 200% DPI 下截取
+底部操作栏；“撤销/重做”在不可用状态下清晰可读，“取消”仍为近黑，“保存”白字
+蓝底。`cargo test` 212 passed / 1 ignored，clippy/fmt 通过。

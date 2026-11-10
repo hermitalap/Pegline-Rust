@@ -35,10 +35,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 use super::{
     Assets, CHROME_ACCENT, CHROME_ACCENT_BORDER, CHROME_ACCENT_HOVER, CHROME_BORDER_ALPHA,
     CHROME_GLASS, CHROME_GLASS_ALPHA, CHROME_GLASS_LIT, CHROME_GLASS_LIT_ALPHA, CHROME_INK,
-    CHROME_INK_DIM, Drag, ERASER_RADIUS_DIP, ICON_BOX, ICON_DESIGN, ICON_STROKE, Label, TOOLS,
-    TextEntry, WM_APP_IME_CARET, arrow_head, build_mosaic, composition_caret_x, d2d_rect,
-    drag_rect, ime_client_px, mosaic_key, pixel_format, rect_of, rounded, solid, text_metrics,
-    wic_factory,
+    CHROME_INK_DIM, CHROME_INK_MUTED, Drag, ERASER_RADIUS_DIP, ICON_BOX, ICON_DESIGN, ICON_STROKE,
+    Label, TOOLS, TextEntry, WM_APP_IME_CARET, arrow_head, build_mosaic, composition_caret_x,
+    d2d_rect, drag_rect, ime_client_px, mosaic_key, pixel_format, rect_of, rounded, solid,
+    text_metrics, wic_factory,
 };
 use crate::editor::layout::{self, Hit};
 use crate::editor::model::{COLORS, Mark, Tool, WIDTHS};
@@ -654,7 +654,7 @@ impl super::EditorState {
         } else if enabled {
             &self.chrome.ink
         } else {
-            &self.chrome.ink_dim
+            &self.chrome.ink_muted
         };
         self.paint_label(label, rect, brush);
     }
@@ -1037,7 +1037,10 @@ pub(super) struct Chrome {
     /// Hairline around a pill or the card.
     border: ID2D1SolidColorBrush,
     ink: ID2D1SolidColorBrush,
+    /// Hairlines around colour/width dots.
     ink_dim: ID2D1SolidColorBrush,
+    /// Disabled action labels on the light pills.
+    ink_muted: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
     accent_hover: ID2D1SolidColorBrush,
     accent_border: ID2D1SolidColorBrush,
@@ -1058,6 +1061,7 @@ impl Chrome {
             border: solid(rt, 0xFF_FF_FF, CHROME_BORDER_ALPHA)?,
             ink: solid(rt, CHROME_INK, 1.0)?,
             ink_dim: solid(rt, CHROME_INK_DIM, 1.0)?,
+            ink_muted: solid(rt, CHROME_INK_MUTED, 1.0)?,
             accent: solid(rt, CHROME_ACCENT, 1.0)?,
             accent_hover: solid(rt, CHROME_ACCENT_HOVER, 1.0)?,
             accent_border: solid(rt, CHROME_ACCENT_BORDER, 1.0)?,

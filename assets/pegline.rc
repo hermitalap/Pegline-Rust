@@ -2,8 +2,8 @@
 1 24 "assets/pegline.manifest"
 
 1 VERSIONINFO
-FILEVERSION 2,4,0,0
-PRODUCTVERSION 2,4,0,0
+FILEVERSION 2,4,1,0
+PRODUCTVERSION 2,4,1,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Pegline"
             VALUE "FileDescription", "Pegline screenshot clothesline"
-            VALUE "FileVersion", "2.4.0.0"
+            VALUE "FileVersion", "2.4.1.0"
             VALUE "InternalName", "pegline"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "pegline.exe"
             VALUE "ProductName", "Pegline"
-            VALUE "ProductVersion", "2.4.0.0"
+            VALUE "ProductVersion", "2.4.1.0"
         END
     END
     BLOCK "VarFileInfo"

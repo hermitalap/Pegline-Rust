@@ -631,3 +631,5 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   首帧 54 ms 未后台化；没有实时窗口背景采样。
 - 视觉证据：`docs/visual/mica-editor-testwall.png`（编辑器药丸随红/绿/蓝壁纸变色）、
   `docs/visual/mica-line-testwall.png`（线带卡片）、`docs/visual/mica-line.png`（深色壁纸）。
+- **2.4.1（2026-11-10）**：标注编辑器不可用的撤销/重做标签从 `#9A9A9A` 改为
+  `#4A4A4A`，在浅色 Mica 胶囊上可读；可用标签仍是 `#1E1E1E`。布局、动画和内存不变。
