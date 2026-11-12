@@ -1386,14 +1386,8 @@ impl EditorState {
         let started = std::time::Instant::now();
         // The flight carries the paper at the editor's current size, capped so a
         // 250 % or larger display does not allocate an oversized image.
-        let mut scale = self.scale.max(0.5);
-        let long_dip = self.paper.width.max(self.paper.height);
-        let long_px = long_dip * scale;
-        if long_px > FLIGHT_MAX_PX {
-            scale *= FLIGHT_MAX_PX / long_px;
-        }
-        let width = (self.paper.width * scale).round().max(1.0) as u32;
-        let height = (self.paper.height * scale).round().max(1.0) as u32;
+        let scale = flight_scale(self.paper, self.scale);
+        let (width, height) = flight_pixels(self.paper, scale);
         let factory = crate::capture::wic::imaging_factory()?;
         // SAFETY: the factory is live, the size is at least one pixel and the
         // pixel format is a static WIC GUID.
@@ -1719,6 +1713,25 @@ fn d2d_rect(rect: RectF) -> D2D_RECT_F {
 }
 
 /// The paper rectangle inside the window, DIP.
+/// Pixels per DIP for the flight image: never below the minimum the cards use,
+/// and scaled down so the paper's long edge stays within `FLIGHT_MAX_PX`.
+fn flight_scale(paper: PaperSize, scale: f32) -> f32 {
+    let mut scale = scale.max(0.5);
+    let long_px = paper.width.max(paper.height) * scale;
+    if long_px > FLIGHT_MAX_PX {
+        scale *= FLIGHT_MAX_PX / long_px;
+    }
+    scale
+}
+
+/// The flight bitmap size in pixels: the paper at `scale`, at least 1×1.
+fn flight_pixels(paper: PaperSize, scale: f32) -> (u32, u32) {
+    (
+        (paper.width * scale).round().max(1.0) as u32,
+        (paper.height * scale).round().max(1.0) as u32,
+    )
+}
+
 pub fn paper_rect(paper: PaperSize) -> RectF {
     RectF::from_xywh(MARGIN_DIP, MARGIN_DIP, paper.width, paper.height)
 }
@@ -2359,7 +2372,9 @@ fn bitmap_height(bitmap: &ID2D1Bitmap1) -> u32 {
 mod tests {
     use super::paint::in_view;
     use super::*;
-    use crate::note_editor::display::{DEFAULT_PAPER, LineMetrics, PAD_BOTTOM, PAPER_HEIGHT, Run};
+    use crate::note_editor::display::{
+        DEFAULT_PAPER, LineMetrics, MAX_PAPER, PAD_BOTTOM, PAPER_HEIGHT, Run,
+    };
 
     /// One hand-built display line, so a test can vary a single layout input.
     fn display_line(text: &str, block: Block, style: Style) -> DisplayLine {
@@ -2533,6 +2548,31 @@ mod tests {
         assert_eq!(shadow_atlas_pixels(1.5), (72, 12));
         assert_eq!(shadow_atlas_pixels(2.0), (96, 16));
         assert_eq!(shadow_atlas_pixels(2.5), (120, 20));
+    }
+
+    #[test]
+    fn the_flight_image_follows_the_paper_and_stops_at_2048() {
+        let default = DEFAULT_PAPER;
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 1.0)),
+            (460, 360)
+        );
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 2.0)),
+            (920, 720)
+        );
+        let max = MAX_PAPER;
+        assert_eq!(flight_pixels(max, flight_scale(max, 2.0)), (1640, 1280));
+        // 250 % would be 2050 px wide; the cap keeps the long edge at 2048.
+        let (width, height) = flight_pixels(max, flight_scale(max, 2.5));
+        assert_eq!(width, 2048);
+        // Both axes shrink by the same factor, so the aspect stays the paper's.
+        assert_eq!(height, 1598);
+        // Below half scale the flight keeps its 0.5 px/DIP floor.
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 0.4)),
+            (230, 180)
+        );
     }
 
     #[test]
