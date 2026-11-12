@@ -564,7 +564,6 @@ impl super::EditorState {
                 radiusX: RADIUS_DIP,
                 radiusY: RADIUS_DIP,
             };
-            let _ = geometry;
             if self.now < self.error_until {
                 context.DrawRoundedRectangle(&rounded, &self.assets.error, BORDER_DIP, None);
             } else if let Some(brush) = self.border_brush.as_ref() {
