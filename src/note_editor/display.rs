@@ -23,6 +23,11 @@ pub const PAD_TOP: f32 = 26.0;
 pub const PAD_BOTTOM: f32 = 30.0;
 /// Shadow margin between the paper and the editor window edge, DIP.
 pub const MARGIN_DIP: f32 = 20.0;
+/// Corner radius of the paper, DIP.
+pub const RADIUS_DIP: f32 = 22.0;
+/// How far inside the paper edge a resize grab still counts, DIP (BEHAVIOR
+/// §10.1). The band reaches outwards over the whole shadow margin.
+pub const RESIZE_GRIP_DIP: f32 = 2.0;
 
 /// A paper size, DIP. The window is always `MARGIN_DIP` larger on every side
 /// (BEHAVIOR §10.1).
@@ -70,6 +75,37 @@ impl PaperSize {
             width: self.width.round(),
             height: self.height.round(),
         }
+    }
+
+    /// Whether a point in window DIP is inside the paper's rounded rectangle.
+    /// The window DIP origin is the window's top-left corner, so the paper
+    /// starts at `MARGIN_DIP` on both axes.
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        let left = MARGIN_DIP;
+        let top = MARGIN_DIP;
+        let right = MARGIN_DIP + self.width;
+        let bottom = MARGIN_DIP + self.height;
+        if x < left || x >= right || y < top || y >= bottom {
+            return false;
+        }
+        let radius = RADIUS_DIP;
+        let cx = if x < left + radius {
+            left + radius
+        } else if x > right - radius {
+            right - radius
+        } else {
+            x
+        };
+        let cy = if y < top + radius {
+            top + radius
+        } else if y > bottom - radius {
+            bottom - radius
+        } else {
+            y
+        };
+        let dx = x - cx;
+        let dy = y - cy;
+        dx * dx + dy * dy <= radius * radius
     }
 }
 
@@ -120,6 +156,62 @@ pub fn parse_note_size(text: &str) -> Option<PaperSize> {
 pub fn format_note_size(size: PaperSize) -> String {
     let size = size.rounded();
     format!("{}x{}", size.width as i64, size.height as i64)
+}
+
+/// Which paper edge a pointer is over for resizing (BEHAVIOR §10.1). Only the
+/// right, bottom and bottom-right corner resize: the window grows rightwards
+/// and downwards and never moves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeZone {
+    Right,
+    Bottom,
+    Corner,
+}
+
+/// What a client point means to the editor. Resizing beats the paper, the
+/// paper beats the margin; a point outside the window is nobody's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    Resize(ResizeZone),
+    Paper,
+    Margin,
+    Outside,
+}
+
+/// Hit-tests a window point in device pixels for a window that holds `paper`
+/// at `dpi`.
+///
+/// The resize bands cover the right and bottom shadow margins and reach
+/// `RESIZE_GRIP_DIP` into the paper; their intersection is the corner. The left
+/// and top margins, including the top-right and bottom-left shadow corners,
+/// stay commit areas.
+pub fn hit_test(x_px: i32, y_px: i32, paper: PaperSize, dpi: u32) -> Hit {
+    let scale = dpi.max(96) as f32 / 96.0;
+    let x = x_px as f32 / scale;
+    let y = y_px as f32 / scale;
+    let (window_width, window_height) = paper.window_size();
+    if x < 0.0 || y < 0.0 || x >= window_width || y >= window_height {
+        return Hit::Outside;
+    }
+    let left = MARGIN_DIP;
+    let top = MARGIN_DIP;
+    let right = MARGIN_DIP + paper.width;
+    let bottom = MARGIN_DIP + paper.height;
+    let grip = RESIZE_GRIP_DIP;
+    let right_band = x >= right - grip && y >= top - grip && y <= bottom + grip;
+    let bottom_band = y >= bottom - grip && x >= left - grip && x <= right + grip;
+    match (right_band, bottom_band) {
+        (true, true) => Hit::Resize(ResizeZone::Corner),
+        (true, false) => Hit::Resize(ResizeZone::Right),
+        (false, true) => Hit::Resize(ResizeZone::Bottom),
+        (false, false) => {
+            if paper.contains(x, y) {
+                Hit::Paper
+            } else {
+                Hit::Margin
+            }
+        }
+    }
 }
 /// Body metrics, DIP.
 pub const BODY_SIZE: f32 = 15.0;

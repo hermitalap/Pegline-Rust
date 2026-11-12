@@ -17,6 +17,7 @@ use super::{
     CardSpec, Command, EditingNote, Event, Item, NoteEditor, post_note_text, pseudo_random,
 };
 use crate::capture::wic;
+use crate::note_editor::display::{PaperSize, ResizeZone};
 use crate::types::{CardId, ImageData};
 use crate::{layout, logging, notes, win32};
 
@@ -71,6 +72,17 @@ pub(crate) struct Dev {
     /// card so the note hover preview can be captured deterministically.
     pub(crate) note_preview_demo: bool,
     pub(crate) note_preview_demo_card: Option<CardId>,
+    /// `--note-resize-demo`: open the note editor at a paper size chosen by
+    /// `PEGLINE_NOTE_RESIZE_PAPER` (`WxH`, DIP) so the resize result can be
+    /// photographed without a mouse.
+    pub(crate) note_resize_demo: bool,
+    pub(crate) note_resize_paper: PaperSize,
+    /// `PEGLINE_NOTE_RESIZE_HOVER` (`right`, `bottom`, `corner`) highlights one
+    /// resize edge in that demo.
+    pub(crate) note_resize_hover: Option<ResizeZone>,
+    /// When the highlight was last re-asserted; the real pointer can enter the
+    /// window and clear it, so the demo keeps asking.
+    pub(crate) note_resize_hover_at: f64,
 }
 
 impl Dev {
@@ -117,6 +129,15 @@ impl Dev {
             note_storage_archived: None,
             note_preview_demo: arg("--note-preview-demo"),
             note_preview_demo_card: None,
+            note_resize_demo: arg("--note-resize-demo"),
+            note_resize_paper: std::env::var("PEGLINE_NOTE_RESIZE_PAPER")
+                .ok()
+                .and_then(|value| crate::note_editor::display::parse_note_size(&value))
+                .unwrap_or(crate::note_editor::display::MAX_PAPER),
+            note_resize_hover: std::env::var("PEGLINE_NOTE_RESIZE_HOVER")
+                .ok()
+                .and_then(|value| parse_zone(&value)),
+            note_resize_hover_at: 0.0,
         }
     }
 
@@ -134,6 +155,17 @@ impl Dev {
             || self.note_discard_demo
             || self.note_storage_demo
             || self.note_preview_demo
+            || self.note_resize_demo
+    }
+}
+
+/// `right`, `bottom` or `corner`, as `PEGLINE_NOTE_RESIZE_HOVER` passes it.
+fn parse_zone(text: &str) -> Option<ResizeZone> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "right" => Some(ResizeZone::Right),
+        "bottom" => Some(ResizeZone::Bottom),
+        "corner" => Some(ResizeZone::Corner),
+        _ => None,
     }
 }
 
@@ -165,7 +197,25 @@ impl super::App {
         }
         if self.dev.note_demo && !self.dev.note_demo_opened && now - self.start_time > 1.0 {
             self.dev.note_demo_opened = true;
-            self.open_note_demo();
+            self.open_note_demo(self.dev.note_resize_paper, None);
+        }
+        if self.dev.note_resize_demo && !self.dev.note_demo_opened && now - self.start_time > 1.0 {
+            self.dev.note_demo_opened = true;
+            self.open_note_demo(self.dev.note_resize_paper, self.dev.note_resize_hover);
+        }
+        if self.dev.note_resize_demo
+            && self.dev.note_demo_opened
+            && now - self.dev.note_resize_hover_at > 0.5
+        {
+            // A real pointer entering the window sets its own highlight; the
+            // scripted screenshot wants the one it asked for.
+            if let (Some(zone), Some(editor)) = (
+                self.dev.note_resize_hover,
+                self.windows.note_editor.as_ref(),
+            ) {
+                self.dev.note_resize_hover_at = now;
+                editor.hover(Some(zone));
+            }
         }
         if self.dev.note_hover_demo {
             self.state.keep_open = true;
@@ -453,7 +503,7 @@ impl super::App {
 
     /// `--note-editor-demo`: show the editor with a document that exercises the
     /// v1 Markdown subset and the active-line reveal.
-    pub(super) fn open_note_demo(&mut self) {
+    pub(super) fn open_note_demo(&mut self, paper: PaperSize, hover: Option<ResizeZone>) {
         if self.windows.note_editor.is_some() {
             return;
         }
@@ -466,8 +516,13 @@ impl super::App {
         let notify = Box::new(move |event| {
             let _ = tx.send(Event::NoteEditor(event));
         });
-        match NoteEditor::open(text.clone(), 0, monitor.dpi, monitor, notify) {
+        match NoteEditor::open(text.clone(), 0, paper, monitor.dpi, monitor, notify) {
             Ok(editor) => {
+                if let Some(zone) = hover {
+                    // The render thread owns the highlight; the screenshot run
+                    // asks for it without a pointer.
+                    editor.hover(Some(zone));
+                }
                 self.windows.note_editor = Some(editor);
                 self.sessions.note_editing = Some(EditingNote {
                     path: None,

@@ -23,7 +23,7 @@ use super::{
     BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, paper_rect, shadow_slices, utf16_offset,
 };
 use crate::i18n;
-use crate::note_editor::display::{self, Block, PAD_BOTTOM, PAD_LEFT, PAD_TOP, Style};
+use crate::note_editor::display::{self, Block, PAD_BOTTOM, PAD_LEFT, PAD_TOP, ResizeZone, Style};
 
 impl super::EditorState {
     /// Paints the paper (gradient, dog-ear, text) into `context`. The same code
@@ -510,6 +510,53 @@ impl super::EditorState {
                     None,
                     None,
                 );
+            }
+            // The resize affordance: a 2 DIP highlight on the hit edge. Drawn
+            // on the window layer (clipped to the rounded paper), never into
+            // the paper bitmap, so ClearType and the commit image are intact.
+            if let Some(zone) = self.hover {
+                let grip = display::RESIZE_GRIP_DIP;
+                let right = paper.right;
+                let bottom = paper.bottom;
+                let strips = match zone {
+                    ResizeZone::Right => [
+                        D2D_RECT_F {
+                            left: right - grip,
+                            top: paper.top,
+                            right,
+                            bottom,
+                        },
+                        D2D_RECT_F::default(),
+                    ],
+                    ResizeZone::Bottom => [
+                        D2D_RECT_F {
+                            left: paper.left,
+                            top: bottom - grip,
+                            right,
+                            bottom,
+                        },
+                        D2D_RECT_F::default(),
+                    ],
+                    ResizeZone::Corner => [
+                        D2D_RECT_F {
+                            left: right - grip,
+                            top: paper.top,
+                            right,
+                            bottom,
+                        },
+                        D2D_RECT_F {
+                            left: paper.left,
+                            top: bottom - grip,
+                            right,
+                            bottom,
+                        },
+                    ],
+                };
+                for strip in strips {
+                    if strip.right > strip.left && strip.bottom > strip.top {
+                        context.FillRectangle(&strip, &self.assets.hover);
+                    }
+                }
             }
             context.PopLayer();
             let rounded = D2D1_ROUNDED_RECT {

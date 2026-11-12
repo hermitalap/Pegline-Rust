@@ -9,7 +9,6 @@ use std::time::UNIX_EPOCH;
 
 use super::{Item, pseudo_random};
 use crate::layout;
-use crate::note_editor::display::PAPER_HEIGHT;
 use crate::notes;
 use crate::scene::Command;
 use crate::settings;
@@ -307,16 +306,14 @@ impl super::App {
         let dpi = win32::window_dpi(editor.hwnd()).max(96);
         let scale = dpi as f32 / 96.0;
         let margin = crate::note_editor::render::MARGIN_DIP * scale;
+        let paper = editor.paper();
         Some(RectI::new(
             rect.left + margin.round() as i32,
             rect.top + margin.round() as i32,
             rect.left
-                + ((crate::note_editor::render::MARGIN_DIP
-                    + crate::note_editor::display::PAPER_WIDTH)
-                    * scale)
-                    .round() as i32,
+                + ((crate::note_editor::render::MARGIN_DIP + paper.width) * scale).round() as i32,
             rect.top
-                + ((crate::note_editor::render::MARGIN_DIP + PAPER_HEIGHT) * scale).round() as i32,
+                + ((crate::note_editor::render::MARGIN_DIP + paper.height) * scale).round() as i32,
         ))
     }
 

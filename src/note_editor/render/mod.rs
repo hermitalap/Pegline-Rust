@@ -45,6 +45,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
     DXGI_SWAP_CHAIN_FLAG, IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
+use windows::Win32::Graphics::Gdi::{COLOR_HIGHLIGHT, GetSysColor};
 use windows::Win32::Graphics::Imaging::{
     GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA, IWICPalette, WICBitmapCacheOnLoad,
     WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICRect,
@@ -57,7 +58,7 @@ use crate::gfx::{
 };
 use crate::logging;
 use crate::note_editor::display::{
-    self, Block, DisplayDoc, DisplayLine, PAD_LEFT, PAD_TOP, PaperSize, Style,
+    self, Block, DisplayDoc, DisplayLine, PAD_LEFT, PAD_TOP, PaperSize, ResizeZone, Style,
 };
 use crate::note_editor::model::{self, Doc, Motion};
 use crate::render::Present;
@@ -66,9 +67,10 @@ use crate::types::{ImageData, RectF};
 /// The window is the paper plus a 20 DIP transparent margin for the shadow
 /// (NOTE-EDITOR.md §5.1). Owned by `display`; re-exported so callers that only
 /// know the render module keep working.
-pub use crate::note_editor::display::{MARGIN_DIP, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP};
-/// Paper corner radius and glass border, DIP.
-pub const RADIUS_DIP: f32 = 22.0;
+pub use crate::note_editor::display::{
+    MARGIN_DIP, RADIUS_DIP, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP,
+};
+/// Glass border width, DIP.
 pub const BORDER_DIP: f32 = 1.5;
 /// Dog-ear size, DIP.
 const FOLD_DIP: f32 = 18.0;
@@ -143,6 +145,9 @@ pub enum Command {
     Copy,
     Cut,
     Scroll(f32),
+    /// The pointer entered or left a resize band; `None` clears it. Sent only
+    /// when the zone changes, so the highlight repaints once per entry/exit.
+    Hover(Option<ResizeZone>),
     Commit,
     Resume,
     /// Write failed: flash the glass border red for 120 ms (NOTE-EDITOR.md
@@ -342,6 +347,9 @@ struct Assets {
     fold_shade: ID2D1SolidColorBrush,
     /// The failed-write border flash (NOTE-EDITOR.md §5.6).
     error: ID2D1SolidColorBrush,
+    /// The resize hover highlight: the system highlight colour, drawn on the
+    /// window layer so the paper bitmap and its ClearType stay untouched.
+    hover: ID2D1SolidColorBrush,
 }
 
 impl Assets {
@@ -388,6 +396,7 @@ impl Assets {
             fold_edge: solid(context, palette.edge, 1.0)?,
             fold_shade: solid(context, 0x000000, 0.12)?,
             error: solid(context, 0xC4_2B_1C, 1.0)?,
+            hover: solid(context, system_highlight(), 1.0)?,
         })
     }
 
@@ -481,6 +490,8 @@ pub struct EditorState {
     error_until: f64,
     composition: Option<String>,
     pointer_down: bool,
+    /// The resize band the pointer is over, for the 2 DIP edge highlight.
+    hover: Option<ResizeZone>,
     pending_commit: bool,
     blink_at: f64,
     caret_on: bool,
@@ -537,6 +548,7 @@ impl EditorState {
             error_until: 0.0,
             composition: None,
             pointer_down: false,
+            hover: None,
             pending_commit: false,
             blink_at: 0.0,
             caret_on: true,
@@ -688,6 +700,14 @@ impl EditorState {
             } => {
                 if let Err(error) = self.resize(width_px, height_px, dpi) {
                     logging::error(format!("note editor resize: {error}"));
+                }
+            }
+            Command::Hover(zone) => {
+                if self.hover != zone {
+                    self.hover = zone;
+                    // The highlight lives on the window layer, but the frame is
+                    // painted as a whole; one repaint per entry or exit.
+                    self.dirty = true;
                 }
             }
             Command::Focus(focused) => {
@@ -1613,6 +1633,18 @@ fn solid(
         .map_err(|error| format!("CreateSolidColorBrush: {error}"))
 }
 
+/// The system highlight colour as `0xRRGGBB` — `COLORREF` is `0xBBGGRR`.
+/// Falls back to the 2.4 accent blue if the system reports none.
+fn system_highlight() -> u32 {
+    // SAFETY: reading a system colour has no preconditions.
+    let colorref = unsafe { GetSysColor(COLOR_HIGHLIGHT) };
+    let red = colorref & 0xFF;
+    let green = (colorref >> 8) & 0xFF;
+    let blue = (colorref >> 16) & 0xFF;
+    let rgb = (red << 16) | (green << 8) | blue;
+    if rgb == 0 { 0x4A_90_E2 } else { rgb }
+}
+
 fn gradient(
     context: &ID2D1RenderTarget,
     stops: &[D2D1_GRADIENT_STOP],
@@ -2296,9 +2328,7 @@ fn bitmap_height(bitmap: &ID2D1Bitmap1) -> u32 {
 mod tests {
     use super::paint::in_view;
     use super::*;
-    use crate::note_editor::display::{
-        DEFAULT_PAPER, LineMetrics, PAD_BOTTOM, PAPER_HEIGHT, Run,
-    };
+    use crate::note_editor::display::{DEFAULT_PAPER, LineMetrics, PAD_BOTTOM, PAPER_HEIGHT, Run};
 
     /// One hand-built display line, so a test can vary a single layout input.
     fn display_line(text: &str, block: Block, style: Style) -> DisplayLine {
