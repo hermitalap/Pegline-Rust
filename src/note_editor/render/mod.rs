@@ -45,6 +45,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
     DXGI_SWAP_CHAIN_FLAG, IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
+use windows::Win32::Graphics::Gdi::{COLOR_HIGHLIGHT, GetSysColor};
 use windows::Win32::Graphics::Imaging::{
     GUID_WICPixelFormat32bppBGRA, GUID_WICPixelFormat32bppPBGRA, IWICPalette, WICBitmapCacheOnLoad,
     WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICRect,
@@ -57,20 +58,19 @@ use crate::gfx::{
 };
 use crate::logging;
 use crate::note_editor::display::{
-    self, Block, CONTENT_WIDTH, DisplayDoc, DisplayLine, PAD_BOTTOM, PAD_LEFT, PAD_TOP,
-    PAPER_HEIGHT, PAPER_WIDTH, Style,
+    self, Block, DisplayDoc, DisplayLine, PAD_LEFT, PAD_TOP, PaperSize, ResizeZone, Style,
 };
 use crate::note_editor::model::{self, Doc, Motion};
 use crate::render::Present;
 use crate::types::{ImageData, RectF};
 
 /// The window is the paper plus a 20 DIP transparent margin for the shadow
-/// (NOTE-EDITOR.md §5.1).
-pub const MARGIN_DIP: f32 = 20.0;
-pub const WINDOW_WIDTH_DIP: f32 = PAPER_WIDTH + MARGIN_DIP * 2.0;
-pub const WINDOW_HEIGHT_DIP: f32 = PAPER_HEIGHT + MARGIN_DIP * 2.0;
-/// Paper corner radius and glass border, DIP.
-pub const RADIUS_DIP: f32 = 22.0;
+/// (NOTE-EDITOR.md §5.1). Owned by `display`; re-exported so callers that only
+/// know the render module keep working.
+pub use crate::note_editor::display::{
+    MARGIN_DIP, RADIUS_DIP, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP,
+};
+/// Glass border width, DIP.
 pub const BORDER_DIP: f32 = 1.5;
 /// Dog-ear size, DIP.
 const FOLD_DIP: f32 = 18.0;
@@ -78,6 +78,16 @@ const FOLD_DIP: f32 = 18.0;
 const SHADOW_ALPHA: f32 = 0.18;
 const SHADOW_BLUR_DIP: f32 = 24.0;
 const SHADOW_OFFSET_DIP: f32 = 6.0;
+/// Corner of the 9-patch shadow atlas, DIP: the shadow margin plus the paper
+/// radius, with room to spare for the blur. Must be larger than
+/// `MARGIN_DIP + RADIUS_DIP`. Edges and the centre stretch, so a resize never
+/// re-bakes the shadow.
+pub const SHADOW_CORNER_DIP: f32 = 48.0;
+/// Width of the stretchable middle strip in the atlas, DIP.
+const SHADOW_MIDDLE_DIP: f32 = 8.0;
+/// Long edge of the paper an editor flight carries, device pixels. The editor
+/// stutters above this; 250 % displays crop slightly rather than allocate more.
+const FLIGHT_MAX_PX: f32 = 2048.0;
 /// Caret blink half-period, seconds.
 const BLINK_SECONDS: f64 = 0.53;
 /// Mouse wheel scroll, DIP per notch.
@@ -135,6 +145,9 @@ pub enum Command {
     Copy,
     Cut,
     Scroll(f32),
+    /// The pointer entered or left a resize band; `None` clears it. Sent only
+    /// when the zone changes, so the highlight repaints once per entry/exit.
+    Hover(Option<ResizeZone>),
     Commit,
     Resume,
     /// Write failed: flash the glass border red for 120 ms (NOTE-EDITOR.md
@@ -334,6 +347,9 @@ struct Assets {
     fold_shade: ID2D1SolidColorBrush,
     /// The failed-write border flash (NOTE-EDITOR.md §5.6).
     error: ID2D1SolidColorBrush,
+    /// The resize hover highlight: the system highlight colour, drawn on the
+    /// window layer so the paper bitmap and its ClearType stay untouched.
+    hover: ID2D1SolidColorBrush,
 }
 
 impl Assets {
@@ -380,6 +396,7 @@ impl Assets {
             fold_edge: solid(context, palette.edge, 1.0)?,
             fold_shade: solid(context, 0x000000, 0.12)?,
             error: solid(context, 0xC4_2B_1C, 1.0)?,
+            hover: solid(context, system_highlight(), 1.0)?,
         })
     }
 
@@ -391,6 +408,59 @@ impl Assets {
         } else {
             &self.body
         }
+    }
+}
+
+/// The inputs of the last full rebuild: the text the current [`DisplayDoc`] was
+/// parsed from, the active line index, the IME composition and the render
+/// target generation the cached layouts belong to.
+///
+/// Moving the caret or extending the selection inside the active line changes
+/// none of them, so [`EditorState::rebuild`] can skip both the document parse
+/// and every laid-out line and only keep the caret on screen.
+#[derive(Debug, Default)]
+struct Parsed {
+    /// A copy of the document text `display` was parsed from, compared byte for
+    /// byte by [`Parsed::is_current`] (no allocation per rebuild).
+    text: String,
+    /// The active line index of that parse (`display.line_index(caret)`).
+    active: usize,
+    /// The IME composition that parse laid out, if one was open.
+    composition: Option<String>,
+    /// The caret position of that parse. Only the composition insertion offset
+    /// depends on it, so [`Parsed::is_current`] compares it only then.
+    caret: usize,
+    /// Text width the layouts were wrapped to. A resize that changes it must
+    /// re-lay out every line.
+    width: f32,
+    /// The `layout_generation` the cached layouts belong to.
+    generation: u64,
+    /// Cleared until the first rebuild finishes and when the surface is resized.
+    ready: bool,
+}
+
+impl Parsed {
+    /// Whether the current display and its laid-out lines are still valid for
+    /// `text` with the caret in `active`, the given composition/generation and
+    /// the given content width.
+    fn is_current(
+        &self,
+        text: &str,
+        active: usize,
+        composition: Option<&str>,
+        caret: usize,
+        width: f32,
+        generation: u64,
+    ) -> bool {
+        self.ready
+            && self.generation == generation
+            && self.active == active
+            && self.composition.as_deref() == composition
+            && self.width == width
+            && self.text == text
+            // An open composition is laid out at the caret, so moving the caret
+            // within the active line moves the composition too.
+            && (composition.is_none() || self.caret == caret)
     }
 }
 
@@ -420,6 +490,8 @@ pub struct EditorState {
     error_until: f64,
     composition: Option<String>,
     pointer_down: bool,
+    /// The resize band the pointer is over, for the 2 DIP edge highlight.
+    hover: Option<ResizeZone>,
     pending_commit: bool,
     blink_at: f64,
     caret_on: bool,
@@ -430,11 +502,20 @@ pub struct EditorState {
     clip: Option<ID2D1Geometry>,
     fold_edge: Option<ID2D1Geometry>,
     fold_shade: Option<ID2D1Geometry>,
-    shadow: Option<ID2D1Bitmap1>,
+    shadow: Option<ShadowAtlas>,
+    /// The paper drawn inside the window, DIP. Derived from the client area: the
+    /// window is always the paper plus two `MARGIN_DIP` bands.
+    paper: PaperSize,
     dpi: u32,
     width_px: u32,
     height_px: u32,
     scale: f32,
+    /// The parse and layout inputs of the last full rebuild, see [`Parsed`].
+    parsed: Parsed,
+    /// Presented frames; the probe uses it to time a resize repaint.
+    frames: u64,
+    /// CPU time of the last painted frame, before `Present` blocks on vsync.
+    last_paint_us: u32,
 }
 
 impl EditorState {
@@ -452,6 +533,7 @@ impl EditorState {
         doc.set_caret(0, false);
         let display = DisplayDoc::parse(doc.text());
         let scale = dpi.max(96) as f32 / 96.0;
+        let paper = paper_of_window(width_px.max(1), height_px.max(1), dpi.max(96));
         let mut state = Self {
             doc,
             display,
@@ -462,7 +544,7 @@ impl EditorState {
             layout_generation: 0,
             content_height: 0.0,
             scroll: 0.0,
-            view_height: PAPER_HEIGHT - PAD_TOP - PAD_BOTTOM,
+            view_height: paper.view_height(),
             dirty: true,
             enabled: true,
             focused: false,
@@ -470,6 +552,7 @@ impl EditorState {
             error_until: 0.0,
             composition: None,
             pointer_down: false,
+            hover: None,
             pending_commit: false,
             blink_at: 0.0,
             caret_on: true,
@@ -481,12 +564,17 @@ impl EditorState {
             fold_edge: None,
             fold_shade: None,
             shadow: None,
+            paper,
             dpi: dpi.max(96),
             width_px: width_px.max(1),
             height_px: height_px.max(1),
             scale,
+            parsed: Parsed::default(),
+            frames: 0,
+            last_paint_us: 0,
         };
         state.rebuild_scenery()?;
+        state.rebuild_shadow()?;
         state.rebuild();
         Ok(state)
     }
@@ -494,8 +582,8 @@ impl EditorState {
     /// Recreates the brushes and geometries that depend on paper size/DPI.
     fn rebuild_scenery(&mut self) -> Result<(), String> {
         let palette = crate::notes::color(self.color);
-        let paper = paper_rect(self.scale);
-        self.paper_brush = Some(paper_gradient(&self.surface.rt, palette)?);
+        let paper = paper_rect(self.paper);
+        self.paper_brush = Some(paper_gradient(&self.surface.rt, palette, self.paper)?);
         let glass = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
@@ -528,14 +616,16 @@ impl EditorState {
             .cast()
             .map_err(|error| format!("RoundedRectangleGeometry -> ID2D1Geometry: {error}"))?,
         );
-        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory)?;
+        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory, self.paper)?;
         self.fold_edge = Some(fold_edge);
         self.fold_shade = Some(fold_shade);
-        self.shadow = Some(self.surface.upload(&bake_shadow(
-            self.width_px,
-            self.height_px,
-            self.dpi,
-        ))?);
+        Ok(())
+    }
+
+    /// Bakes the 9-patch shadow. Only a DPI change invalidates it; resizing the
+    /// window stretches the slices instead.
+    fn rebuild_shadow(&mut self) -> Result<(), String> {
+        self.shadow = Some(ShadowAtlas::bake(&self.surface, self.scale)?);
         Ok(())
     }
 
@@ -566,6 +656,7 @@ impl EditorState {
         self.fold_shade = None;
         self.shadow = None;
         self.rebuild_scenery()?;
+        self.rebuild_shadow()?;
         self.rebuild();
         self.dirty = true;
         logging::error("note editor surface rebuilt");
@@ -573,13 +664,35 @@ impl EditorState {
     }
 
     pub fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
+        let width_px = width_px.max(1);
+        let height_px = height_px.max(1);
+        let dpi = dpi.max(96);
+        let paper = paper_of_window(width_px, height_px, dpi);
+        // A width change re-wraps every line; a height-only drag just shows more
+        // or less of the same layout. A DPI change re-lays out for safety.
+        let reflow = paper.content_width() != self.paper.content_width() || dpi != self.dpi;
+        let rebake_shadow = dpi != self.dpi;
+        self.width_px = width_px;
+        self.height_px = height_px;
+        self.dpi = dpi;
+        self.scale = dpi as f32 / 96.0;
+        self.paper = paper;
+        self.view_height = paper.view_height();
         self.surface.resize(width_px, height_px, dpi)?;
-        self.width_px = width_px.max(1);
-        self.height_px = height_px.max(1);
-        self.dpi = dpi.max(96);
-        self.scale = self.dpi as f32 / 96.0;
         self.rebuild_scenery()?;
-        self.rebuild();
+        if rebake_shadow {
+            self.rebuild_shadow()?;
+        }
+        if reflow {
+            // The cached layouts were wrapped to the old width; drop them all
+            // rather than keep one bucket per drag step.
+            self.layouts.clear();
+            self.layout_generation = self.layout_generation.wrapping_add(1);
+            self.parsed.ready = false;
+            self.rebuild();
+        } else {
+            self.clamp_scroll();
+        }
         self.dirty = true;
         Ok(())
     }
@@ -593,6 +706,14 @@ impl EditorState {
             } => {
                 if let Err(error) = self.resize(width_px, height_px, dpi) {
                     logging::error(format!("note editor resize: {error}"));
+                }
+            }
+            Command::Hover(zone) => {
+                if self.hover != zone {
+                    self.hover = zone;
+                    // The highlight lives on the window layer, but the frame is
+                    // painted as a whole; one repaint per entry or exit.
+                    self.dirty = true;
                 }
             }
             Command::Focus(focused) => {
@@ -996,10 +1117,41 @@ impl EditorState {
     }
 
     fn rebuild(&mut self) {
-        self.display = DisplayDoc::parse(self.doc.text());
         let caret = self.doc.caret();
+        // `display` still belongs to the last full rebuild here.
+        let active = self.display.line_index(caret);
+        let content_width = self.paper.content_width();
+        let caret_only = self.parsed.is_current(
+            self.doc.text(),
+            active,
+            self.composition.as_deref(),
+            caret,
+            content_width,
+            self.layout_generation,
+        );
+        if caret_only {
+            // The document text, the IME composition and the active line are
+            // unchanged, so the display map and every layout are still current.
+            // Only the caret pixel and the selection rectangles moved, and
+            // `paint` derives both from the live document: keep the caret on
+            // screen and repaint instead of re-parsing the note.
+            self.ensure_caret_visible();
+            self.dirty = true;
+            return;
+        }
+        self.display = DisplayDoc::parse(self.doc.text());
         let active = self.display.line_index(caret);
         let generation = self.layout_generation;
+        // Remember what this full rebuild was built from; the next caret-only
+        // move is then a byte comparison instead of a parse.
+        self.parsed.text.clear();
+        self.parsed.text.push_str(self.doc.text());
+        self.parsed.active = active;
+        self.parsed.composition.clone_from(&self.composition);
+        self.parsed.caret = caret;
+        self.parsed.width = content_width;
+        self.parsed.generation = generation;
+        self.parsed.ready = true;
         self.layout_stamp = self.layout_stamp.wrapping_add(1);
         let stamp = self.layout_stamp;
         self.lines.clear();
@@ -1020,7 +1172,7 @@ impl EditorState {
                     composition = Some(at..at + composing.len());
                 }
             }
-            let width = (CONTENT_WIDTH - indent).max(1.0);
+            let width = (content_width - indent).max(1.0);
             let metrics = line.metrics;
             let mut layout = None;
             let mut text_height = metrics.font_size * metrics.line_spacing;
@@ -1177,7 +1329,18 @@ impl EditorState {
         }
         self.dirty = false;
         self.paint()?;
+        self.frames += 1;
         Ok(())
+    }
+
+    /// How many frames the editor has presented since it opened.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// CPU time of the last painted frame, in microseconds, without `Present`.
+    pub fn last_paint_us(&self) -> u32 {
+        self.last_paint_us
     }
 
     /// How long until the next caret blink, or `None` when asleep.
@@ -1194,6 +1357,7 @@ impl EditorState {
     }
 
     fn paint(&mut self) -> Result<(), String> {
+        let started = std::time::Instant::now();
         self.surface.begin_paper()?;
         let target = self.surface.rt.clone();
         self.paint_paper_on(&target);
@@ -1202,6 +1366,10 @@ impl EditorState {
         self.surface.begin_window()?;
         self.paint_window();
         self.surface.end()?;
+        // Measured without the present: `Present(1, 0)` waits for vsync and
+        // would report the display's cadence, not the drawing cost.
+        self.last_paint_us = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+
         if self.surface.present(true) == Present::DeviceLost {
             return Err("device lost in the note editor".to_string());
         }
@@ -1216,9 +1384,10 @@ impl EditorState {
     /// card travels. The editor's GPU paper bitmap is never read back.
     pub fn render_flight_image(&mut self) -> Result<ImageData, String> {
         let started = std::time::Instant::now();
-        let scale = self.scale.max(0.5);
-        let width = (PAPER_WIDTH * scale).round().max(1.0) as u32;
-        let height = (PAPER_HEIGHT * scale).round().max(1.0) as u32;
+        // The flight carries the paper at the editor's current size, capped so a
+        // 250 % or larger display does not allocate an oversized image.
+        let scale = flight_scale(self.paper, self.scale);
+        let (width, height) = flight_pixels(self.paper, scale);
         let factory = crate::capture::wic::imaging_factory()?;
         // SAFETY: the factory is live, the size is at least one pixel and the
         // pixel format is a static WIC GUID.
@@ -1253,8 +1422,8 @@ impl EditorState {
 
         let assets = Assets::new(&rt, &self.surface.dwrite, self.color)?;
         let palette = crate::notes::color(self.color);
-        let paper_brush = paper_gradient(&rt, palette)?;
-        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory)?;
+        let paper_brush = paper_gradient(&rt, palette, self.paper)?;
+        let (fold_edge, fold_shade) = fold_geometries(&self.surface.factory, self.paper)?;
         // The paint routines read the brushes from `self`; swap in the WIC
         // target's copies for this one render, then put the screen ones back.
         let screen_assets = std::mem::replace(&mut self.assets, assets);
@@ -1479,6 +1648,18 @@ fn solid(
         .map_err(|error| format!("CreateSolidColorBrush: {error}"))
 }
 
+/// The system highlight colour as `0xRRGGBB` — `COLORREF` is `0xBBGGRR`.
+/// Falls back to the 2.4 accent blue if the system reports none.
+fn system_highlight() -> u32 {
+    // SAFETY: reading a system colour has no preconditions.
+    let colorref = unsafe { GetSysColor(COLOR_HIGHLIGHT) };
+    let red = colorref & 0xFF;
+    let green = (colorref >> 8) & 0xFF;
+    let blue = (colorref >> 16) & 0xFF;
+    let rgb = (red << 16) | (green << 8) | blue;
+    if rgb == 0 { 0x4A_90_E2 } else { rgb }
+}
+
 fn gradient(
     context: &ID2D1RenderTarget,
     stops: &[D2D1_GRADIENT_STOP],
@@ -1531,10 +1712,38 @@ fn d2d_rect(rect: RectF) -> D2D_RECT_F {
     }
 }
 
-/// The paper rectangle in window DIP.
-pub fn paper_rect(scale: f32) -> RectF {
-    let _ = scale;
-    RectF::from_xywh(MARGIN_DIP, MARGIN_DIP, PAPER_WIDTH, PAPER_HEIGHT)
+/// The paper rectangle inside the window, DIP.
+/// Pixels per DIP for the flight image: never below the minimum the cards use,
+/// and scaled down so the paper's long edge stays within `FLIGHT_MAX_PX`.
+fn flight_scale(paper: PaperSize, scale: f32) -> f32 {
+    let mut scale = scale.max(0.5);
+    let long_px = paper.width.max(paper.height) * scale;
+    if long_px > FLIGHT_MAX_PX {
+        scale *= FLIGHT_MAX_PX / long_px;
+    }
+    scale
+}
+
+/// The flight bitmap size in pixels: the paper at `scale`, at least 1×1.
+fn flight_pixels(paper: PaperSize, scale: f32) -> (u32, u32) {
+    (
+        (paper.width * scale).round().max(1.0) as u32,
+        (paper.height * scale).round().max(1.0) as u32,
+    )
+}
+
+pub fn paper_rect(paper: PaperSize) -> RectF {
+    RectF::from_xywh(MARGIN_DIP, MARGIN_DIP, paper.width, paper.height)
+}
+
+/// The paper a client area holds: the client minus the two shadow margins.
+/// The units are pixels on one axis; the result is DIP.
+pub fn paper_of_window(width_px: u32, height_px: u32, dpi: u32) -> PaperSize {
+    let scale = dpi.max(96) as f32 / 96.0;
+    PaperSize::new(
+        (width_px.max(1) as f32 / scale - MARGIN_DIP * 2.0).max(1.0),
+        (height_px.max(1) as f32 / scale - MARGIN_DIP * 2.0).max(1.0),
+    )
 }
 
 /// A display byte offset as a UTF-16 position for DirectWrite.
@@ -1571,6 +1780,7 @@ fn distance(line: &LaidLine, y: f32) -> f32 {
 fn paper_gradient(
     rt: &ID2D1RenderTarget,
     palette: crate::notes::NoteColor,
+    paper: PaperSize,
 ) -> Result<ID2D1LinearGradientBrush, String> {
     let paper_top = mix(palette.paper, palette.edge, 0.45);
     let stops = [
@@ -1583,14 +1793,17 @@ fn paper_gradient(
             color: color_of(paper_top, 1.0),
         },
     ];
-    gradient(rt, &stops, (0.0, 0.0), (0.0, PAPER_HEIGHT))
+    gradient(rt, &stops, (0.0, 0.0), (0.0, paper.height))
 }
 
 /// The two dog-ear triangles, in paper-local DIP.
-fn fold_geometries(factory: &ID2D1Factory) -> Result<(ID2D1Geometry, ID2D1Geometry), String> {
+fn fold_geometries(
+    factory: &ID2D1Factory,
+    paper: PaperSize,
+) -> Result<(ID2D1Geometry, ID2D1Geometry), String> {
     let fold = FOLD_DIP;
-    let right = PAPER_WIDTH;
-    let bottom = PAPER_HEIGHT;
+    let right = paper.width;
+    let bottom = paper.height;
     let edge = triangle(
         factory,
         [
@@ -1642,19 +1855,129 @@ fn triangle(factory: &ID2D1Factory, points: [(f32, f32); 3]) -> Result<ID2D1Geom
     }
 }
 
-/// Bakes the paper shadow once per size/DPI: a rounded-rect mask, three box
-/// blur passes, 18 % black, offset 6 DIP down.
-fn bake_shadow(width_px: u32, height_px: u32, dpi: u32) -> ImageData {
+/// A rectangle in device pixels, used by the shadow 9-patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PixelRect {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+impl PixelRect {
+    fn from_edges(left: u32, top: u32, right: u32, bottom: u32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[cfg(test)]
+    fn width(self) -> u32 {
+        self.right.saturating_sub(self.left)
+    }
+
+    #[cfg(test)]
+    fn height(self) -> u32 {
+        self.bottom.saturating_sub(self.top)
+    }
+
+    /// The same rectangle in DIP, for a D2D target at `scale` px/DIP.
+    fn to_dip(self, scale: f32) -> D2D_RECT_F {
+        D2D_RECT_F {
+            left: self.left as f32 / scale,
+            top: self.top as f32 / scale,
+            right: self.right as f32 / scale,
+            bottom: self.bottom as f32 / scale,
+        }
+    }
+}
+
+/// One 9-patch slice: where it goes (window pixels) and where it comes from
+/// (atlas pixels).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AtlasSlice {
+    dest: PixelRect,
+    src: PixelRect,
+}
+
+/// The 9-patch paper shadow: one small atlas baked per DPI. The four corners
+/// are drawn one-to-one and the edges and middle stretch to the real window, so
+/// a resize never re-bakes a full-window shadow (BEHAVIOR §10.1).
+struct ShadowAtlas {
+    bitmap: ID2D1Bitmap1,
+    corner_px: u32,
+    middle_px: u32,
+}
+
+/// Corner and middle strip of the atlas, device pixels. Pure so the DPI
+/// re-bake policy is testable without a device.
+fn shadow_atlas_pixels(scale: f32) -> (u32, u32) {
+    let corner = (SHADOW_CORNER_DIP * scale).round().max(2.0) as u32;
+    let middle = (SHADOW_MIDDLE_DIP * scale).round().max(1.0) as u32;
+    (corner, middle)
+}
+
+impl ShadowAtlas {
+    /// Bakes the atlas for a DPI scale. The reference window is square and just
+    /// large enough that its four shadow corners never overlap.
+    fn bake(surface: &Surface, scale: f32) -> Result<Self, String> {
+        let (corner_px, middle_px) = shadow_atlas_pixels(scale);
+        let atlas_px = corner_px * 2 + middle_px;
+        let image = bake_shadow(atlas_px, atlas_px, scale);
+        Ok(Self {
+            bitmap: surface.upload(&image)?,
+            corner_px,
+            middle_px,
+        })
+    }
+}
+
+/// The nine slices for a window of `width_px` × `height_px`, in device pixels:
+/// dest is the window rectangle, src the atlas rectangle.
+///
+/// Pure so the geometry is testable without a device.
+fn shadow_slices(width_px: u32, height_px: u32, corner_px: u32, middle_px: u32) -> [AtlasSlice; 9] {
+    let atlas = corner_px * 2 + middle_px;
+    // At every size the editor allows the window is much wider than two
+    // corners; clamp anyway so a tiny window cannot invert a slice.
+    let corner_x = corner_px.min(width_px / 2);
+    let corner_y = corner_px.min(height_px / 2);
+    let dx = [0, corner_x, width_px - corner_x, width_px];
+    let dy = [0, corner_y, height_px - corner_y, height_px];
+    let sx = [0, corner_px, corner_px + middle_px, atlas];
+    let sy = sx;
+    let empty = AtlasSlice {
+        dest: PixelRect::from_edges(0, 0, 0, 0),
+        src: PixelRect::from_edges(0, 0, 0, 0),
+    };
+    let mut slices = [empty; 9];
+    for row in 0..3 {
+        for column in 0..3 {
+            slices[row * 3 + column] = AtlasSlice {
+                dest: PixelRect::from_edges(dx[column], dy[row], dx[column + 1], dy[row + 1]),
+                src: PixelRect::from_edges(sx[column], sy[row], sx[column + 1], sy[row + 1]),
+            };
+        }
+    }
+    slices
+}
+
+/// Bakes the shadow for a reference window: a rounded-rect mask, three box blur
+/// passes, 18 % black, offset 6 DIP down.
+fn bake_shadow(width_px: u32, height_px: u32, scale: f32) -> ImageData {
     let width = width_px.max(1) as usize;
     let height = height_px.max(1) as usize;
-    let scale = dpi.max(96) as f32 / 96.0;
     let blur = (SHADOW_BLUR_DIP * scale * 0.5).round().max(1.0) as i32;
     let offset = (SHADOW_OFFSET_DIP * scale).round() as i32;
+    let margin = MARGIN_DIP * scale;
     let paper = RectF::from_xywh(
-        MARGIN_DIP * scale,
-        MARGIN_DIP * scale + offset as f32,
-        PAPER_WIDTH * scale,
-        PAPER_HEIGHT * scale,
+        margin,
+        margin + offset as f32,
+        (width_px as f32 - margin * 2.0).max(1.0),
+        (height_px as f32 - margin * 2.0).max(1.0),
     );
     let radius = RADIUS_DIP * scale;
     let mut mask = vec![0u8; width * height];
@@ -1867,8 +2190,12 @@ impl Surface {
     }
 
     fn ensure_paper(&mut self) -> Result<(), String> {
-        let width = (PAPER_WIDTH * self.dpi / 96.0).round().max(1.0) as u32;
-        let height = (PAPER_HEIGHT * self.dpi / 96.0).round().max(1.0) as u32;
+        // The paper is whatever the client area holds once the two shadow
+        // margins are removed; a resize reallocates only when that changes.
+        let paper = paper_of_window(self.width_px, self.height_px, self.dpi.round() as u32);
+        let scale = self.dpi / 96.0;
+        let width = (paper.width * scale).round().max(1.0) as u32;
+        let height = (paper.height * scale).round().max(1.0) as u32;
         if self
             .paper
             .as_ref()
@@ -2045,7 +2372,9 @@ fn bitmap_height(bitmap: &ID2D1Bitmap1) -> u32 {
 mod tests {
     use super::paint::in_view;
     use super::*;
-    use crate::note_editor::display::{LineMetrics, Run};
+    use crate::note_editor::display::{
+        DEFAULT_PAPER, LineMetrics, MAX_PAPER, PAD_BOTTOM, PAPER_HEIGHT, Run,
+    };
 
     /// One hand-built display line, so a test can vary a single layout input.
     fn display_line(text: &str, block: Block, style: Style) -> DisplayLine {
@@ -2157,11 +2486,26 @@ mod tests {
     fn the_window_is_paper_plus_a_shadow_margin() {
         assert_eq!(WINDOW_WIDTH_DIP, 500.0);
         assert_eq!(WINDOW_HEIGHT_DIP, 400.0);
-        let paper = paper_rect(2.0);
+        let paper = paper_rect(DEFAULT_PAPER);
         assert_eq!(paper.left, 20.0);
         assert_eq!(paper.top, 20.0);
         assert_eq!(paper.right, 480.0);
         assert_eq!(paper.bottom, 380.0);
+    }
+
+    #[test]
+    fn a_window_holds_the_paper_it_was_sized_for() {
+        // The client area minus the two shadow margins, in DIP.
+        assert_eq!(paper_of_window(500, 400, 96), PaperSize::new(460.0, 360.0));
+        assert_eq!(
+            paper_of_window(1000, 800, 192),
+            PaperSize::new(460.0, 360.0)
+        );
+        // A live drag lands on fractional DIP; the paint code handles it.
+        assert_eq!(
+            paper_of_window(1201, 801, 96),
+            PaperSize::new(1161.0, 761.0)
+        );
     }
 
     #[test]
@@ -2186,12 +2530,287 @@ mod tests {
 
     #[test]
     fn the_shadow_has_transparent_edges_and_a_dark_centre() {
-        let shadow = bake_shadow(500, 400, 96);
+        let shadow = bake_shadow(200, 200, 1.0);
         assert!(shadow.is_valid());
         // Outside the paper: clear.
         assert_eq!(shadow.bgra[3], 0);
         // Over the paper centre: 18 % black.
-        let centre = ((200 * 500 + 250) * 4) as usize;
+        let centre = ((100 * 200 + 100) * 4) as usize;
         assert!(shadow.bgra[centre + 3] > 30 && shadow.bgra[centre + 3] < 55);
+        // The visible left margin carries the blurred edge.
+        let margin = ((100 * 200 + 2) * 4) as usize;
+        assert!(shadow.bgra[margin + 3] > 0 && shadow.bgra[margin + 3] < 46);
+    }
+
+    #[test]
+    fn the_shadow_atlas_rebakes_only_when_the_dpi_changes() {
+        assert_eq!(shadow_atlas_pixels(1.0), (48, 8));
+        assert_eq!(shadow_atlas_pixels(1.5), (72, 12));
+        assert_eq!(shadow_atlas_pixels(2.0), (96, 16));
+        assert_eq!(shadow_atlas_pixels(2.5), (120, 20));
+    }
+
+    #[test]
+    fn the_flight_image_follows_the_paper_and_stops_at_2048() {
+        let default = DEFAULT_PAPER;
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 1.0)),
+            (460, 360)
+        );
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 2.0)),
+            (920, 720)
+        );
+        let max = MAX_PAPER;
+        assert_eq!(flight_pixels(max, flight_scale(max, 2.0)), (1640, 1280));
+        // 250 % would be 2050 px wide; the cap keeps the long edge at 2048.
+        let (width, height) = flight_pixels(max, flight_scale(max, 2.5));
+        assert_eq!(width, 2048);
+        // Both axes shrink by the same factor, so the aspect stays the paper's.
+        assert_eq!(height, 1598);
+        // Below half scale the flight keeps its 0.5 px/DIP floor.
+        assert_eq!(
+            flight_pixels(default, flight_scale(default, 0.4)),
+            (230, 180)
+        );
+    }
+
+    #[test]
+    fn the_nine_slices_reproduce_the_baked_shadow() {
+        // The atlas is a small square; the window is a wide one. The slices
+        // must put the same shadow back, because a resize no longer re-bakes.
+        let (width, height, scale) = (300u32, 260u32, 1.0f32);
+        let (corner, middle) = shadow_atlas_pixels(scale);
+        let atlas_px = corner * 2 + middle;
+        let atlas = bake_shadow(atlas_px, atlas_px, scale);
+        let reference = bake_shadow(width, height, scale);
+        let alpha = |image: &ImageData, x: u32, y: u32| {
+            image.bgra[((y * image.width + x) * 4 + 3) as usize]
+        };
+        let mut worst = 0i32;
+        let mut worst_at = (0, 0);
+        for slice in shadow_slices(width, height, corner, middle) {
+            let dest_w = slice.dest.width();
+            let dest_h = slice.dest.height();
+            let src_w = slice.src.width();
+            let src_h = slice.src.height();
+            for y in slice.dest.top..slice.dest.bottom {
+                for x in slice.dest.left..slice.dest.right {
+                    // Nearest texel, which is what a 1:1 corner slice takes and
+                    // the closest approximation of the stretched strips.
+                    let sx = slice.src.left + (x - slice.dest.left) * src_w / dest_w;
+                    let sy = slice.src.top + (y - slice.dest.top) * src_h / dest_h;
+                    let got = alpha(&atlas, sx.min(atlas.width - 1), sy.min(atlas.height - 1));
+                    let want = alpha(&reference, x, y);
+                    let diff = (got as i32 - want as i32).abs();
+                    if diff > worst {
+                        worst = diff;
+                        worst_at = (x, y);
+                    }
+                }
+            }
+        }
+        assert!(
+            // Corners are 1:1, so only the stretched strips can differ, and
+            // then only where the corner arcs bleed in (worst seen: 3 at the
+            // top edge just past the corner slice).
+            worst <= 4,
+            "9-patch shadow differs by {worst} at {worst_at:?}"
+        );
+    }
+
+    #[test]
+    fn the_nine_shadow_slices_tile_the_window() {
+        // An 860×680 DIP window at 200 %.
+        let (corner, middle) = shadow_atlas_pixels(2.0);
+        let slices = shadow_slices(1720, 1360, corner, middle);
+        // Corners keep their size; the middle takes whatever is left.
+        assert_eq!(slices[0].dest, PixelRect::from_edges(0, 0, 96, 96));
+        assert_eq!(slices[4].dest, PixelRect::from_edges(96, 96, 1624, 1264));
+        assert_eq!(
+            slices[8].dest,
+            PixelRect::from_edges(1624, 1264, 1720, 1360)
+        );
+        // No seams, no overlap: every edge meets its neighbour exactly.
+        for row in 0..3 {
+            for column in 0..2 {
+                let left = slices[row * 3 + column].dest;
+                let right = slices[row * 3 + column + 1].dest;
+                assert_eq!(left.right, right.left);
+                assert_eq!(left.top, right.top);
+                assert_eq!(left.bottom, right.bottom);
+            }
+        }
+        for column in 0..3 {
+            for row in 0..2 {
+                let top = slices[row * 3 + column].dest;
+                let bottom = slices[(row + 1) * 3 + column].dest;
+                assert_eq!(top.bottom, bottom.top);
+                assert_eq!(top.left, bottom.left);
+                assert_eq!(top.right, bottom.right);
+            }
+        }
+        // The covered area is exactly the window.
+        let covered: u32 = slices
+            .iter()
+            .map(|slice| {
+                (slice.dest.right - slice.dest.left) * (slice.dest.bottom - slice.dest.top)
+            })
+            .sum();
+        assert_eq!(covered, 1720 * 1360);
+        // Source slices are the corners plus a one-strip middle.
+        assert_eq!(slices[0].src, PixelRect::from_edges(0, 0, 96, 96));
+        assert_eq!(slices[8].src, PixelRect::from_edges(112, 112, 208, 208));
+        assert_eq!(slices[4].src, PixelRect::from_edges(96, 96, 112, 112));
+    }
+
+    /// A two-line document parsed once with the caret at its start and no
+    /// composition: the state a drag-selection begins from.
+    fn parsed_document() -> (DisplayDoc, Parsed) {
+        let text = "alpha\nbeta";
+        let display = DisplayDoc::parse(text);
+        let parsed = Parsed {
+            text: text.to_string(),
+            active: display.line_index(0),
+            composition: None,
+            caret: 0,
+            width: DEFAULT_PAPER.content_width(),
+            generation: 3,
+            ready: true,
+        };
+        (display, parsed)
+    }
+
+    #[test]
+    fn moving_the_caret_inside_the_active_line_skips_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // A click or a drag extends the selection inside the first line: the
+        // text is unchanged and the caret still lands on the same active line,
+        // so the display map and every layout stay valid.
+        let width = DEFAULT_PAPER.content_width();
+        for caret in [1, 3, 5] {
+            assert!(parsed.is_current(text, display.line_index(caret), None, caret, width, 3));
+        }
+    }
+
+    #[test]
+    fn a_width_change_forces_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // The layouts were wrapped to the old width, so the drag has to lay the
+        // note out again even though the text and the caret are unchanged.
+        assert!(!parsed.is_current(text, display.line_index(0), None, 0, 500.0, 3));
+    }
+
+    #[test]
+    fn a_text_change_forces_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let caret = 2;
+        assert!(!parsed.is_current(
+            "alpha!\nbeta",
+            display.line_index(caret),
+            None,
+            caret,
+            DEFAULT_PAPER.content_width(),
+            3
+        ));
+    }
+
+    #[test]
+    fn a_caret_line_change_forces_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // Taken from the display map so the test does not depend on whether the
+        // newline belongs to the first or the second source line.
+        let boundary = display.lines[1].source.start;
+        let before = boundary - 1;
+        assert_eq!(display.line_index(before), 0);
+        assert!(parsed.is_current(
+            text,
+            display.line_index(before),
+            None,
+            before,
+            DEFAULT_PAPER.content_width(),
+            3
+        ));
+        // The caret crossed into the next source line, which now becomes the
+        // active line showing its Markdown markers: both lines need layout.
+        assert_eq!(display.line_index(boundary), 1);
+        assert!(!parsed.is_current(
+            text,
+            display.line_index(boundary),
+            None,
+            boundary,
+            DEFAULT_PAPER.content_width(),
+            3
+        ));
+    }
+
+    #[test]
+    fn an_open_composition_tracks_the_caret() {
+        let text = "alpha";
+        let display = DisplayDoc::parse(text);
+        let parsed = Parsed {
+            text: text.to_string(),
+            active: 0,
+            composition: Some("ni".to_string()),
+            caret: 3,
+            width: DEFAULT_PAPER.content_width(),
+            generation: 0,
+            ready: true,
+        };
+        // The composition is laid out at the caret, so even without a text or
+        // active-line change a caret move inside the line has to rebuild.
+        assert!(parsed.is_current(
+            text,
+            display.line_index(3),
+            Some("ni"),
+            3,
+            DEFAULT_PAPER.content_width(),
+            0
+        ));
+        assert!(!parsed.is_current(
+            text,
+            display.line_index(1),
+            Some("ni"),
+            1,
+            DEFAULT_PAPER.content_width(),
+            0
+        ));
+    }
+
+    #[test]
+    fn a_new_render_target_or_an_unfinished_build_forces_the_reparse() {
+        let (display, mut parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // A device loss or the flight-image render replaces the layout target.
+        assert!(!parsed.is_current(
+            text,
+            display.line_index(0),
+            None,
+            0,
+            DEFAULT_PAPER.content_width(),
+            4
+        ));
+        parsed.generation = 4;
+        assert!(parsed.is_current(
+            text,
+            display.line_index(0),
+            None,
+            0,
+            DEFAULT_PAPER.content_width(),
+            4
+        ));
+        // Until the first rebuild finished there is nothing to keep.
+        parsed.ready = false;
+        assert!(!parsed.is_current(
+            text,
+            display.line_index(0),
+            None,
+            0,
+            DEFAULT_PAPER.content_width(),
+            4
+        ));
     }
 }

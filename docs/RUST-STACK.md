@@ -192,9 +192,8 @@ CI（GitHub Actions `windows-latest`）：`fmt`、`clippy -D warnings`、`test`�
 - 不做安装包；开机启动写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。
 - 版本号写入 exe 资源（`VERSIONINFO`，2.0.0 对应 `2,0,0,0`）；托盘提示保持
   WPF 的 `Pegline`，不改用户可见文案。
-- 发布由 GitHub Actions 在 `v*` 标签上构建，Release 直接提供 `pegline.exe`；不生成 zip、
-  安装器或校验文件，也不在发布包里附带 README/LICENSE/CHANGELOG。可选代码签名暂不做，
-  签名证书成本高于收益。
+- 发布包由 `tools/package-release.ps1` 生成 zip + SHA-256；可选代码签名
+  暂不做，签名证书成本高于收益。
 
 ## 8.1 帧率与 120 Hz
 

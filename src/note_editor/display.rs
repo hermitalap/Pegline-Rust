@@ -21,8 +21,198 @@ pub const PAD_LEFT: f32 = 30.0;
 pub const PAD_RIGHT: f32 = 30.0;
 pub const PAD_TOP: f32 = 26.0;
 pub const PAD_BOTTOM: f32 = 30.0;
-/// Width available to text, DIP.
+/// Shadow margin between the paper and the editor window edge, DIP.
+pub const MARGIN_DIP: f32 = 20.0;
+/// Corner radius of the paper, DIP.
+pub const RADIUS_DIP: f32 = 22.0;
+/// How far inside the paper edge a resize grab still counts, DIP (BEHAVIOR
+/// §10.1). The band reaches outwards over the whole shadow margin.
+pub const RESIZE_GRIP_DIP: f32 = 2.0;
+
+/// A paper size, DIP. The window is always `MARGIN_DIP` larger on every side
+/// (BEHAVIOR §10.1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaperSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl PaperSize {
+    pub const fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+
+    /// Width available to text, DIP.
+    pub fn content_width(self) -> f32 {
+        (self.width - PAD_LEFT - PAD_RIGHT).max(1.0)
+    }
+
+    /// Height available to text, DIP.
+    pub fn view_height(self) -> f32 {
+        (self.height - PAD_TOP - PAD_BOTTOM).max(1.0)
+    }
+
+    /// The window that holds this paper: paper plus the shadow margin, DIP.
+    pub const fn window_size(self) -> (f32, f32) {
+        (
+            self.width + MARGIN_DIP * 2.0,
+            self.height + MARGIN_DIP * 2.0,
+        )
+    }
+
+    /// Clamp to the resize range. Tolerates a reversed range and NaN: a value
+    /// that cannot be clamped sensibly falls back to the minimum.
+    pub fn clamp(self) -> Self {
+        Self {
+            width: clamp_axis(self.width, MIN_PAPER.width, MAX_PAPER.width),
+            height: clamp_axis(self.height, MIN_PAPER.height, MAX_PAPER.height),
+        }
+    }
+
+    /// Whole DIP, for the settings key and for the final window size.
+    pub fn rounded(self) -> Self {
+        Self {
+            width: self.width.round(),
+            height: self.height.round(),
+        }
+    }
+
+    /// Whether a point in window DIP is inside the paper's rounded rectangle.
+    /// The window DIP origin is the window's top-left corner, so the paper
+    /// starts at `MARGIN_DIP` on both axes.
+    pub fn contains(self, x: f32, y: f32) -> bool {
+        let left = MARGIN_DIP;
+        let top = MARGIN_DIP;
+        let right = MARGIN_DIP + self.width;
+        let bottom = MARGIN_DIP + self.height;
+        if x < left || x >= right || y < top || y >= bottom {
+            return false;
+        }
+        let radius = RADIUS_DIP;
+        let cx = if x < left + radius {
+            left + radius
+        } else if x > right - radius {
+            right - radius
+        } else {
+            x
+        };
+        let cy = if y < top + radius {
+            top + radius
+        } else if y > bottom - radius {
+            bottom - radius
+        } else {
+            y
+        };
+        let dx = x - cx;
+        let dy = y - cy;
+        dx * dx + dy * dy <= radius * radius
+    }
+}
+
+impl Default for PaperSize {
+    fn default() -> Self {
+        DEFAULT_PAPER
+    }
+}
+
+fn clamp_axis(value: f32, min: f32, max: f32) -> f32 {
+    let (low, high) = if min <= max { (min, max) } else { (max, min) };
+    if value.is_nan() {
+        return low;
+    }
+    value.max(low).min(high)
+}
+
+/// Smallest paper the editor can be dragged to, DIP (BEHAVIOR §10.1).
+pub const MIN_PAPER: PaperSize = PaperSize::new(PAPER_WIDTH, PAPER_HEIGHT);
+/// The size the editor opens with; resizing the window for the first time is
+/// always a growth (BEHAVIOR §10.1).
+pub const DEFAULT_PAPER: PaperSize = MIN_PAPER;
+/// Largest paper the editor can be dragged to, DIP.
+pub const MAX_PAPER: PaperSize = PaperSize::new(820.0, 640.0);
+/// Default window size, DIP (paper plus the shadow margin).
+pub const WINDOW_WIDTH_DIP: f32 = PAPER_WIDTH + MARGIN_DIP * 2.0;
+pub const WINDOW_HEIGHT_DIP: f32 = PAPER_HEIGHT + MARGIN_DIP * 2.0;
+/// Width available to text at the default paper size, DIP.
 pub const CONTENT_WIDTH: f32 = PAPER_WIDTH - PAD_LEFT - PAD_RIGHT;
+
+/// Parse the `noteSize:<file>` value (`460x360`, whole DIP). Rejects empty,
+/// negative, zero and malformed values; sizes outside the resize range clamp.
+pub fn parse_note_size(text: &str) -> Option<PaperSize> {
+    let text = text.trim();
+    let (width, height) = text.split_once(['x', 'X'])?;
+    if height.contains(['x', 'X']) {
+        return None;
+    }
+    let width: u32 = width.trim().parse().ok()?;
+    let height: u32 = height.trim().parse().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(PaperSize::new(width as f32, height as f32).clamp())
+}
+
+/// Format a paper size for the `noteSize:<file>` settings key.
+pub fn format_note_size(size: PaperSize) -> String {
+    let size = size.rounded();
+    format!("{}x{}", size.width as i64, size.height as i64)
+}
+
+/// Which paper edge a pointer is over for resizing (BEHAVIOR §10.1). Only the
+/// right, bottom and bottom-right corner resize: the window grows rightwards
+/// and downwards and never moves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeZone {
+    Right,
+    Bottom,
+    Corner,
+}
+
+/// What a client point means to the editor. Resizing beats the paper, the
+/// paper beats the margin; a point outside the window is nobody's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    Resize(ResizeZone),
+    Paper,
+    Margin,
+    Outside,
+}
+
+/// Hit-tests a window point in device pixels for a window that holds `paper`
+/// at `dpi`.
+///
+/// The resize bands cover the right and bottom shadow margins and reach
+/// `RESIZE_GRIP_DIP` into the paper; their intersection is the corner. The left
+/// and top margins, including the top-right and bottom-left shadow corners,
+/// stay commit areas.
+pub fn hit_test(x_px: i32, y_px: i32, paper: PaperSize, dpi: u32) -> Hit {
+    let scale = dpi.max(96) as f32 / 96.0;
+    let x = x_px as f32 / scale;
+    let y = y_px as f32 / scale;
+    let (window_width, window_height) = paper.window_size();
+    if x < 0.0 || y < 0.0 || x >= window_width || y >= window_height {
+        return Hit::Outside;
+    }
+    let left = MARGIN_DIP;
+    let top = MARGIN_DIP;
+    let right = MARGIN_DIP + paper.width;
+    let bottom = MARGIN_DIP + paper.height;
+    let grip = RESIZE_GRIP_DIP;
+    let right_band = x >= right - grip && y >= top - grip && y <= bottom + grip;
+    let bottom_band = y >= bottom - grip && x >= left - grip && x <= right + grip;
+    match (right_band, bottom_band) {
+        (true, true) => Hit::Resize(ResizeZone::Corner),
+        (true, false) => Hit::Resize(ResizeZone::Right),
+        (false, true) => Hit::Resize(ResizeZone::Bottom),
+        (false, false) => {
+            if paper.contains(x, y) {
+                Hit::Paper
+            } else {
+                Hit::Margin
+            }
+        }
+    }
+}
 /// Body metrics, DIP.
 pub const BODY_SIZE: f32 = 15.0;
 pub const BODY_SPACING: f32 = 1.55;
@@ -1067,5 +1257,67 @@ mod tests {
         // Plus a rule and a quote only look like lists from outside.
         assert_eq!(list_enter(Block::Paragraph, "---"), None);
         assert_eq!(list_enter(Block::Paragraph, "> - one"), None);
+    }
+
+    #[test]
+    fn the_default_paper_matches_the_window_constants() {
+        assert_eq!(DEFAULT_PAPER, PaperSize::new(460.0, 360.0));
+        assert_eq!(DEFAULT_PAPER.window_size(), (500.0, 400.0));
+        assert_eq!(WINDOW_WIDTH_DIP, 500.0);
+        assert_eq!(WINDOW_HEIGHT_DIP, 400.0);
+        assert_eq!(DEFAULT_PAPER.content_width(), 400.0);
+        assert_eq!(DEFAULT_PAPER.view_height(), 304.0);
+    }
+
+    #[test]
+    fn the_largest_paper_stays_inside_its_range() {
+        assert_eq!(MAX_PAPER.content_width(), 760.0);
+        assert_eq!(MAX_PAPER.view_height(), 584.0);
+        assert_eq!(MAX_PAPER.window_size(), (860.0, 680.0));
+    }
+
+    #[test]
+    fn paper_sizes_clamp_to_the_resize_range() {
+        assert_eq!(PaperSize::new(10.0, 10.0).clamp(), MIN_PAPER);
+        assert_eq!(PaperSize::new(4000.0, 4000.0).clamp(), MAX_PAPER);
+        assert_eq!(
+            PaperSize::new(600.0, 4000.0).clamp(),
+            PaperSize::new(600.0, 640.0)
+        );
+        // NaN degrades to the minimum rather than poisoning the layout.
+        assert_eq!(PaperSize::new(f32::NAN, 500.0).clamp().width, 460.0);
+        assert_eq!(PaperSize::new(f32::NAN, 500.0).clamp().height, 500.0);
+        assert_eq!(PaperSize::new(f32::INFINITY, 500.0).clamp().width, 820.0);
+        assert_eq!(
+            PaperSize::new(f32::NEG_INFINITY, 500.0).clamp().width,
+            460.0
+        );
+        // Whole-DIP rounding for the persisted value.
+        assert_eq!(
+            PaperSize::new(600.4, 500.6).rounded(),
+            PaperSize::new(600.0, 501.0)
+        );
+    }
+
+    #[test]
+    fn note_sizes_parse_and_format() {
+        assert_eq!(parse_note_size("460x360"), Some(MIN_PAPER));
+        assert_eq!(parse_note_size("820X640"), Some(MAX_PAPER));
+        assert_eq!(parse_note_size(" 460x360 "), Some(MIN_PAPER));
+        assert_eq!(
+            parse_note_size("600x500"),
+            Some(PaperSize::new(600.0, 500.0))
+        );
+        // Legal integers outside the range clamp instead of failing.
+        assert_eq!(parse_note_size("99999x99999"), Some(MAX_PAPER));
+        assert_eq!(parse_note_size("1x2"), Some(MIN_PAPER));
+        // Malformed values fall back to the default through the caller.
+        for bad in [
+            "", "0x0", "-1x2", "abc", "1x2x3", "x", "1x", "x2", "1.5x2", "  ",
+        ] {
+            assert_eq!(parse_note_size(bad), None, "{bad:?} should not parse");
+        }
+        assert_eq!(format_note_size(PaperSize::new(600.0, 500.0)), "600x500");
+        assert_eq!(format_note_size(DEFAULT_PAPER), "460x360");
     }
 }

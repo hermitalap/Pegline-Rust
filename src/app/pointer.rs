@@ -65,11 +65,11 @@ impl super::App {
             // The note editor owns this click. Only a click outside its paper
             // commits; the line never reacts while a note is being edited
             // (NOTE-EDITOR.md §5.5, §5.7).
-            if let Some(paper) = self.note_editor_paper_px() {
-                if !paper.contains(x, y) {
-                    if let Some(editor) = self.windows.note_editor.as_mut() {
-                        editor.commit();
-                    }
+            if let Some(editor) = self.windows.note_editor.as_mut() {
+                // The editor's own hit test decides: the paper and its resize
+                // bands belong to it, everything else commits.
+                if editor.is_commit_point(x, y) {
+                    editor.commit();
                 }
             }
             return;

@@ -9,16 +9,17 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, Ordering,
+};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ValidateRect;
+use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR, GCS_RESULTSTR, HIMC,
     ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
@@ -26,28 +27,30 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetOpenStatus,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_A, VK_B, VK_BACK, VK_CONTROL, VK_DELETE,
-    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_I, VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_S,
-    VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_I,
+    VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
-    GetWindowLongPtrW, PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETDLGCODE, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SIZE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE,
+    IDC_SIZEWE, LoadCursorW, MINMAXINFO, PostMessageW, SPI_SETWORKAREA, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO,
+    WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SETTINGCHANGE, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::PCWSTR;
 
 use crate::capture::clipboard;
 use crate::logging;
-use crate::note_editor::display::PAPER_WIDTH;
-use crate::note_editor::render::{
-    Command, EditorState, KeyCode, MARGIN_DIP, Step, WHEEL_STEP, WINDOW_HEIGHT_DIP,
-    WINDOW_WIDTH_DIP,
+use crate::note_editor::display::{
+    DEFAULT_PAPER, Hit, MARGIN_DIP, MAX_PAPER, MIN_PAPER, PaperSize, ResizeZone, hit_test,
 };
+use crate::note_editor::render::{Command, EditorState, KeyCode, Step, WHEEL_STEP};
 use crate::types::ImageData;
 use crate::win32::{self, Monitor};
 use crate::window::{self, ComGuard};
@@ -56,6 +59,21 @@ const CLASS_NAME: PCWSTR = windows::core::w!("PeglineNoteEditor");
 const WINDOW_TITLE: PCWSTR = windows::core::w!("Pegline note");
 /// Private notification: results are waiting in `Shared::events`.
 const WM_APP_NOTE_EVENT: u32 = WM_APP + 12;
+/// Most commands one render-loop iteration may consume. Pointer moves are
+/// coalesced before they are handled; the cap only bounds how long one frame
+/// can spend draining a backlog.
+const BATCH_LIMIT: usize = 512;
+/// Instrumentation: how many posted `PointerMove` timestamps are remembered for
+/// the apply-lag measurement. A power of two, so the slot is a mask.
+const MOVE_RING: usize = 16_384;
+/// Instrumentation: samples a single drag contributes to its p50/p95 report.
+const STAT_SAMPLES: usize = 2048;
+/// Instrumentation: the progress line is written at most this often, so a drag
+/// cannot bury `trace.log` in lines.
+const TRACE_INTERVAL_US: i64 = 250_000;
+/// `WM_MOUSELEAVE` lives in `Win32_UI_Controls`, a feature this crate does not
+/// enable; the message number is fixed.
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 /// What the app learns from an editor.
 #[derive(Clone, Debug)]
@@ -69,6 +87,10 @@ pub enum NoteEditorEvent {
     },
     /// Ctrl+C/Ctrl+X produced text for the clipboard.
     Copy(String),
+    /// A resize drag ended on a new paper size (whole DIP). The app persists it
+    /// against the note's file; nothing is written for a bare click or a drag
+    /// that could not move the clamp.
+    Resized(PaperSize),
 }
 
 /// The callback the app hands in; it runs on the UI thread.
@@ -93,6 +115,33 @@ struct Shared {
     last_click_ms: AtomicIsize,
     last_click_x: AtomicI32,
     last_click_y: AtomicI32,
+    /// A left-button press started on the paper and still owns the mouse
+    /// capture; the I-beam has to stay up when that drag leaves the paper.
+    pointer_down: AtomicBool,
+    /// Frames presented and the duration of the last one, published by the
+    /// render thread. `probe --mode=note` reads them to time a resize.
+    frames: AtomicU64,
+    last_draw_us: AtomicU32,
+    /// The resize band the pointer is over: 0 none, 1 right, 2 bottom,
+    /// 3 corner. Deduplicates `Command::Hover`, so only an entry or an exit
+    /// repaints.
+    hover_kind: AtomicU8,
+    /// The UI thread's paper size and live drag. The render thread never reads
+    /// it; the window procedure does, on the thread that owns the window.
+    resize: Mutex<Resize>,
+    /// The cursor choice the last `WM_SETCURSOR` installed: 0 unknown, 1
+    /// I-beam, 2 arrow. Only a change is traced, so the log stays quiet while
+    /// the pointer moves inside one region.
+    cursor_kind: AtomicU8,
+    /// Tracing is on for this process. Read once, so the hot loop never formats
+    /// a measurement for a log that is not being written.
+    trace_on: bool,
+    /// Instrumentation: how many `PointerMove`s have been posted so far.
+    moves_posted: AtomicU64,
+    /// Instrumentation: post time (monotonic microseconds) of each recent
+    /// `PointerMove`, in post order; the slot is the sequence number masked
+    /// with `MOVE_RING - 1`.
+    move_ring: Box<[AtomicI64]>,
 }
 
 impl Shared {
@@ -100,6 +149,19 @@ impl Shared {
         if let Ok(tx) = self.tx.lock() {
             let _ = tx.send(command);
         }
+    }
+
+    /// Sends one pointer move and remembers when it was posted. The render
+    /// thread maps the same slot back when it applies the move, which is how
+    /// the apply-lag trace is measured; nothing is recorded when tracing is
+    /// off, and nothing allocates either way.
+    fn send_move(&self, x: i32, y: i32) {
+        if self.trace_on {
+            let index = self.moves_posted.fetch_add(1, Ordering::Relaxed);
+            let slot = (index as usize) & (MOVE_RING - 1);
+            self.move_ring[slot].store(now_micros(), Ordering::Relaxed);
+        }
+        self.send(Command::PointerMove { x, y });
     }
 
     fn push(&self, event: NoteEditorEvent, hwnd: HWND) {
@@ -111,6 +173,33 @@ impl Shared {
             let _ = PostMessageW(Some(hwnd), WM_APP_NOTE_EVENT, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// One live resize drag.
+#[derive(Clone, Copy, Debug)]
+struct Drag {
+    zone: ResizeZone,
+    /// Screen position where the button went down, pixels.
+    start_cursor: (i32, i32),
+    /// The window centre at that moment, screen pixels. The paper is resized
+    /// symmetrically around it, so the centre never moves during a drag.
+    centre: (i32, i32),
+    /// The paper at that moment, DIP.
+    start_paper: PaperSize,
+    /// The last window size applied, pixels, so a drag that is clamped and
+    /// cannot grow any further is not mistaken for one that did.
+    last_px: (i32, i32),
+    /// The paper actually changed during this drag; a bare click does not.
+    moved: bool,
+}
+
+/// The UI thread's resize state.
+struct Resize {
+    /// The size the user chose, DIP. This is what goes to disk.
+    explicit: PaperSize,
+    /// The size on screen, DIP: `explicit` clamped to the work area.
+    effective: PaperSize,
+    drag: Option<Drag>,
 }
 
 /// HWND is a raw pointer; the render thread only posts to and draws into the
@@ -140,15 +229,17 @@ pub struct NoteEditor {
 }
 
 impl NoteEditor {
-    /// Opens the editor on `monitor`, centred in its work area.
+    /// Opens the editor on `monitor` with `paper` (DIP), centred in its work
+    /// area; a resize then grows it symmetrically around that centre.
     pub fn open(
         text: String,
         color: usize,
+        paper: PaperSize,
         dpi: u32,
         monitor: Monitor,
         notify: Box<dyn Fn(NoteEditorEvent) + Send>,
     ) -> Result<Self, String> {
-        Self::open_with(text, color, dpi, monitor, true, notify)
+        Self::open_with(text, color, paper, dpi, monitor, true, notify)
     }
 
     /// Creates the editor hidden; the app shows it when the flight lands
@@ -156,24 +247,36 @@ impl NoteEditor {
     pub fn open_hidden(
         text: String,
         color: usize,
+        paper: PaperSize,
         dpi: u32,
         monitor: Monitor,
         notify: Box<dyn Fn(NoteEditorEvent) + Send>,
     ) -> Result<Self, String> {
-        Self::open_with(text, color, dpi, monitor, false, notify)
+        Self::open_with(text, color, paper, dpi, monitor, false, notify)
     }
 
     fn open_with(
         text: String,
         color: usize,
+        paper: PaperSize,
         dpi: u32,
         monitor: Monitor,
         visible: bool,
         notify: Box<dyn Fn(NoteEditorEvent) + Send>,
     ) -> Result<Self, String> {
         window::register_class(CLASS_NAME, Some(note_wndproc))?;
-        let frame = frame_rect(monitor, dpi);
-        let hwnd = create_window(frame)?;
+        let frame = frame_for(monitor.work, paper, dpi);
+        if frame.paper != paper {
+            logging::trace(format!(
+                "note resize: small work area {}x{} at {} dpi, paper {:?} instead of {:?}",
+                monitor.work.width(),
+                monitor.work.height(),
+                dpi.max(96),
+                frame.paper,
+                paper
+            ));
+        }
+        let hwnd = create_window(frame.rect)?;
 
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -190,6 +293,22 @@ impl NoteEditor {
             last_click_ms: AtomicIsize::new(0),
             last_click_x: AtomicI32::new(0),
             last_click_y: AtomicI32::new(0),
+            pointer_down: AtomicBool::new(false),
+            frames: AtomicU64::new(0),
+            last_draw_us: AtomicU32::new(0),
+            hover_kind: AtomicU8::new(0),
+            resize: Mutex::new(Resize {
+                explicit: paper,
+                effective: frame.paper,
+                drag: None,
+            }),
+            cursor_kind: AtomicU8::new(0),
+            trace_on: logging_trace_on(),
+            moves_posted: AtomicU64::new(0),
+            move_ring: (0..MOVE_RING)
+                .map(|_| AtomicI64::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         });
         // SAFETY: the pointer stays valid while the window exists: `NoteEditor`
         // holds the Arc and destroys the window before dropping it.
@@ -198,7 +317,7 @@ impl NoteEditor {
         attach_ime(hwnd, &shared);
 
         let (client_width, client_height) =
-            client_size(hwnd).unwrap_or((frame.width() as u32, frame.height() as u32));
+            client_size(hwnd).unwrap_or((frame.rect.width() as u32, frame.rect.height() as u32));
         let render_dpi = win32::window_dpi(hwnd).max(96);
         let start = Start {
             hwnd: SendHwnd(hwnd),
@@ -252,6 +371,37 @@ impl NoteEditor {
         self.hwnd
     }
 
+    /// The paper size on screen, in DIP: `explicit` clamped to the work area.
+    pub fn paper(&self) -> PaperSize {
+        resize_state(&self.shared).0
+    }
+
+    /// The size the user chose, in DIP, before clamping. This is what a save
+    /// writes back to settings.
+    pub fn explicit_paper(&self) -> PaperSize {
+        match self.shared.resize.lock() {
+            Ok(ui) => ui.explicit,
+            Err(_) => DEFAULT_PAPER,
+        }
+    }
+
+    /// True when a screen-pixel point is outside the paper and its resize
+    /// bands: the click that commits the note.
+    pub fn is_commit_point(&self, x: i32, y: i32) -> bool {
+        // The caller is the app's low-level mouse hook, which reports screen
+        // pixels; `hit_test` works in client pixels.
+        let mut point = POINT { x, y };
+        // SAFETY: converting a screen point for our own window.
+        if !unsafe { ScreenToClient(self.hwnd, &mut point) }.as_bool() {
+            return true;
+        }
+        let dpi = win32::window_dpi(self.hwnd);
+        matches!(
+            hit_test(point.x, point.y, self.paper(), dpi),
+            Hit::Margin | Hit::Outside
+        )
+    }
+
     /// Takes the paper bitmap rendered at open for the flight to the centre.
     /// `None` when the render thread could not produce one; the caller falls
     /// back to the card thumbnail.
@@ -266,6 +416,21 @@ impl NoteEditor {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    /// Frames presented so far, and how long the last one took in
+    /// microseconds. `probe --mode=note` uses both to time a resize repaint.
+    pub fn frames(&self) -> (u64, u32) {
+        (
+            self.shared.frames.load(Ordering::Acquire),
+            self.shared.last_draw_us.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Highlights one resize edge, or clears it: the scripted acceptance run
+    /// photographs the highlight without moving a real pointer.
+    pub fn hover(&self, zone: Option<ResizeZone>) {
+        self.shared.send(Command::Hover(zone));
     }
 
     /// True once `WM_DESTROY` has run.
@@ -325,11 +490,6 @@ impl Drop for NoteEditor {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-/// The editor window rectangle for `monitor` at `dpi`, centred in its work area.
-fn frame_rect(monitor: Monitor, dpi: u32) -> crate::types::RectI {
-    centered_rect(monitor.work, dpi.max(96))
 }
 
 /// Creates the editor window at `frame`, still hidden. The window class must
@@ -431,6 +591,155 @@ fn start_render_thread(
     }
 }
 
+/// Mirrors `logging::init`: tracing is on when `PEGLINE_TRACE=1` or a
+/// `trace.on` file sits next to the settings. Duplicated only to decide whether
+/// the loop formats its measurements at all.
+fn logging_trace_on() -> bool {
+    std::env::var("PEGLINE_TRACE").as_deref() == Ok("1")
+        || win32::app_dir().join("trace.on").exists()
+}
+
+/// Monotonic microseconds from the same clock as `win32::now_seconds`. Only the
+/// instrumentation uses it.
+fn now_micros() -> i64 {
+    (win32::now_seconds() * 1_000_000.0) as i64
+}
+
+/// The timestamp-ring slot of the posted move with that sequence number.
+fn move_slot(sequence: u64) -> usize {
+    (sequence as usize) & (MOVE_RING - 1)
+}
+
+/// p50, p95 and max of one sample set. Sorts in place, so it only runs when a
+/// drag ends, never per frame.
+fn summarise(samples: &mut [u32]) -> (u32, u32, u32) {
+    if samples.is_empty() {
+        return (0, 0, 0);
+    }
+    samples.sort_unstable();
+    let last = samples.len() - 1;
+    (samples[last / 2], samples[last * 95 / 100], samples[last])
+}
+
+/// Takes the next command that has to be applied from a drained batch. Runs of
+/// consecutive `PointerMove`s keep only their last position, because the
+/// positions are absolute and the intermediate ones are redundant; every other
+/// command is returned in order. Nothing is allocated.
+fn next_applied<I: Iterator<Item = Command>>(
+    commands: &mut std::iter::Peekable<I>,
+) -> Option<Command> {
+    loop {
+        let command = commands.next()?;
+        if matches!(command, Command::PointerMove { .. })
+            && matches!(commands.peek(), Some(Command::PointerMove { .. }))
+        {
+            continue;
+        }
+        return Some(command);
+    }
+}
+
+/// Per-drag measurements for the trace. Fixed arrays, so recording a frame
+/// never allocates; only the report lines do, and only when tracing is on.
+struct DragStats {
+    batch: [u32; STAT_SAMPLES],
+    lag_us: [u32; STAT_SAMPLES],
+    handle_us: [u32; STAT_SAMPLES],
+    draw_us: [u32; STAT_SAMPLES],
+    len: usize,
+    moves: u64,
+    coalesced: u64,
+    queued_max: u32,
+    start_us: i64,
+    last_progress_us: i64,
+}
+
+impl DragStats {
+    fn new(now_us: i64) -> Self {
+        Self {
+            batch: [0; STAT_SAMPLES],
+            lag_us: [0; STAT_SAMPLES],
+            handle_us: [0; STAT_SAMPLES],
+            draw_us: [0; STAT_SAMPLES],
+            len: 0,
+            moves: 0,
+            coalesced: 0,
+            queued_max: 0,
+            start_us: now_us,
+            last_progress_us: now_us,
+        }
+    }
+
+    fn record(&mut self, batch: u32, lag_us: u32, handle_us: u32, draw_us: u32) {
+        if self.len < STAT_SAMPLES {
+            self.batch[self.len] = batch;
+            self.lag_us[self.len] = lag_us;
+            self.handle_us[self.len] = handle_us;
+            self.draw_us[self.len] = draw_us;
+            self.len += 1;
+        }
+    }
+
+    fn note_queue(&mut self, depth: u32) {
+        self.queued_max = self.queued_max.max(depth);
+    }
+
+    /// True at most every `TRACE_INTERVAL_US`, so the progress line stays
+    /// rate-limited while a drag is running.
+    fn progress_due(&mut self, now_us: i64) -> bool {
+        if now_us - self.last_progress_us < TRACE_INTERVAL_US {
+            return false;
+        }
+        self.last_progress_us = now_us;
+        true
+    }
+
+    fn finish(&mut self) -> String {
+        let (batch_p50, batch_p95, batch_max) = summarise(&mut self.batch[..self.len]);
+        let (lag_p50, lag_p95, lag_max) = summarise(&mut self.lag_us[..self.len]);
+        let (handle_p50, handle_p95, handle_max) = summarise(&mut self.handle_us[..self.len]);
+        let (draw_p50, draw_p95, draw_max) = summarise(&mut self.draw_us[..self.len]);
+        let elapsed_ms = ((now_micros() - self.start_us) as f64) / 1000.0;
+        format!(
+            "note editor drag: moves={} coalesced={} queued_max={} batch_p50={batch_p50} batch_p95={batch_p95} batch_max={batch_max} lag_ms_p50={:.2} lag_ms_p95={:.2} lag_ms_max={:.2} handle_us_p50={handle_p50} handle_us_p95={handle_p95} handle_us_max={handle_max} draw_us_p50={draw_p50} draw_us_p95={draw_p95} draw_us_max={draw_max} drag_ms={elapsed_ms:.1}",
+            self.moves,
+            self.coalesced,
+            self.queued_max,
+            lag_p50 as f64 / 1000.0,
+            lag_p95 as f64 / 1000.0,
+            lag_max as f64 / 1000.0,
+        )
+    }
+}
+
+/// Draws one frame. Returns false when the render loop has to stop: the device
+/// is gone for good, and the text has been handed to the app through the normal
+/// commit path so the note is still written.
+fn draw_frame(state: &mut EditorState, shared: &Shared, hwnd: HWND, lost: &mut u32) -> bool {
+    let now = win32::now_seconds();
+    if let Err(error) = state.draw(now) {
+        logging::error(format!("note editor draw: {error}"));
+        // A lost device used to be logged and ignored forever: the window
+        // froze on its last frame and the text could never be committed.
+        *lost += 1;
+        if *lost > 3 {
+            // Give up on the GPU, never on the text.
+            shared.push(
+                NoteEditorEvent::Commit {
+                    text: state.text().to_string(),
+                    image: None,
+                },
+                hwnd,
+            );
+            return false;
+        }
+        if let Err(error) = state.rebuild_surface(hwnd) {
+            logging::error(format!("note editor rebuild: {error}"));
+        }
+    }
+    true
+}
+
 /// Runs on the render thread until `Command::Stop` or a disconnect.
 fn render_thread(
     start: Start,
@@ -475,51 +784,154 @@ fn render_thread(
     }
     let mut commit_reported = false;
     let mut lost = 0u32;
+    // Instrumentation, and the batch buffer reused by every drain: once warm,
+    // the loop below allocates nothing.
+    let trace_on = shared.trace_on;
+    let mut applied_moves: u64 = 0;
+    let mut stats = if trace_on {
+        Some(DragStats::new(now_micros()))
+    } else {
+        None
+    };
+    let mut batch: Vec<Command> = Vec::with_capacity(BATCH_LIMIT);
     loop {
-        let now = win32::now_seconds();
-        if let Err(error) = state.draw(now) {
-            logging::error(format!("note editor draw: {error}"));
-            // A lost device used to be logged and ignored forever: the window
-            // froze on its last frame and the text could never be committed.
-            lost += 1;
-            if lost > 3 {
-                // Give up on the GPU, never on the text: hand it to the app
-                // through the normal commit path so the note is still written.
-                shared.push(
-                    NoteEditorEvent::Commit {
-                        text: state.text().to_string(),
-                        image: None,
-                    },
-                    hwnd.0,
-                );
-                break;
-            }
-            if let Err(error) = state.rebuild_surface(hwnd.0) {
-                logging::error(format!("note editor rebuild: {error}"));
-            }
+        let frames_before = state.frames();
+        let draw_started = Instant::now();
+        if !draw_frame(&mut state, &shared, hwnd.0, &mut lost) {
+            break;
+        }
+        let draw_us = draw_started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+        if state.frames() != frames_before {
+            // Publish the duration before the count: a reader that sees a new
+            // frame must see the time it took. The per-frame trace keeps the
+            // wall time (present included); the probe reads the CPU paint.
+            shared
+                .last_draw_us
+                .store(state.last_paint_us(), Ordering::Relaxed);
+            shared.frames.store(state.frames(), Ordering::Release);
         }
         publish_caret(&state, &shared);
-        let timeout = state.tick_in(now).unwrap_or(Duration::from_secs(3600));
-        let command = match rx.recv_timeout(timeout) {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        // Wait only when nothing is queued: while the input queue has work, keep
+        // draining and drawing instead of sleeping between single commands.
+        if batch.is_empty() {
+            let now = win32::now_seconds();
+            let timeout = state.tick_in(now).unwrap_or(Duration::from_secs(3600));
+            match rx.recv_timeout(timeout) {
+                Ok(command) => batch.push(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        // Drain everything that is ready, up to a bounded batch, so one frame
+        // can never spend unbounded time replaying input.
+        while batch.len() < BATCH_LIMIT {
+            match rx.try_recv() {
+                Ok(command) => batch.push(command),
+                Err(_) => break,
+            }
+        }
+        let drained = batch.len();
+        let moves_in_batch = batch
+            .iter()
+            .filter(|command| matches!(command, Command::PointerMove { .. }))
+            .count() as u32;
+        let last_move_stamp = if trace_on && moves_in_batch > 0 {
+            shared.move_ring[move_slot(applied_moves + u64::from(moves_in_batch) - 1)]
+                .load(Ordering::Relaxed)
+        } else {
+            0
         };
-        let resume = matches!(command, Command::Resume | Command::ErrorFlash);
-        match state.handle(command, win32::now_seconds()) {
-            Step::Stop => break,
-            Step::Continue => {
-                if resume {
-                    commit_reported = false;
+        let queue_depth = if trace_on {
+            let posted = shared.moves_posted.load(Ordering::Relaxed);
+            posted
+                .saturating_sub(applied_moves)
+                .min(u64::from(u32::MAX)) as u32
+        } else {
+            0
+        };
+        applied_moves += u64::from(moves_in_batch);
+        let handle_started = Instant::now();
+        let mut stop = false;
+        let mut down_seen = false;
+        let mut up_seen = false;
+        let mut applied_in_batch = 0u32;
+        {
+            let mut commands = batch.drain(..).peekable();
+            while let Some(command) = next_applied(&mut commands) {
+                let resume = matches!(command, Command::Resume | Command::ErrorFlash);
+                if matches!(&command, Command::PointerDown { .. }) {
+                    down_seen = true;
+                }
+                if matches!(&command, Command::PointerUp) {
+                    up_seen = true;
+                }
+                if matches!(&command, Command::PointerMove { .. }) {
+                    applied_in_batch += 1;
+                }
+                match state.handle(command, win32::now_seconds()) {
+                    Step::Stop => {
+                        stop = true;
+                        break;
+                    }
+                    Step::Continue => {
+                        if resume {
+                            commit_reported = false;
+                        }
+                    }
+                    Step::Copy(text) => shared.push(NoteEditorEvent::Copy(text), hwnd.0),
+                    Step::Commit { text, image } => {
+                        if !commit_reported {
+                            commit_reported = true;
+                            shared.push(NoteEditorEvent::Commit { text, image }, hwnd.0);
+                        }
+                    }
                 }
             }
-            Step::Copy(text) => shared.push(NoteEditorEvent::Copy(text), hwnd.0),
-            Step::Commit { text, image } => {
-                if !commit_reported {
-                    commit_reported = true;
-                    shared.push(NoteEditorEvent::Commit { text, image }, hwnd.0);
+        }
+        let handle_us = handle_started
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u32::MAX)) as u32;
+        if trace_on {
+            let lag_us = if last_move_stamp > 0 {
+                (now_micros() - last_move_stamp).clamp(0, i64::from(u32::MAX)) as u32
+            } else {
+                0
+            };
+            if down_seen {
+                if let Some(entry) = stats.as_mut() {
+                    *entry = DragStats::new(now_micros());
                 }
             }
+            if let Some(entry) = stats.as_mut() {
+                entry.note_queue(queue_depth);
+                entry.moves += u64::from(moves_in_batch);
+                entry.coalesced += u64::from(moves_in_batch.saturating_sub(applied_in_batch));
+                entry.record(
+                    drained.min(u32::MAX as usize) as u32,
+                    lag_us,
+                    handle_us,
+                    draw_us,
+                );
+                if entry.progress_due(now_micros()) {
+                    logging::trace(format!(
+                        "note editor loop: batch={drained} moves={} coalesced={} queue={queue_depth} lag_ms={:.2} handle_us={handle_us} draw_us={draw_us}",
+                        entry.moves,
+                        entry.coalesced,
+                        lag_us as f64 / 1000.0
+                    ));
+                }
+            }
+            if up_seen {
+                if let Some(mut entry) = stats.take() {
+                    let line = entry.finish();
+                    logging::trace(line);
+                    stats = Some(DragStats::new(now_micros()));
+                }
+            }
+        }
+        if stop {
+            break;
         }
     }
     logging::trace("note editor render thread stopped");
@@ -594,6 +1006,7 @@ unsafe fn note_wndproc_inner(hwnd: HWND, message: u32, wparam: WPARAM, lparam: L
 
     match message {
         WM_MOUSEWHEEL => return handle_wheel(wparam, shared),
+        WM_SETCURSOR => return handle_cursor(hwnd, wparam, lparam, shared),
         WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_CAPTURECHANGED => {
             return handle_mouse(hwnd, message, lparam, shared);
         }
@@ -601,7 +1014,11 @@ unsafe fn note_wndproc_inner(hwnd: HWND, message: u32, wparam: WPARAM, lparam: L
         WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATE => {
             return handle_focus(hwnd, message, wparam, shared);
         }
-        WM_SIZE | WM_DPICHANGED => return handle_resize(hwnd, message, lparam, shared),
+        WM_MOUSELEAVE => return handle_mouse(hwnd, message, LPARAM(-1), shared),
+        WM_SIZE | WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            return handle_resize(hwnd, message, wparam, lparam, shared);
+        }
+        WM_GETMINMAXINFO => return handle_minmax(hwnd, lparam),
         WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
             return handle_ime(hwnd, message, lparam, shared);
         }
@@ -624,52 +1041,363 @@ fn handle_wheel(wparam: WPARAM, shared: &Shared) -> LRESULT {
     LRESULT(0)
 }
 
+/// `WM_SETCURSOR`: the I-beam says the paper is editable text, a double arrow
+/// says the margin resizes, the arrow says the shadow or the outside commits.
+/// A selection drag wins even after it leaves the paper: the capture still
+/// belongs to the editor, and the caret is still following the pointer.
+fn handle_cursor(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, shared: &Shared) -> LRESULT {
+    // The low word of `lparam` is the hit-test code the system computed. The
+    // class cursor is NULL, so a non-client hit test must reach the default
+    // processing that owns the frame.
+    if (lparam.0 as u32 & 0xFFFF) != HTCLIENT {
+        // SAFETY: default non-client processing for our own window.
+        return unsafe { DefWindowProcW(hwnd, WM_SETCURSOR, wparam, lparam) };
+    }
+    let mut point = POINT::default();
+    // SAFETY: `point` is a live local filled by the two queries.
+    unsafe {
+        if GetCursorPos(&mut point).is_err() || !ScreenToClient(hwnd, &mut point).as_bool() {
+            return LRESULT(1);
+        }
+    }
+    let dpi = win32::window_dpi(hwnd);
+    let dragging = shared.pointer_down.load(Ordering::Relaxed);
+    let (paper, drag) = resize_state(shared);
+    let hit = hit_test(point.x, point.y, paper, dpi);
+    let cursor = match drag {
+        Some(zone) => cursor_for(false, Hit::Resize(zone)),
+        None => cursor_for(dragging, hit),
+    };
+    let previous = set_cursor(cursor);
+    // Trace the decision, not the message: `WM_SETCURSOR` arrives at input
+    // rate, so only a changed choice is worth a line. 0 unknown, 1 I-beam,
+    // 2 arrow, 3 resize.
+    let kind = match (cursor.0, hit) {
+        _ if cursor.0 == IDC_IBEAM.0 => 1,
+        _ if cursor.0 == IDC_ARROW.0 => 2,
+        _ => 3,
+    };
+    if shared.cursor_kind.swap(kind, Ordering::Relaxed) != kind {
+        logging::trace(format!(
+            "note editor cursor: kind={kind} dragging={dragging} hit={hit:?} client=({}, {}) previous={:?}",
+            point.x, point.y, previous.0
+        ));
+    }
+    // Handled: the class cursor is NULL, so nothing else may set one here.
+    LRESULT(1)
+}
+
+/// The cursor for a hit test, or for a selection drag that owns the capture.
+fn cursor_for(dragging: bool, hit: Hit) -> PCWSTR {
+    if dragging {
+        // A selection drag selects wherever the pointer goes.
+        return IDC_IBEAM;
+    }
+    match hit {
+        Hit::Resize(ResizeZone::Right) => IDC_SIZEWE,
+        Hit::Resize(ResizeZone::Bottom) => IDC_SIZENS,
+        Hit::Resize(ResizeZone::Corner) => IDC_SIZENWSE,
+        Hit::Paper => IDC_IBEAM,
+        Hit::Margin | Hit::Outside => IDC_ARROW,
+    }
+}
+
+/// Installs one of the system cursors on the calling thread. The handles are
+/// shared, so `SetCursor` costs nothing and never has to be cached. Returns the
+/// handle that was installed before.
+fn set_cursor(cursor: PCWSTR) -> HCURSOR {
+    // SAFETY: standard cursor identifiers are process-wide shared handles; a
+    // failed load leaves the current cursor untouched.
+    if let Ok(loaded) = unsafe { LoadCursorW(None, cursor) } {
+        unsafe { SetCursor(Some(loaded)) }
+    } else {
+        HCURSOR::default()
+    }
+}
+
 /// The pointer: movement, press, release and the capture loss that ends a drag.
-/// A press outside the paper asks to commit instead of starting a drag.
+/// A press on the right or bottom margin starts a resize; a press on the paper
+/// starts a selection; anywhere else asks to commit.
 fn handle_mouse(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
     match message {
         WM_CAPTURECHANGED => {
+            // A finished resize already took its drag out before releasing the
+            // capture, so this is either the selection drag or another window
+            // stealing the capture from an active resize. Either way the
+            // pointer state must not stay stuck down.
+            if take_drag(shared).is_some() {
+                return LRESULT(0);
+            }
+            shared.pointer_down.store(false, Ordering::Release);
             shared.send(Command::PointerUp);
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_xy(lparam);
-            // SAFETY: pure query on our own window.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-            if !paper_contains(x, y, dpi) {
-                request_commit(shared, hwnd);
-                return LRESULT(0);
+            let dpi = win32::window_dpi(hwnd);
+            let (paper, _) = resize_state(shared);
+            match hit_test(x, y, paper, dpi) {
+                Hit::Resize(zone) => begin_resize(hwnd, zone, paper, shared),
+                Hit::Paper => begin_selection(hwnd, x, y, shared),
+                Hit::Margin | Hit::Outside => request_commit(shared, hwnd),
             }
-            // SAFETY: capturing the mouse for our own window.
-            unsafe { SetCapture(hwnd) };
-            shared.send(Command::PointerDown { x, y });
-            // Double-click selects the word under the caret.
-            let now_ms = (win32::now_seconds() * 1000.0) as isize;
-            let last = shared.last_click_ms.load(Ordering::Relaxed);
-            let dx = (x - shared.last_click_x.load(Ordering::Relaxed)).abs();
-            let dy = (y - shared.last_click_y.load(Ordering::Relaxed)).abs();
-            if last > 0 && now_ms - last < 500 && dx < 4 && dy < 4 {
-                shared.last_click_ms.store(0, Ordering::Relaxed);
-                shared.send(Command::SelectWord);
-            } else {
-                shared.last_click_ms.store(now_ms, Ordering::Relaxed);
-                shared.last_click_x.store(x, Ordering::Relaxed);
-                shared.last_click_y.store(y, Ordering::Relaxed);
-            }
+            return LRESULT(0);
         }
         WM_MOUSEMOVE => {
             let (x, y) = mouse_xy(lparam);
-            shared.send(Command::PointerMove { x, y });
+            let dpi = win32::window_dpi(hwnd);
+            let (paper, zone) = resize_state(shared);
+            if let Some(zone) = zone {
+                if let Some(cursor) = win32::cursor_pos() {
+                    drag_resize(hwnd, cursor, dpi, shared);
+                }
+                // No WM_SETCURSOR arrives while the capture is held.
+                set_cursor(cursor_for(false, Hit::Resize(zone)));
+                return LRESULT(0);
+            }
+            if shared.pointer_down.load(Ordering::Relaxed) {
+                // No WM_SETCURSOR reaches the editor while the capture is held,
+                // so the drag has to keep the I-beam up itself; otherwise the
+                // cursor turns into an arrow the moment the pointer leaves the
+                // paper even though the selection is still following it.
+                set_cursor(IDC_IBEAM);
+            } else {
+                update_hover(x, y, paper, dpi, shared);
+                track_mouse_leave(hwnd);
+            }
+            shared.send_move(x, y);
         }
         WM_LBUTTONUP => {
-            // SAFETY: balances SetCapture; a no-op without capture.
-            unsafe {
-                let _ = ReleaseCapture();
+            let (x, y) = mouse_xy(lparam);
+            let dpi = win32::window_dpi(hwnd);
+            let (paper, _) = resize_state(shared);
+            if let Some(paper) = finish_resize(hwnd, shared) {
+                shared.push(NoteEditorEvent::Resized(paper), hwnd);
+                set_cursor(cursor_for(false, hit_test(x, y, paper, dpi)));
+                // The pointer is still over the band, so the highlight comes
+                // back without waiting for the next move.
+                update_hover(x, y, paper, dpi, shared);
+                return LRESULT(0);
             }
-            shared.send(Command::PointerUp);
+            if shared.pointer_down.load(Ordering::Relaxed) {
+                // The selection drag ends wherever the pointer is, even over a
+                // resize band: the band only matters for a fresh press.
+                shared.pointer_down.store(false, Ordering::Release);
+                // SAFETY: balances SetCapture; a no-op without capture.
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                shared.send(Command::PointerUp);
+                update_hover(x, y, paper, dpi, shared);
+                return LRESULT(0);
+            }
+            // A press on a band that never moved: just put the cursor back.
+            set_cursor(cursor_for(false, hit_test(x, y, paper, dpi)));
         }
+        WM_MOUSELEAVE => update_hover(-1, -1, DEFAULT_PAPER, 96, shared),
         _ => {}
     }
     LRESULT(0)
+}
+
+/// Starts a text selection drag. The double-click test runs here so a second
+/// press on the same word selects it instead of placing the caret.
+fn begin_selection(hwnd: HWND, x: i32, y: i32, shared: &Shared) {
+    // A highlight under the pointer would be misleading while selecting.
+    clear_hover(shared);
+    // SAFETY: capturing the mouse for our own window.
+    unsafe { SetCapture(hwnd) };
+    // The drag owns the pointer now: WM_SETCURSOR is suppressed during
+    // capture, so this flag is what keeps the I-beam up at the edges.
+    shared.pointer_down.store(true, Ordering::Release);
+    shared.send(Command::PointerDown { x, y });
+    let now_ms = (win32::now_seconds() * 1000.0) as isize;
+    let last = shared.last_click_ms.load(Ordering::Relaxed);
+    let dx = (x - shared.last_click_x.load(Ordering::Relaxed)).abs();
+    let dy = (y - shared.last_click_y.load(Ordering::Relaxed)).abs();
+    if last > 0 && now_ms - last < 500 && dx < 4 && dy < 4 {
+        shared.last_click_ms.store(0, Ordering::Relaxed);
+        shared.send(Command::SelectWord);
+    } else {
+        shared.last_click_ms.store(now_ms, Ordering::Relaxed);
+        shared.last_click_x.store(x, Ordering::Relaxed);
+        shared.last_click_y.store(y, Ordering::Relaxed);
+    }
+}
+
+/// The UI-thread resize state: the paper on screen and the zone being dragged.
+/// A poisoned lock degrades to the default paper rather than panicking.
+fn resize_state(shared: &Shared) -> (PaperSize, Option<ResizeZone>) {
+    match shared.resize.lock() {
+        Ok(ui) => (ui.effective, ui.drag.as_ref().map(|drag| drag.zone)),
+        Err(_) => (DEFAULT_PAPER, None),
+    }
+}
+
+fn take_drag(shared: &Shared) -> Option<Drag> {
+    shared.resize.lock().ok()?.drag.take()
+}
+
+/// Starts a resize drag from the margin. `SetCapture` is enough: the editor has
+/// no non-client frame, so there is no modal sizing loop to re-enter.
+fn begin_resize(hwnd: HWND, zone: ResizeZone, paper: PaperSize, shared: &Shared) {
+    clear_hover(shared);
+    let (Some(window), Some(cursor)) = (win32::window_rect(hwnd), win32::cursor_pos()) else {
+        return;
+    };
+    let last_px = (window.width().max(1), window.height().max(1));
+    let centre = (
+        window.left + window.width() / 2,
+        window.top + window.height() / 2,
+    );
+    if let Ok(mut ui) = shared.resize.lock() {
+        ui.drag = Some(Drag {
+            zone,
+            start_cursor: cursor,
+            centre,
+            start_paper: paper,
+            last_px,
+            moved: false,
+        });
+    }
+    // SAFETY: capturing the mouse for our own window.
+    unsafe { SetCapture(hwnd) };
+    set_cursor(cursor_for(false, Hit::Resize(zone)));
+    logging::trace(format!(
+        "note editor resize: zone={} start=({}, {}) paper={}x{}",
+        zone_kind(zone),
+        cursor.0,
+        cursor.1,
+        paper.width.round(),
+        paper.height.round()
+    ));
+}
+
+/// One live resize step: track the pointer in screen pixels, clamp to the work
+/// area, and resize the window around the centre the drag fixed. The render
+/// thread follows through `WM_SIZE`; the paper stays fractional in DIP until
+/// the release.
+fn drag_resize(hwnd: HWND, cursor: (i32, i32), dpi: u32, shared: &Shared) {
+    let Some(work) = win32::monitor_at(cursor.0, cursor.1).map(|monitor| monitor.work) else {
+        return;
+    };
+    let scale = dpi as f32 / 96.0;
+    let mut applied = None;
+    if let Ok(mut ui) = shared.resize.lock() {
+        // Read the drag first; the size is then applied under the same lock but
+        // without a second borrow of the drag.
+        let (centre, paper, px, changed) = match ui.drag.as_ref() {
+            Some(drag) => {
+                let paper = resized_paper(drag, cursor, work, dpi);
+                let px = window_pixels(paper, scale);
+                (drag.centre, paper, px, px != drag.last_px)
+            }
+            None => return,
+        };
+        if changed {
+            if let Some(drag) = ui.drag.as_mut() {
+                drag.last_px = px;
+                drag.moved = true;
+            }
+            ui.effective = paper;
+            applied = Some((centre, px));
+        }
+    }
+    if let Some((centre, (width, height))) = applied {
+        // SAFETY: resizing our own top-level window, which is hidden from the
+        // taskbar and never activated by this call.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                centre.0 - width / 2,
+                centre.1 - height / 2,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
+/// Ends a resize drag and returns the whole-DIP paper to persist, or `None`
+/// when the pointer never actually changed the size (a click on the margin).
+fn finish_resize(hwnd: HWND, shared: &Shared) -> Option<PaperSize> {
+    // Take the drag out before releasing the capture: the resulting
+    // WM_CAPTURECHANGED must not be mistaken for a stolen selection drag.
+    let drag = take_drag(shared)?;
+    // SAFETY: balances SetCapture; a no-op without capture.
+    unsafe {
+        let _ = ReleaseCapture();
+    }
+    if !drag.moved {
+        return None;
+    }
+    let dpi = win32::window_dpi(hwnd);
+    let scale = dpi as f32 / 96.0;
+    let paper = match shared.resize.lock() {
+        Ok(mut ui) => {
+            let paper = ui.effective.rounded();
+            ui.explicit = paper;
+            ui.effective = paper;
+            paper
+        }
+        Err(_) => return None,
+    };
+    let (width, height) = window_pixels(paper, scale);
+    // SAFETY: the final size of our own window, placed around the centre the
+    // drag kept fixed, so a release never shifts the paper.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            drag.centre.0 - width / 2,
+            drag.centre.1 - height / 2,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    logging::trace(format!(
+        "note editor resize: paper={}x{}",
+        paper.width.round(),
+        paper.height.round()
+    ));
+    Some(paper)
+}
+
+/// Sends a hover change only when the zone under the pointer changed; the
+/// render thread repaints the 2 DIP strip without touching the paper bitmap.
+fn update_hover(x: i32, y: i32, paper: PaperSize, dpi: u32, shared: &Shared) {
+    let zone = match hit_test(x, y, paper, dpi) {
+        Hit::Resize(zone) => Some(zone),
+        _ => None,
+    };
+    let kind = zone.map(zone_kind).unwrap_or(0);
+    if shared.hover_kind.swap(kind, Ordering::Relaxed) != kind {
+        shared.send(Command::Hover(zone));
+    }
+}
+
+fn clear_hover(shared: &Shared) {
+    if shared.hover_kind.swap(0, Ordering::Relaxed) != 0 {
+        shared.send(Command::Hover(None));
+    }
+}
+
+/// Asks for `WM_MOUSELEAVE` once, which clears the hover highlight when the
+/// pointer leaves the window entirely.
+fn track_mouse_leave(hwnd: HWND) {
+    let event = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    // SAFETY: `event` is a live local with the documented size.
+    let mut event = event;
+    unsafe {
+        let _ = TrackMouseEvent(&mut event);
+    }
 }
 
 /// The keyboard: `WM_KEYDOWN` carries commands and the Ctrl shortcuts for the
@@ -741,58 +1469,115 @@ fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LR
     LRESULT(0)
 }
 
-/// The client size, and a DPI change that re-centres the window.
-fn handle_resize(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRESULT {
+/// The client size change, and the DPI or work-area change that re-places the
+/// window. `WM_SIZE` is the only path that tells the render thread about a new
+/// size; the re-place handler keeps the user's explicit paper and clamps it.
+fn handle_resize(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    shared: &Shared,
+) -> LRESULT {
     match message {
         WM_SIZE => {
             let width = (lparam.0 as usize & 0xFFFF) as u32;
             let height = ((lparam.0 as usize >> 16) & 0xFFFF) as u32;
-            // SAFETY: pure query on our own window.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+            let dpi = win32::window_dpi(hwnd);
+            if let Ok(mut ui) = shared.resize.lock() {
+                ui.effective = crate::note_editor::render::paper_of_window(width, height, dpi);
+            }
+            if logging_trace_on() {
+                logging::trace(format!("note editor WM_SIZE {width}x{height} dpi={dpi}"));
+            }
             shared.send(Command::Resize {
                 width_px: width.max(1),
                 height_px: height.max(1),
                 dpi,
             });
         }
-        WM_DPICHANGED => {
-            // Re-centre on the monitor's work area at the new DPI instead of
-            // trusting the suggested rectangle (NOTE-EDITOR.md §5.8).
-            // SAFETY: pure query on our own window.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-            let work = win32::window_rect(hwnd)
-                .and_then(|rect| {
-                    win32::monitor_at(rect.left + rect.width() / 2, rect.top + rect.height() / 2)
-                })
-                .map(|monitor| monitor.work);
-            // SAFETY: moving and resizing our own window.
-            unsafe {
-                if let Some(work) = work {
-                    let frame = centered_rect(work, dpi);
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        frame.left,
-                        frame.top,
-                        frame.width(),
-                        frame.height(),
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                } else {
-                    let suggested = &*(lparam.0 as *const RECT);
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        suggested.left,
-                        suggested.top,
-                        suggested.right - suggested.left,
-                        suggested.bottom - suggested.top,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
+        WM_DPICHANGED => reflow(hwnd, shared),
+        WM_DISPLAYCHANGE => reflow(hwnd, shared),
+        // Explorer bumps the work area, the taskbar or the theme; only the
+        // work area changes where the editor may live.
+        WM_SETTINGCHANGE if wparam.0 as u32 == SPI_SETWORKAREA.0 => reflow(hwnd, shared),
         _ => {}
+    }
+    LRESULT(0)
+}
+
+/// Re-places the window after a DPI or work-area change: the paper the user
+/// chose is kept, clamped to the new work area, and the window is centred there
+/// so a later resize still has room on every side. The value on disk is not
+/// touched until the user drags again.
+fn reflow(hwnd: HWND, shared: &Shared) {
+    let (paper, dragging) = match shared.resize.lock() {
+        Ok(ui) => (ui.explicit, ui.drag.is_some()),
+        Err(_) => (DEFAULT_PAPER, false),
+    };
+    if dragging {
+        return;
+    }
+    let dpi = win32::window_dpi(hwnd);
+    let Some(rect) = win32::window_rect(hwnd) else {
+        return;
+    };
+    let Some(monitor) =
+        win32::monitor_at(rect.left + rect.width() / 2, rect.top + rect.height() / 2)
+    else {
+        return;
+    };
+    let frame = frame_for(monitor.work, paper, dpi);
+    if let Ok(mut ui) = shared.resize.lock() {
+        ui.effective = frame.paper;
+    }
+    // SAFETY: re-placing our own window; it stays hidden from the taskbar.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            frame.rect.left,
+            frame.rect.top,
+            frame.rect.width(),
+            frame.rect.height(),
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// `WM_GETMINMAXINFO` bounds the window: the smallest paper, the largest paper
+/// and the work area. On a work area that cannot hold the minimum window the
+/// two bounds meet at its size (BEHAVIOR §10.1, small-work exception).
+fn handle_minmax(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    // SAFETY: the system passes a live `MINMAXINFO` for this message.
+    let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+    let dpi = win32::window_dpi(hwnd);
+    let scale = dpi as f32 / 96.0;
+    let Some(rect) = win32::window_rect(hwnd) else {
+        return LRESULT(0);
+    };
+    let Some(monitor) =
+        win32::monitor_at(rect.left + rect.width() / 2, rect.top + rect.height() / 2)
+    else {
+        return LRESULT(0);
+    };
+    let min_px = window_pixels(MIN_PAPER, scale);
+    let max_px = window_pixels(MAX_PAPER, scale);
+    if monitor.work.width() < min_px.0 || monitor.work.height() < min_px.1 {
+        info.ptMinTrackSize = POINT {
+            x: monitor.work.width(),
+            y: monitor.work.height(),
+        };
+        info.ptMaxTrackSize = info.ptMinTrackSize;
+    } else {
+        info.ptMinTrackSize = POINT {
+            x: min_px.0,
+            y: min_px.1,
+        };
+        info.ptMaxTrackSize = POINT {
+            x: max_px.0.min(monitor.work.width()),
+            y: max_px.1.min(monitor.work.height()),
+        };
     }
     LRESULT(0)
 }
@@ -968,6 +1753,7 @@ fn key_code(key: u32) -> Option<KeyCode> {
         k if k == VK_ESCAPE.0 as u32 => KeyCode::Escape,
         k if k == VK_A.0 as u32 => KeyCode::A,
         k if k == VK_B.0 as u32 => KeyCode::B,
+        k if k == VK_C.0 as u32 => KeyCode::C,
         k if k == VK_I.0 as u32 => KeyCode::I,
         k if k == VK_S.0 as u32 => KeyCode::S,
         k if k == VK_V.0 as u32 => KeyCode::V,
@@ -987,48 +1773,128 @@ fn mouse_xy(lparam: LPARAM) -> (i32, i32) {
     )
 }
 
-/// The editor window rectangle for a work area and DPI: 500×400 DIP centred in
-/// the work area. Shared by `open` and `WM_DPICHANGED` and unit tested.
-fn centered_rect(work: crate::types::RectI, dpi: u32) -> crate::types::RectI {
-    let scale = dpi.max(96) as f32 / 96.0;
-    let width = (WINDOW_WIDTH_DIP * scale).round().max(1.0) as i32;
-    let height = (WINDOW_HEIGHT_DIP * scale).round().max(1.0) as i32;
-    let left = work.left + (work.width() - width).max(0) / 2;
-    let top = work.top + (work.height() - height).max(0) / 2;
-    crate::types::RectI::new(left, top, left + width, top + height)
+/// Where the editor window sits and how large the paper inside it really is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frame {
+    rect: crate::types::RectI,
+    /// The requested size clamped so the window fits `work`; smaller than the
+    /// requested one only on a work area that cannot hold it.
+    paper: PaperSize,
 }
 
-/// Whether a client-pixel point is inside the paper's rounded rectangle.
-fn paper_contains(x: i32, y: i32, dpi: u32) -> bool {
+/// The editor window for `paper` on `work` at `dpi`.
+///
+/// The window is the paper plus two shadow margins, centred in the work area.
+/// A resize drag grows the paper symmetrically around its centre (BEHAVIOR
+/// §10.1), so the centre is the only place the window needs to be: a later
+/// resize has as much room on every side as this placement gives it.
+fn frame_for(work: crate::types::RectI, paper: PaperSize, dpi: u32) -> Frame {
     let scale = dpi.max(96) as f32 / 96.0;
-    let left = MARGIN_DIP * scale;
-    let top = MARGIN_DIP * scale;
-    let right = (MARGIN_DIP + PAPER_WIDTH) * scale;
-    let bottom = (MARGIN_DIP + crate::note_editor::display::PAPER_HEIGHT) * scale;
-    let x = x as f32;
-    let y = y as f32;
-    if x < left || x >= right || y < top || y >= bottom {
-        return false;
+    let paper = fit_paper(work, paper, scale);
+    let (width, height) = window_pixels(paper, scale);
+    let width = width.min(work.width().max(1));
+    let height = height.min(work.height().max(1));
+    let left = work.left + (work.width() - width).max(0) / 2;
+    let top = work.top + (work.height() - height).max(0) / 2;
+    Frame {
+        rect: crate::types::RectI::new(left, top, left + width, top + height),
+        paper,
     }
-    // The 22 DIP corner radius: outside the quarter circle means outside.
-    let radius = 22.0 * scale;
-    let cx = if x < left + radius {
-        left + radius
-    } else if x > right - radius {
-        right - radius
+}
+
+/// `paper` clamped so its window fits the work area. On a work area smaller
+/// than the smallest allowed window the paper shrinks below `MIN_PAPER`
+/// (BEHAVIOR §10.1, the small-work-area exception).
+fn fit_paper(work: crate::types::RectI, paper: PaperSize, scale: f32) -> PaperSize {
+    let available_width = (work.width() as f32 / scale - MARGIN_DIP * 2.0).max(1.0);
+    let available_height = (work.height() as f32 / scale - MARGIN_DIP * 2.0).max(1.0);
+    // The user's size first: it can be anything from an old settings file.
+    let requested = paper.clamp();
+    let width = if available_width <= MIN_PAPER.width {
+        available_width
     } else {
-        x
+        requested.width.min(available_width)
     };
-    let cy = if y < top + radius {
-        top + radius
-    } else if y > bottom - radius {
-        bottom - radius
+    let height = if available_height <= MIN_PAPER.height {
+        available_height
     } else {
-        y
+        requested.height.min(available_height)
     };
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= radius * radius
+    PaperSize::new(width, height)
+}
+
+/// One axis of a drag: the new size, never below the smallest the work area
+/// allows and never above the largest the editor allows.
+fn clamp_edge(value: f32, available: f32, min: f32, max: f32) -> f32 {
+    let upper = available.min(max).max(1.0);
+    let lower = min.min(upper);
+    value.max(lower).min(upper)
+}
+
+/// The paper a drag of `zone` to `cursor` produces.
+///
+/// Only the right and bottom edges are draggable, and each tracks the pointer
+/// 1:1: the opposite edge mirrors it, so the paper grows by twice the pointer's
+/// travel, half on each side, and the centre stays where the drag started.
+fn resized_paper(
+    drag: &Drag,
+    cursor: (i32, i32),
+    work: crate::types::RectI,
+    dpi: u32,
+) -> PaperSize {
+    let scale = dpi.max(96) as f32 / 96.0;
+    let dx = (cursor.0 - drag.start_cursor.0) as f32 / scale;
+    let dy = (cursor.1 - drag.start_cursor.1) as f32 / scale;
+    let (available_width, available_height) = available_paper(drag.centre, work, scale);
+    let mut paper = drag.start_paper;
+    if matches!(drag.zone, ResizeZone::Right | ResizeZone::Corner) {
+        paper.width = clamp_edge(
+            drag.start_paper.width + dx * 2.0,
+            available_width,
+            MIN_PAPER.width,
+            MAX_PAPER.width,
+        );
+    }
+    if matches!(drag.zone, ResizeZone::Bottom | ResizeZone::Corner) {
+        paper.height = clamp_edge(
+            drag.start_paper.height + dy * 2.0,
+            available_height,
+            MIN_PAPER.height,
+            MAX_PAPER.height,
+        );
+    }
+    paper
+}
+
+/// The largest paper that still fits the work area with its centre fixed at
+/// `centre`: the window may grow to twice the shorter half-side, minus the
+/// shadow margins.
+fn available_paper(centre: (i32, i32), work: crate::types::RectI, scale: f32) -> (f32, f32) {
+    let half_x = (centre.0 - work.left).min(work.right - centre.0).max(0) as f32 / scale;
+    let half_y = (centre.1 - work.top).min(work.bottom - centre.1).max(0) as f32 / scale;
+    (
+        (half_x * 2.0 - MARGIN_DIP * 2.0).max(1.0),
+        (half_y * 2.0 - MARGIN_DIP * 2.0).max(1.0),
+    )
+}
+
+/// The window size in device pixels for a paper (rounding lives here, so the
+/// live drag stays fractional in DIP and only the final `SetWindowPos` snaps).
+fn window_pixels(paper: PaperSize, scale: f32) -> (i32, i32) {
+    let (width, height) = paper.window_size();
+    (
+        (width * scale).round().max(1.0) as i32,
+        (height * scale).round().max(1.0) as i32,
+    )
+}
+
+/// The byte the hover trace and `Command::Hover` use for a zone.
+fn zone_kind(zone: ResizeZone) -> u8 {
+    match zone {
+        ResizeZone::Right => 1,
+        ResizeZone::Bottom => 2,
+        ResizeZone::Corner => 3,
+    }
 }
 
 fn client_size(hwnd: HWND) -> Option<(u32, u32)> {
@@ -1046,15 +1912,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_paper_hit_test_excludes_the_shadow_and_the_corners() {
-        // 100 %: paper 20..480 x 20..380.
-        assert!(paper_contains(250, 200, 96));
-        assert!(!paper_contains(10, 200, 96));
-        assert!(!paper_contains(21, 21, 96));
-        assert!(paper_contains(45, 45, 96));
-        // 200 %: everything doubles.
-        assert!(paper_contains(500, 400, 192));
-        assert!(!paper_contains(30, 400, 192));
+    fn the_hit_test_names_every_region_of_the_window() {
+        // 100 %: paper 20..480 x 20..380, window 500x400, corner grip 2 DIP.
+        let paper = DEFAULT_PAPER;
+        assert_eq!(hit_test(250, 200, paper, 96), Hit::Paper);
+        assert_eq!(hit_test(10, 200, paper, 96), Hit::Margin);
+        // Inside the paper rectangle but outside the 22 DIP rounded corner.
+        assert_eq!(hit_test(21, 21, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(45, 45, paper, 96), Hit::Paper);
+        // The right and bottom bands reach into the paper by the grip.
+        assert_eq!(
+            hit_test(490, 200, paper, 96),
+            Hit::Resize(ResizeZone::Right)
+        );
+        assert_eq!(
+            hit_test(479, 200, paper, 96),
+            Hit::Resize(ResizeZone::Right)
+        );
+        assert_eq!(
+            hit_test(250, 390, paper, 96),
+            Hit::Resize(ResizeZone::Bottom)
+        );
+        assert_eq!(
+            hit_test(480, 380, paper, 96),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        // The far corner of the shadow is past both bands: a commit area.
+        assert_eq!(hit_test(495, 395, paper, 96), Hit::Margin);
+        // The top-right and bottom-left shadow corners stay commit areas.
+        assert_eq!(hit_test(490, 10, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(10, 390, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(250, 410, paper, 96), Hit::Outside);
+        assert_eq!(hit_test(-1, 200, paper, 96), Hit::Outside);
+        // 200 %: the client point and the bands double.
+        assert_eq!(hit_test(500, 400, paper, 192), Hit::Paper);
+        assert_eq!(hit_test(30, 400, paper, 192), Hit::Margin);
+        assert_eq!(
+            hit_test(970, 400, paper, 192),
+            Hit::Resize(ResizeZone::Right)
+        );
+    }
+
+    #[test]
+    fn the_cursor_marks_the_paper_sticks_through_a_drag_and_shows_the_resize() {
+        assert_eq!(cursor_for(false, Hit::Paper).0, IDC_IBEAM.0);
+        assert_eq!(cursor_for(false, Hit::Margin).0, IDC_ARROW.0);
+        assert_eq!(cursor_for(false, Hit::Outside).0, IDC_ARROW.0);
+        assert_eq!(
+            cursor_for(false, Hit::Resize(ResizeZone::Right)).0,
+            IDC_SIZEWE.0
+        );
+        assert_eq!(
+            cursor_for(false, Hit::Resize(ResizeZone::Bottom)).0,
+            IDC_SIZENS.0
+        );
+        assert_eq!(
+            cursor_for(false, Hit::Resize(ResizeZone::Corner)).0,
+            IDC_SIZENWSE.0
+        );
+        // A drag that leaves the paper still selects: the I-beam must stay.
+        assert_eq!(cursor_for(true, Hit::Margin).0, IDC_IBEAM.0);
+        assert_eq!(cursor_for(true, Hit::Outside).0, IDC_IBEAM.0);
     }
 
     #[test]
@@ -1071,19 +1989,172 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_is_centred_at_each_dpi() {
+    fn the_editor_is_centred_in_the_work_area() {
         let work = crate::types::RectI::new(0, 0, 1920, 1080);
-        let frame = centered_rect(work, 96);
-        assert_eq!((frame.width(), frame.height()), (500, 400));
-        assert_eq!((frame.left, frame.top), (710, 340));
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
+        assert_eq!((frame.rect.left, frame.rect.top), (710, 340));
 
-        let frame = centered_rect(work, 192);
-        assert_eq!((frame.width(), frame.height()), (1000, 800));
-        assert_eq!((frame.left, frame.top), (460, 140));
+        // At 200 % the window is 1000x800; the centre is the same point in DIP,
+        // so the paper's centre sits in the middle of the work area.
+        let frame = frame_for(work, DEFAULT_PAPER, 192);
+        assert_eq!((frame.rect.width(), frame.rect.height()), (1000, 800));
+        assert_eq!((frame.rect.left, frame.rect.top), (460, 140));
 
         // A work area that is not at the origin keeps the same relative centre.
         let work = crate::types::RectI::new(200, 100, 2120, 1180);
-        let frame = centered_rect(work, 96);
-        assert_eq!((frame.left, frame.top), (910, 440));
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.left, frame.rect.top), (910, 440));
+
+        // A short work area centres what still fits and clamps the paper.
+        let work = crate::types::RectI::new(0, 0, 1024, 600);
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.left, frame.rect.top), (262, 100));
+        assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
+        let frame = frame_for(work, MAX_PAPER, 96);
+        assert_eq!((frame.paper.width, frame.paper.height), (820.0, 560.0));
+        assert_eq!(frame.rect.top, 0);
+        assert_eq!(frame.rect.bottom, 600);
+    }
+
+    #[test]
+    fn a_tiny_work_area_shrinks_the_paper_below_its_minimum() {
+        let work = crate::types::RectI::new(0, 0, 400, 300);
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.paper.width, frame.paper.height), (360.0, 260.0));
+        assert_eq!((frame.rect.width(), frame.rect.height()), (400, 300));
+        assert_eq!((frame.rect.left, frame.rect.top), (0, 0));
+    }
+
+    #[test]
+    fn a_resize_drag_mirrors_the_dragged_edge_around_the_centre() {
+        let work = crate::types::RectI::new(0, 0, 1920, 1080);
+        // The window is centred, so its centre is the work area's centre.
+        let drag = Drag {
+            zone: ResizeZone::Corner,
+            start_cursor: (1210, 740),
+            centre: (960, 540),
+            start_paper: DEFAULT_PAPER,
+            last_px: (500, 400),
+            moved: false,
+        };
+        // 100 px right and 50 px down double into +200 / +100 DIP.
+        let paper = resized_paper(&drag, (1310, 790), work, 96);
+        assert_eq!((paper.width, paper.height), (660.0, 460.0));
+
+        // The centre really is fixed: the window grows half the extra each way.
+        let (width, height) = window_pixels(paper, 1.0);
+        assert_eq!((960 - width / 2, 540 - height / 2), (610, 290));
+        assert_eq!(width, 700);
+        assert_eq!(height, 500);
+
+        // The work area bounds the growth, not only MAX_PAPER.
+        let paper = resized_paper(&drag, (3000, 3000), work, 96);
+        assert_eq!(paper.width, MAX_PAPER.width);
+        assert_eq!(paper.height, MAX_PAPER.height);
+
+        // Dragging back past the minimum holds the minimum.
+        let paper = resized_paper(&drag, (0, 0), work, 96);
+        assert_eq!(
+            (paper.width, paper.height),
+            (MIN_PAPER.width, MIN_PAPER.height)
+        );
+
+        // A right-edge drag leaves the height alone, and its width doubles.
+        let drag = Drag {
+            zone: ResizeZone::Right,
+            ..drag
+        };
+        let paper = resized_paper(&drag, (1310, 790), work, 96);
+        assert_eq!((paper.width, paper.height), (660.0, DEFAULT_PAPER.height));
+    }
+
+    #[test]
+    fn a_work_area_too_small_for_the_paper_clamps_without_moving_the_centre() {
+        // Centre 300 px from the left edge of a 400 px tall work area: the
+        // window may reach 600 px wide (300 each way) and 800 px tall.
+        let work = crate::types::RectI::new(100, 100, 1000, 500);
+        let paper = available_paper((400, 300), work, 1.0);
+        assert_eq!(paper, (600.0 - 40.0, 400.0 - 40.0));
+        // Only the shadow margin is lost: 300 px each way minus 2x20 DIP.
+        assert_eq!(paper.0, 560.0);
+        assert_eq!(paper.1, 360.0);
+    }
+
+    /// Applies `next_applied` the way the render loop does, including the stop.
+    fn take_applied(commands: Vec<Command>) -> Vec<Command> {
+        let mut applied = Vec::new();
+        let mut commands = commands.into_iter().peekable();
+        while let Some(command) = next_applied(&mut commands) {
+            let stop = matches!(command, Command::Stop);
+            applied.push(command);
+            if stop {
+                break;
+            }
+        }
+        applied
+    }
+
+    #[test]
+    fn a_run_of_pointer_moves_keeps_only_its_last_position() {
+        let applied = take_applied(vec![
+            Command::PointerMove { x: 1, y: 1 },
+            Command::PointerMove { x: 2, y: 2 },
+            Command::PointerMove { x: 3, y: 3 },
+        ]);
+        assert_eq!(applied.len(), 1);
+        assert!(matches!(applied[0], Command::PointerMove { x: 3, y: 3 }));
+    }
+
+    #[test]
+    fn commands_around_move_runs_keep_their_order() {
+        let applied = take_applied(vec![
+            Command::PointerDown { x: 1, y: 1 },
+            Command::PointerMove { x: 2, y: 2 },
+            Command::PointerMove { x: 3, y: 3 },
+            Command::Copy,
+            Command::PointerMove { x: 4, y: 4 },
+            Command::PointerUp,
+            Command::Commit,
+        ]);
+        assert_eq!(applied.len(), 6);
+        assert!(matches!(applied[0], Command::PointerDown { x: 1, y: 1 }));
+        assert!(matches!(applied[1], Command::PointerMove { x: 3, y: 3 }));
+        assert!(matches!(applied[2], Command::Copy));
+        assert!(matches!(applied[3], Command::PointerMove { x: 4, y: 4 }));
+        assert!(matches!(applied[4], Command::PointerUp));
+        assert!(matches!(applied[5], Command::Commit));
+    }
+
+    #[test]
+    fn a_batch_without_moves_is_applied_in_order() {
+        let applied = take_applied(vec![
+            Command::Char('a'),
+            Command::Char('b'),
+            Command::Commit,
+        ]);
+        assert_eq!(applied.len(), 3);
+        assert!(matches!(applied[0], Command::Char('a')));
+        assert!(matches!(applied[1], Command::Char('b')));
+        assert!(matches!(applied[2], Command::Commit));
+    }
+
+    #[test]
+    fn stop_ends_the_batch_and_keeps_everything_before_it() {
+        let applied = take_applied(vec![
+            Command::PointerMove { x: 1, y: 1 },
+            Command::PointerMove { x: 2, y: 2 },
+            Command::Stop,
+            Command::Char('x'),
+            Command::Commit,
+        ]);
+        assert_eq!(applied.len(), 2);
+        assert!(matches!(applied[0], Command::PointerMove { x: 2, y: 2 }));
+        assert!(matches!(applied[1], Command::Stop));
+    }
+
+    #[test]
+    fn an_empty_batch_applies_nothing() {
+        assert!(take_applied(Vec::new()).is_empty());
     }
 }

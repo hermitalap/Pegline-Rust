@@ -1,5 +1,93 @@
 # Changelog
 
+## 2.5.1 — 2026-11-12
+
+### Changes
+
+- **The note editor now resizes around its centre.** Dragging the paper's right
+  edge, bottom edge or bottom-right corner used to keep the top-left corner
+  fixed and grow the window to the right and down. The dragged edge now tracks
+  the pointer 1:1 and the opposite edge mirrors it, so the paper grows (or
+  shrinks) by twice the pointer's travel — half on each side — and the paper's
+  centre never moves. The window is centred in the work area when the editor
+  opens, and the work-area edge only clamps the size; it never shifts the
+  centre. The size range (460×360 to 820×640 DIP), the clamps, the hover strip,
+  the per-note size memory and the rendering are unchanged.
+
+## 2.5.0 — 2026-11-12
+
+### Features
+
+- **The note editor resizes.** Drag the paper's right edge, bottom edge or
+  bottom-right corner to grow it from 460×360 to 820×640 DIP (window 500×400 to
+  860×680). The top-left stays put and the window grows right and down; the paper,
+  fold, shadow, text layout, selection and scroll position follow live. Only a
+  width change reflows the text; a height-only drag just re-clamps the scroll.
+  Dragging stops at the work-area edge; the left/top edges and the window position
+  are not adjustable. Resizing is not undoable and does not dirty the note.
+- **Hover feedback on the resize bands.** The hit edge shows a 2 DIP
+  `COLOR_HIGHLIGHT` strip and the cursor becomes `IDC_SIZEWE` / `IDC_SIZENS` /
+  `IDC_SIZENWSE`. The strip is drawn in the window layer, so the paper bitmap keeps
+  ClearType and the return flight never carries it.
+- **Each note remembers its size.** Dragging writes
+  `noteSize:<file name>=WxH` (whole DIP) to `settings.ini`; reopening uses it.
+  Dragging back to 460×360 removes the key, archiving removes it, a new note is
+  only recorded once its file exists, and a discarded new note records nothing.
+  Missing, corrupt or out-of-range values fall back to (or clamp to) the default.
+- **DPI and work-area changes keep the chosen size.** `WM_DPICHANGED`,
+  `WM_DISPLAYCHANGE` and work-area changes re-flow around the growth envelope
+  instead of returning to 500×400; a work area too small for the minimum shrinks
+  the paper below its minimum and fills the work area.
+
+### Implementation
+
+- Hand-written `SetCapture` + `SetWindowPos` resize instead of `WS_THICKFRAME`
+  (no extra non-client pixels, no modal sizing loop re-entering the mouse hook,
+  IME or commit logic); hit testing is pure geometry in
+  `note_editor::display::hit_test`.
+- The shadow is a 9-patch atlas baked once per DPI (48 DIP corners, 8 DIP
+  middles) instead of a full-window blur per resize step.
+- Measured: `probe --mode=note` opens at 56.5–57.1 MB private for 460×360 and
+  72–73 MB for 820×640 (200% DPI), draw p50 0.20–0.31 ms / p95 0.23–0.33 ms,
+  60 fps budget untouched. MAX↔MIN round trips settle at a one-time 9–15 MB
+  high-water mark, not a per-cycle leak.
+
+# Changelog
+
+## 2.4.2 — 2026-11-12
+
+### Fixes
+
+- **The note editor shows the text-editing I-beam cursor.** The editor window
+  registered a NULL class cursor and never handled `WM_SETCURSOR`, so the arrow
+  (or whatever cursor the window underneath had left) stayed over the editable
+  paper. The paper now shows `IDC_IBEAM`, the shadow margin `IDC_ARROW`, and a
+  drag selection keeps the I-beam even when the pointer leaves the paper.
+- **Drag selection keeps up with the pointer.** The render thread handled one
+  queued command per frame and then waited for vsync, so pointer moves from
+  125–1000 Hz mice piled up without bound. Measured on the reference machine,
+  600 moves over 0.9 s: queue depth p50 290 / max 543, applied-move lag p50
+  4.48 s / p95 8.58 s, and the selection was still catching up about 9 s after
+  the pointer stopped. A frame now drains the queued input (up to 512 commands)
+  and applies only the last of a run of pointer moves, keeping every other
+  command in order: queue max 12, applied-move lag p50 0.76 ms / p95 1.58 ms,
+  fully caught up 1.1 ms after the last move.
+- **Ctrl+C works in the note editor.** `VK_C` was missing from the key map, so
+  the copy shortcut was unreachable even though Ctrl+X worked.
+
+### Performance
+
+- A caret move within the current line no longer re-parses the Markdown or
+  rebuilds the text layouts: one rebuild drops from p50 29 µs to 0–1 µs. The
+  frame is dominated by the vsync-blocked `Present` (p50 ~15.7–16.6 ms), so
+  this is a small additional saving rather than the drag fix.
+- `PEGLINE_TRACE=1` now also writes rate-limited `note editor drag:` and
+  `note editor loop:` statistics (queue depth, batch size, apply lag, handle and
+  draw time); the instrumentation is silent and costs nothing when traces are
+  off.
+- `PEGLINE_ALLOW_SECOND_INSTANCE=1` lets the scripted acceptance runs start a
+  second copy beside the tray app; a normal start is still single-instance.
+
 ## 2.4.1 — 2026-11-10
 
 ### Fixes

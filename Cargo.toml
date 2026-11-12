@@ -1,6 +1,6 @@
 [package]
 name = "pegline-rust"
-version = "2.4.1"
+version = "2.5.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Pegline-Rust: screenshots hanging on a clothesline, rewritten in Rust with Win32 + DirectComposition"

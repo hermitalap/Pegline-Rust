@@ -235,3 +235,44 @@ WPF 版一次飞行一条时间线；Rust 版加了 generation 计数：新的�
   因为每个窗口的 renderer 各上传一份约 2.3 MB 的纹理。
 - **绘制**：line 的 draw p50 1.635 ms（基线 0.80），仍远低于 8.3 ms 预算；card6 原语
   0.323 ms。没有做进一步的 bitmap-brush 优化，因为尚未接近预算。
+
+## D13 便签编辑器手写缩放，不用 `WS_THICKFRAME`（2026-11-12）
+
+需求（PLAN-2.5.0）：便签编辑器可以从右边缘、下边缘、右下角拖大，并记住每个便签的尺寸。
+
+选择：
+
+- **不用 `WS_THICKFRAME` + 系统 sizing loop**。系统边框会在 Win10/11 上加 1 px 非客户区、
+  系统阴影和圆角，破坏“纸 + 20 DIP 阴影边距”的外观；`WM_ENTERSIZEMOVE` 的模态 sizing
+  循环会与本项目的 WH_MOUSE_LL 钩子、IME 焦点和提交逻辑重入，还要补
+  `WM_NCCALCSIZE`/`WM_NCHITTEST` 才能把客户区还原成纸面。收益只是少写几十行。
+- **手写 `SetCapture` + `SetWindowPos`**：`src/note_editor/window.rs` 的 `handle_mouse`/
+  `begin_resize`/`drag_resize`/`finish_resize` 走同一条消息路径，没有第二个消息循环。
+  拖动中每帧 `SetWindowPos(...,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE)`，Windows 只发
+  `WM_SIZE`，渲染线程按新尺寸重建纸面位图。
+- **命中在 `display.rs`**（纯几何、可单测）：`Hit = Resize(Right|Bottom|Corner) | Paper |
+  Margin | Outside`，热区是纸面边上 2 DIP 的带，向外延伸到窗口边；优先级
+  `Resize > Paper > Margin > Outside`。UI 线程和渲染线程共用同一份 `hit_test`。
+- **阴影改成 9 宫格图集**（`ShadowAtlas`）：整窗烘焙 + 3× 盒式模糊在 1720×1360 上每次
+  缩放要约 10 ms 且每拖一步都要重来；图集只在 DPI 变化时烘一次（角 48 DIP、边中 8 DIP），
+  缩放只改 9 个目标矩形。200% 下 208×208 px ≈ 0.17 MB。
+- **悬停高亮画在窗口层**，不写进纸面位图：2 DIP、`COLOR_HIGHLIGHT`（本机 `#0078D7`），
+  走一个新的 `Command::Hover(Option<ResizeZone>)`，只在带变化时发一次。纸面位图保持
+  ClearType，提交/返回飞行的位图也不带高亮。
+- **尺寸以 DIP 存**：`settings.ini` 的 `noteSize:<文件名>=宽x高`，默认 460×360 时删除键。
+  拖动中每帧更新的是 `effective`（屏幕上被工作区夹紧的尺寸），松开才取整写
+  `explicit` 并持久化；`WM_SIZE` 只更新 `effective`，避免把夹紧后的值当成用户选择。
+- **中心不变**：窗口在工作区居中，缩放围绕纸面中心对称生长——被拖的边 1:1 跟手，
+  对边镜像移动同样的距离，所以纸面中心始终不动，窗口向四周长；工作区边界只夹住
+  尺寸（`.min(MAX_PAPER, 工作区可容纳)`），不移动中心。工作区连 500×400 都放不下时
+  纸面可以小于最小尺寸、窗口铺满工作区。
+
+代价与测量（200% DPI、3008×1692）：
+
+- `probe --mode=note`：默认 460×360 打开 56.5–57.1 MB private，draw p50 0.22 / p95 0.25–0.32 ms；
+  820×640 打开 72–73 MB，draw p50 0.20–0.31 / p95 0.23–0.33 ms。多次往返 MAX/MIN 的
+  内存漂移是**一次性高水位** 9–15 MB（最大纸面位图 1720×1360×4 ≈ 9.4 MB 加 D2D 缓存），
+  不是每周期泄漏：1/2/3/5/10/20/40/100/200 周期分别 11.0/13.9/14.1/14.1/14.0/14.1/14.6/14.4/15.8 MB。
+- 真实鼠标拖动（release、200%）：UI 线程 `handle_us_p50 ≈ 1.5 ms`（SetWindowPos + WM_SIZE），
+  渲染 `draw_us_p50 ≈ 0.3 ms`，没有任何一帧超过 16.7 ms 预算。
+- 应用层在 820×640 打开编辑器时 170.9 MB private（193.9 MB WS），验收线 190 MB 以内。

@@ -55,6 +55,7 @@ use crate::editor::{Editor, EditorEvent};
 use crate::i18n;
 use crate::layout;
 use crate::logging;
+use crate::note_editor::display::PaperSize;
 use crate::note_editor::model;
 use crate::note_editor::window::{NoteEditor, NoteEditorEvent};
 use crate::notes;
@@ -1893,7 +1894,14 @@ impl App {
         let notify = Box::new(move |event| {
             let _ = tx.send(Event::NoteEditor(event));
         });
-        match NoteEditor::open_hidden(String::new(), 0, monitor.dpi, monitor, notify) {
+        match NoteEditor::open_hidden(
+            String::new(),
+            0,
+            PaperSize::default(),
+            monitor.dpi,
+            monitor,
+            notify,
+        ) {
             Ok(editor) => {
                 self.windows.note_editor = Some(editor);
                 self.sessions.note_editing = Some(EditingNote {
@@ -2292,7 +2300,13 @@ impl App {
         let notify = Box::new(move |event| {
             let _ = tx.send(Event::NoteEditor(event));
         });
-        match NoteEditor::open_hidden(original.clone(), color, monitor.dpi, monitor, notify) {
+        let paper = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| self.settings.note_size(name))
+            .unwrap_or_default();
+        match NoteEditor::open_hidden(original.clone(), color, paper, monitor.dpi, monitor, notify)
+        {
             Ok(editor) => {
                 self.windows.note_editor = Some(editor);
                 self.sessions.note_editing = Some(EditingNote {
@@ -2350,6 +2364,26 @@ impl App {
 
     fn on_note_editor_event(&mut self, event: NoteEditorEvent) {
         match event {
+            NoteEditorEvent::Resized(paper) => {
+                // One write per drag, on the UI thread, after the release: the
+                // settings file is small and the drag is over.
+                let name = self
+                    .sessions
+                    .note_editing
+                    .as_ref()
+                    .and_then(|editing| editing.path.as_ref())
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
+                logging::trace(format!(
+                    "note editor resized: name={name:?} paper={}x{}",
+                    paper.width.round(),
+                    paper.height.round()
+                ));
+                if let Some(name) = name {
+                    self.settings.set_note_size(&name, paper);
+                }
+            }
             NoteEditorEvent::Copy(text) => {
                 if let Err(error) = clipboard::write_text(self.hwnd, &text) {
                     logging::error(format!("note clipboard: {error}"));
@@ -2505,6 +2539,11 @@ impl App {
         };
         let from = self.note_editor_card_px();
         let dpi = self.screen_dpi();
+        let is_new = card.is_none();
+        let saved_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
         match card {
             Some(id) => {
                 let write = std::fs::metadata(&path)
@@ -2595,6 +2634,15 @@ impl App {
                 self.sound(Cue::Tink);
             }
         }
+        // A brand-new note has no settings entry yet: remember the paper it
+        // was written at under its fresh file name (BEHAVIOR §10.1).
+        if is_new {
+            if let (Some(name), Some(editor)) =
+                (saved_name.as_deref(), self.windows.note_editor.as_ref())
+            {
+                self.settings.set_note_size(name, editor.explicit_paper());
+            }
+        }
         self.save_pegged();
         self.close_note_editor();
     }
@@ -2679,6 +2727,12 @@ impl App {
         match result {
             Ok(archived) => {
                 logging::trace(format!("archived note to {}", archived.display()));
+                // The note left the line: its remembered paper size goes with
+                // it, so a later note with the same name starts at the default.
+                if let Some(name) = archived.file_name().and_then(|name| name.to_str()) {
+                    self.settings.remove_note_size(name);
+                    self.settings.save();
+                }
                 self.start_fall(id);
                 self.remove_item(id);
                 self.close_note_editor();
@@ -2750,17 +2804,10 @@ impl App {
             return;
         };
         let dpi = win32::window_dpi(editor.hwnd()).max(96);
-        let color = self
-            .sessions
-            .note_editing
-            .as_ref()
-            .map(|note| note.color)
-            .unwrap_or(0);
-        let image = notes::render_paper(
-            crate::note_editor::display::PAPER_WIDTH,
-            crate::note_editor::display::PAPER_HEIGHT,
-            color,
-        );
+        // The render thread already produced the paper at the editor's live
+        // size for the commit; the discard tumble reuses it instead of
+        // rasterising 460x360 on the UI thread (BEHAVIOR §10.1).
+        let image = self.sessions.note_return_image.take();
         // Random throw: the spin direction and the sideways push are independent
         // coin flips, the upward impulse is always small.
         let seed = (win32::now_seconds() * 1000.0) as u64;
