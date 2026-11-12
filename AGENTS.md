@@ -95,8 +95,10 @@ until the next reveal. `src/app/reveal.rs` owns the rule.
 
 **2.5.0 is the current version (2026-11-12)**: it makes the note editor
 resizable — drag the paper's right edge, bottom edge or bottom-right corner from
-460×360 to 820×640 DIP (window 500×400 → 860×680), top-left fixed, window growing
-right/down — highlights the hovered band with a 2 DIP `COLOR_HIGHLIGHT` strip, and
+460×360 to 820×640 DIP (window 500×400 → 860×680); the dragged edge tracks the
+pointer 1:1 and the opposite edge mirrors it, so the paper's centre never moves and
+the window grows all four ways (the work area only clamps the size) — highlights
+the hovered band with a 2 DIP `COLOR_HIGHLIGHT` strip, and
 remembers each note's paper size in `settings.ini` as `noteSize:<file>=WxH`
 (whole DIP; dragging back to the default, or archiving, removes the key). The resize
 is hand-written (`SetCapture` + `SetWindowPos`, `Hit`/`hit_test` in
