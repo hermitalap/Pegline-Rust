@@ -1172,6 +1172,9 @@ fn handle_mouse(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LR
             if let Some(paper) = finish_resize(hwnd, shared) {
                 shared.push(NoteEditorEvent::Resized(paper), hwnd);
                 set_cursor(cursor_for(false, hit_test(x, y, paper, dpi)));
+                // The pointer is still over the band, so the highlight comes
+                // back without waiting for the next move.
+                update_hover(x, y, paper, dpi, shared);
                 return LRESULT(0);
             }
             if shared.pointer_down.load(Ordering::Relaxed) {
@@ -1544,11 +1547,8 @@ fn handle_minmax(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     else {
         return LRESULT(0);
     };
-    let (min_width, min_height) = MIN_PAPER.window_size();
-    let (max_width, max_height) = MAX_PAPER.window_size();
     let min_px = window_pixels(MIN_PAPER, scale);
     let max_px = window_pixels(MAX_PAPER, scale);
-    let _ = (min_width, min_height, max_width, max_height);
     if monitor.work.width() < min_px.0 || monitor.work.height() < min_px.1 {
         info.ptMinTrackSize = POINT {
             x: monitor.work.width(),
