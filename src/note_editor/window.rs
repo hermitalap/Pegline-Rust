@@ -35,11 +35,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
     GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE,
     IDC_SIZEWE, LoadCursorW, MINMAXINFO, PostMessageW, SPI_SETWORKAREA, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETDLGCODE,
-    WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
+    SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO,
+    WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
     WM_SETTINGCHANGE, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
@@ -181,8 +181,9 @@ struct Drag {
     zone: ResizeZone,
     /// Screen position where the button went down, pixels.
     start_cursor: (i32, i32),
-    /// The window rectangle at that moment, screen pixels.
-    start_window: crate::types::RectI,
+    /// The window centre at that moment, screen pixels. The paper is resized
+    /// symmetrically around it, so the centre never moves during a drag.
+    centre: (i32, i32),
     /// The paper at that moment, DIP.
     start_paper: PaperSize,
     /// The last window size applied, pixels, so a drag that is clamped and
@@ -229,7 +230,7 @@ pub struct NoteEditor {
 
 impl NoteEditor {
     /// Opens the editor on `monitor` with `paper` (DIP), centred in its work
-    /// area unless the growth envelope says otherwise.
+    /// area; a resize then grows it symmetrically around that centre.
     pub fn open(
         text: String,
         color: usize,
@@ -1244,11 +1245,15 @@ fn begin_resize(hwnd: HWND, zone: ResizeZone, paper: PaperSize, shared: &Shared)
         return;
     };
     let last_px = (window.width().max(1), window.height().max(1));
+    let centre = (
+        window.left + window.width() / 2,
+        window.top + window.height() / 2,
+    );
     if let Ok(mut ui) = shared.resize.lock() {
         ui.drag = Some(Drag {
             zone,
             start_cursor: cursor,
-            start_window: window,
+            centre,
             start_paper: paper,
             last_px,
             moved: false,
@@ -1268,8 +1273,9 @@ fn begin_resize(hwnd: HWND, zone: ResizeZone, paper: PaperSize, shared: &Shared)
 }
 
 /// One live resize step: track the pointer in screen pixels, clamp to the work
-/// area, and resize the window without moving it. The render thread follows
-/// through `WM_SIZE`; the paper stays fractional in DIP until the release.
+/// area, and resize the window around the centre the drag fixed. The render
+/// thread follows through `WM_SIZE`; the paper stays fractional in DIP until
+/// the release.
 fn drag_resize(hwnd: HWND, cursor: (i32, i32), dpi: u32, shared: &Shared) {
     let Some(work) = win32::monitor_at(cursor.0, cursor.1).map(|monitor| monitor.work) else {
         return;
@@ -1277,30 +1283,37 @@ fn drag_resize(hwnd: HWND, cursor: (i32, i32), dpi: u32, shared: &Shared) {
     let scale = dpi as f32 / 96.0;
     let mut applied = None;
     if let Ok(mut ui) = shared.resize.lock() {
-        let Some(drag) = ui.drag.as_mut() else {
-            return;
+        // Read the drag first; the size is then applied under the same lock but
+        // without a second borrow of the drag.
+        let (centre, paper, px, changed) = match ui.drag.as_ref() {
+            Some(drag) => {
+                let paper = resized_paper(drag, cursor, work, dpi);
+                let px = window_pixels(paper, scale);
+                (drag.centre, paper, px, px != drag.last_px)
+            }
+            None => return,
         };
-        let paper = resized_paper(drag, cursor, work, dpi);
-        let px = window_pixels(paper, scale);
-        if px != drag.last_px {
-            drag.last_px = px;
-            drag.moved = true;
+        if changed {
+            if let Some(drag) = ui.drag.as_mut() {
+                drag.last_px = px;
+                drag.moved = true;
+            }
             ui.effective = paper;
-            applied = Some(px);
+            applied = Some((centre, px));
         }
     }
-    if let Some((width, height)) = applied {
+    if let Some((centre, (width, height))) = applied {
         // SAFETY: resizing our own top-level window, which is hidden from the
         // taskbar and never activated by this call.
         unsafe {
             let _ = SetWindowPos(
                 hwnd,
                 None,
-                0,
-                0,
+                centre.0 - width / 2,
+                centre.1 - height / 2,
                 width,
                 height,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
     }
@@ -1331,16 +1344,17 @@ fn finish_resize(hwnd: HWND, shared: &Shared) -> Option<PaperSize> {
         Err(_) => return None,
     };
     let (width, height) = window_pixels(paper, scale);
-    // SAFETY: the final size of our own window; the move flags keep it in place.
+    // SAFETY: the final size of our own window, placed around the centre the
+    // drag kept fixed, so a release never shifts the paper.
     unsafe {
         let _ = SetWindowPos(
             hwnd,
             None,
-            0,
-            0,
+            drag.centre.0 - width / 2,
+            drag.centre.1 - height / 2,
             width,
             height,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
     logging::trace(format!(
@@ -1493,9 +1507,9 @@ fn handle_resize(
 }
 
 /// Re-places the window after a DPI or work-area change: the paper the user
-/// chose is kept, clamped to the new work area, and the window is placed with
-/// the growth envelope so a later resize still stays on screen. The value on
-/// disk is not touched until the user drags again.
+/// chose is kept, clamped to the new work area, and the window is centred there
+/// so a later resize still has room on every side. The value on disk is not
+/// touched until the user drags again.
 fn reflow(hwnd: HWND, shared: &Shared) {
     let (paper, dragging) = match shared.resize.lock() {
         Ok(ui) => (ui.explicit, ui.drag.is_some()),
@@ -1770,31 +1784,18 @@ struct Frame {
 
 /// The editor window for `paper` on `work` at `dpi`.
 ///
-/// The window is the paper plus two shadow margins, centred in the work area
-/// unless that would leave no room to grow: a resize drag only moves the right
-/// and bottom edges, so the window is placed so the largest paper still fits
-/// from its top-left corner (BEHAVIOR §10.1).
+/// The window is the paper plus two shadow margins, centred in the work area.
+/// A resize drag grows the paper symmetrically around its centre (BEHAVIOR
+/// §10.1), so the centre is the only place the window needs to be: a later
+/// resize has as much room on every side as this placement gives it.
 fn frame_for(work: crate::types::RectI, paper: PaperSize, dpi: u32) -> Frame {
     let scale = dpi.max(96) as f32 / 96.0;
     let paper = fit_paper(work, paper, scale);
-    let (window_width, window_height) = paper.window_size();
-    let width = ((window_width * scale).round().max(1.0) as i32).min(work.width().max(1));
-    let height = ((window_height * scale).round().max(1.0) as i32).min(work.height().max(1));
-    // How far the window may grow before the largest paper leaves the work
-    // area; both the paper maximum and the work area bound it.
-    let (envelope_width, envelope_height) = MAX_PAPER.window_size();
-    let growth_width = ((envelope_width * scale).round() as i32)
-        .min(work.width())
-        .max(1);
-    let growth_height = ((envelope_height * scale).round() as i32)
-        .min(work.height())
-        .max(1);
-    let centered_left = work.left + (work.width() - width).max(0) / 2;
-    let centered_top = work.top + (work.height() - height).max(0) / 2;
-    // Clamp the centre so the growth envelope stays on screen. When the work
-    // area is smaller than the envelope the window sits at its top-left corner.
-    let left = centered_left.min(work.right - growth_width).max(work.left);
-    let top = centered_top.min(work.bottom - growth_height).max(work.top);
+    let (width, height) = window_pixels(paper, scale);
+    let width = width.min(work.width().max(1));
+    let height = height.min(work.height().max(1));
+    let left = work.left + (work.width() - width).max(0) / 2;
+    let top = work.top + (work.height() - height).max(0) / 2;
     Frame {
         rect: crate::types::RectI::new(left, top, left + width, top + height),
         paper,
@@ -1830,8 +1831,11 @@ fn clamp_edge(value: f32, available: f32, min: f32, max: f32) -> f32 {
     value.max(lower).min(upper)
 }
 
-/// The paper a drag of `zone` to `cursor` produces. Only the right and bottom
-/// edges move; the window's top-left corner is fixed.
+/// The paper a drag of `zone` to `cursor` produces.
+///
+/// Only the right and bottom edges are draggable, and each tracks the pointer
+/// 1:1: the opposite edge mirrors it, so the paper grows by twice the pointer's
+/// travel, half on each side, and the centre stays where the drag started.
 fn resized_paper(
     drag: &Drag,
     cursor: (i32, i32),
@@ -1841,26 +1845,37 @@ fn resized_paper(
     let scale = dpi.max(96) as f32 / 96.0;
     let dx = (cursor.0 - drag.start_cursor.0) as f32 / scale;
     let dy = (cursor.1 - drag.start_cursor.1) as f32 / scale;
+    let (available_width, available_height) = available_paper(drag.centre, work, scale);
     let mut paper = drag.start_paper;
     if matches!(drag.zone, ResizeZone::Right | ResizeZone::Corner) {
-        let available = (work.right - drag.start_window.left) as f32 / scale - MARGIN_DIP * 2.0;
         paper.width = clamp_edge(
-            drag.start_paper.width + dx,
-            available,
+            drag.start_paper.width + dx * 2.0,
+            available_width,
             MIN_PAPER.width,
             MAX_PAPER.width,
         );
     }
     if matches!(drag.zone, ResizeZone::Bottom | ResizeZone::Corner) {
-        let available = (work.bottom - drag.start_window.top) as f32 / scale - MARGIN_DIP * 2.0;
         paper.height = clamp_edge(
-            drag.start_paper.height + dy,
-            available,
+            drag.start_paper.height + dy * 2.0,
+            available_height,
             MIN_PAPER.height,
             MAX_PAPER.height,
         );
     }
     paper
+}
+
+/// The largest paper that still fits the work area with its centre fixed at
+/// `centre`: the window may grow to twice the shorter half-side, minus the
+/// shadow margins.
+fn available_paper(centre: (i32, i32), work: crate::types::RectI, scale: f32) -> (f32, f32) {
+    let half_x = (centre.0 - work.left).min(work.right - centre.0).max(0) as f32 / scale;
+    let half_y = (centre.1 - work.top).min(work.bottom - centre.1).max(0) as f32 / scale;
+    (
+        (half_x * 2.0 - MARGIN_DIP * 2.0).max(1.0),
+        (half_y * 2.0 - MARGIN_DIP * 2.0).max(1.0),
+    )
 }
 
 /// The window size in device pixels for a paper (rounding lives here, so the
@@ -1974,34 +1989,31 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_is_placed_with_the_growth_envelope() {
+    fn the_editor_is_centred_in_the_work_area() {
         let work = crate::types::RectI::new(0, 0, 1920, 1080);
         let frame = frame_for(work, DEFAULT_PAPER, 96);
         assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
         assert_eq!((frame.rect.left, frame.rect.top), (710, 340));
 
-        // At 200 % the 860x680 growth envelope is 1720x1360 px, taller than
-        // the work area: the window moves to the top-left of that envelope so
-        // a resize always has room on the right and below.
+        // At 200 % the window is 1000x800; the centre is the same point in DIP,
+        // so the paper's centre sits in the middle of the work area.
         let frame = frame_for(work, DEFAULT_PAPER, 192);
         assert_eq!((frame.rect.width(), frame.rect.height()), (1000, 800));
-        assert_eq!((frame.rect.left, frame.rect.top), (200, 0));
+        assert_eq!((frame.rect.left, frame.rect.top), (460, 140));
 
         // A work area that is not at the origin keeps the same relative centre.
         let work = crate::types::RectI::new(200, 100, 2120, 1180);
         let frame = frame_for(work, DEFAULT_PAPER, 96);
         assert_eq!((frame.rect.left, frame.rect.top), (910, 440));
 
-        // 1024x600 cannot hold the 860x680 growth envelope, so the window sits
-        // at the left edge of the envelope: a resize has room on the right.
+        // A short work area centres what still fits and clamps the paper.
         let work = crate::types::RectI::new(0, 0, 1024, 600);
         let frame = frame_for(work, DEFAULT_PAPER, 96);
-        assert_eq!((frame.rect.left, frame.rect.top), (164, 0));
+        assert_eq!((frame.rect.left, frame.rect.top), (262, 100));
         assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
-
-        // The largest paper is clamped to what the work area can hold.
         let frame = frame_for(work, MAX_PAPER, 96);
         assert_eq!((frame.paper.width, frame.paper.height), (820.0, 560.0));
+        assert_eq!(frame.rect.top, 0);
         assert_eq!(frame.rect.bottom, 600);
     }
 
@@ -2015,19 +2027,26 @@ mod tests {
     }
 
     #[test]
-    fn a_resize_drag_moves_only_the_bottom_right() {
+    fn a_resize_drag_mirrors_the_dragged_edge_around_the_centre() {
         let work = crate::types::RectI::new(0, 0, 1920, 1080);
-        let start_window = crate::types::RectI::new(710, 340, 1210, 740);
+        // The window is centred, so its centre is the work area's centre.
         let drag = Drag {
             zone: ResizeZone::Corner,
             start_cursor: (1210, 740),
-            start_window,
+            centre: (960, 540),
             start_paper: DEFAULT_PAPER,
             last_px: (500, 400),
             moved: false,
         };
+        // 100 px right and 50 px down double into +200 / +100 DIP.
         let paper = resized_paper(&drag, (1310, 790), work, 96);
-        assert_eq!((paper.width, paper.height), (560.0, 410.0));
+        assert_eq!((paper.width, paper.height), (660.0, 460.0));
+
+        // The centre really is fixed: the window grows half the extra each way.
+        let (width, height) = window_pixels(paper, 1.0);
+        assert_eq!((960 - width / 2, 540 - height / 2), (610, 290));
+        assert_eq!(width, 700);
+        assert_eq!(height, 500);
 
         // The work area bounds the growth, not only MAX_PAPER.
         let paper = resized_paper(&drag, (3000, 3000), work, 96);
@@ -2041,13 +2060,25 @@ mod tests {
             (MIN_PAPER.width, MIN_PAPER.height)
         );
 
-        // A right-edge drag leaves the height alone.
+        // A right-edge drag leaves the height alone, and its width doubles.
         let drag = Drag {
             zone: ResizeZone::Right,
             ..drag
         };
         let paper = resized_paper(&drag, (1310, 790), work, 96);
-        assert_eq!((paper.width, paper.height), (560.0, DEFAULT_PAPER.height));
+        assert_eq!((paper.width, paper.height), (660.0, DEFAULT_PAPER.height));
+    }
+
+    #[test]
+    fn a_work_area_too_small_for_the_paper_clamps_without_moving_the_centre() {
+        // Centre 300 px from the left edge of a 400 px tall work area: the
+        // window may reach 600 px wide (300 each way) and 800 px tall.
+        let work = crate::types::RectI::new(100, 100, 1000, 500);
+        let paper = available_paper((400, 300), work, 1.0);
+        assert_eq!(paper, (600.0 - 40.0, 400.0 - 40.0));
+        // Only the shadow margin is lost: 300 px each way minus 2x20 DIP.
+        assert_eq!(paper.0, 560.0);
+        assert_eq!(paper.1, 360.0);
     }
 
     /// Applies `next_applied` the way the render loop does, including the stop.

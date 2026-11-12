@@ -722,15 +722,16 @@
 
 | 检查 | 结果 |
 |:--|:--|
-| 默认尺寸 | 460×360 纸面 → 1000×800 px 窗口，Markdown 重排正常（`note-editor-default-200.png`） |
+| 默认尺寸 | 460×360 纸面 → 1000×800 px 窗口，位于工作区中心 (3008,1644)，Markdown 重排正常（`note-editor-default-200.png`） |
 | 最大尺寸 | 820×640 纸面 → 1720×1360 px 窗口；标题、粗体、任务框、引用、行内代码、代码块、中文全部正确（`note-editor-max-200.png`） |
-| 右边缘拖动 | 1000×800 → 1100×800，trace `note editor resize: paper=510x360` |
-| 夹紧 | 拖到 x=4500 → `paper=820x360`；右下角拖回左上 → `paper=460x360` |
-| 下边缘拖动 | (3000,2020)→(3000,2900) → `paper=820x640`（1720×1360 窗口） |
-| 右下角 | zone=3，宽高同时变化，夹到最大/最小 |
+| 中心不动 | 依次拖右边缘 +100 px、下边缘 +60 px：窗口 1000×800 → 1200×800 → 1200×920，三次 `GetWindowRect` 的中心都是 (3008,1644)，左/上边各向外让出 100/60 px；拖动后的纸面见 `note-editor-center-200.png` |
+| 右边缘拖动 | 100 px 位移 → 纸面 +100 DIP（两边各 +50），宽 2 倍跟手；1000×800 → 1200×800 |
+| 下边缘拖动 | 60 px 位移 → 高 +60 DIP；1200×800 → 1200×920（top 1244→1184） |
+| 右下角 | zone=3，宽高同时变化；往里拖 140×90 px 时夹到最小 1000×800（窗口不会停在中间尺寸） |
+| 夹紧 | 拖到 x=4500 → `paper=820x360`；右下角拖回左上 → `paper=460x360`；夹紧时中心同样不动 |
 | 边距提交 | 纸面下边 13 DIP 外的一次按下判为 `Margin`，编辑器提交（不会误判为缩放） |
 | 悬停高亮 | 右/下边 2 DIP `#0078D7` 像素采样命中（`note-editor-hover-bottom.png`） |
-| 尺寸记忆 | `--note-storage-demo` + 80 px 右边缘拖动 → trace `note editor resized: name=Some("便签 ….txt") paper=500x360`，`settings.ini` 出现 `noteSize:便签 …=500x360`；归档后键消失 |
+| 尺寸记忆 | `--note-storage-demo` + 80 px 右边缘拖动 → trace `note editor resized: name=Some("便签 ….txt") paper=540x360`，`settings.ini` 出现 `noteSize:便签 …=540x360`；归档后键消失 |
 | 读取尺寸 | `PEGLINE_NOTE_STORAGE_PAPER=600x500` → trace `note editor open: 1280x1080 px at 192 dpi, flight image 1200x1000` |
 | 拖动开销 | `handle_us_p50 ≈ 1.5 ms`、`draw_us_p50 ≈ 0.3 ms`、`lag_ms_p50 = 0.00` |
 | 选择不受缩放影响 | 纸面内按下拖动跨两行，选区反白、`##` 源文本随光标行显示，编辑器保持打开（`note-editor-selection-200.png`） |
