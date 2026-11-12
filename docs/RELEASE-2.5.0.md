@@ -1,7 +1,9 @@
 # Pegline 2.5.0 发布说明
 
 发布日期：2026-11-12
-产物：`dist/Pegline-2.5.0-win-x64.zip`（单文件 exe + README + LICENSE + CHANGELOG）
+产物：`dist/Pegline-2.5.0-win-x64.zip`（单文件 exe + README + LICENSE + CHANGELOG），818,065 B，
+sha256 `e014eff9acd04481640b34727585757bf99b13ff8a0700cedbebfd0066688c2a`。
+重新打包：`pwsh tools\package-release.ps1`。
 
 `pegline.exe` 为 **1,878,528 B（1.88 MB）**，ProductVersion `2.5.0.0`（2.4.2 的 1,840,640 B
 增加 38,400 B，来自 PaperSize、命中测试、9 宫格图集与设置项）。
@@ -43,7 +45,7 @@
 | `probe --mode=note` 820×640 | 72–72.8 MB（终版 72.3） | 0.20–0.22 ms | 0.23–0.28 ms |
 | 应用内 820×640 打开编辑器 | 170.9 MB（WS 193.9） | — | — |
 
-- 20/40/100/200 次 MAX↔MIN 往返漂移 9–15 MB，是一次性高水位（最大纸面位图
+- 20/40/100/200 次 MAX↔MIN 往返漂移 3.5–15 MB（随分配器状态浮动），是一次性高水位（最大纸面位图
   9.4 MB + D2D 缓存），不是每周期泄漏：1/2/3/5/10/20/40/100/200 周期 =
   11.0/13.9/14.1/14.1/14.0/14.1/14.6/14.4/15.8 MB。
 - 真实鼠标拖动：UI `handle_us_p50 ≈ 1.5 ms`，渲染 `draw_us_p50 ≈ 0.3 ms`。
