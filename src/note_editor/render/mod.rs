@@ -65,10 +65,9 @@ use crate::render::Present;
 use crate::types::{ImageData, RectF};
 
 /// The window is the paper plus a 20 DIP transparent margin for the shadow
-/// (NOTE-EDITOR.md §5.1).
-pub const MARGIN_DIP: f32 = 20.0;
-pub const WINDOW_WIDTH_DIP: f32 = PAPER_WIDTH + MARGIN_DIP * 2.0;
-pub const WINDOW_HEIGHT_DIP: f32 = PAPER_HEIGHT + MARGIN_DIP * 2.0;
+/// (NOTE-EDITOR.md §5.1). Owned by `display`; re-exported so callers that only
+/// know the render module keep working.
+pub use crate::note_editor::display::{MARGIN_DIP, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP};
 /// Paper corner radius and glass border, DIP.
 pub const RADIUS_DIP: f32 = 22.0;
 pub const BORDER_DIP: f32 = 1.5;

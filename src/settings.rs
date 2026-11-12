@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::logging;
+use crate::note_editor::display::{self, PaperSize};
 use crate::win32;
 
 /// Settings keys used by the MVP. Kept as constants so a typo is a compile
@@ -24,6 +25,8 @@ pub mod keys {
     pub const FPS: &str = "fps";
     /// Prefix of the per-note colour keys (`noteColor:<file name>`).
     pub const NOTE_COLOR_PREFIX: &str = "noteColor:";
+    /// Prefix of the per-note paper size keys (`noteSize:<file name>`).
+    pub const NOTE_SIZE_PREFIX: &str = "noteSize:";
 }
 
 /// How the frame loop paces itself (`fps=auto|60|120`, BEHAVIOR §12.3).
@@ -222,6 +225,33 @@ impl Settings {
         self.set_string(&key, &color.min(3).to_string());
         self.save();
     }
+
+    /// The paper size stored for a note file name. Missing or unreadable values
+    /// yield the default size; in-range values are returned as stored.
+    pub fn note_size(&self, file_name: &str) -> PaperSize {
+        self.string(&format!("{}{}", keys::NOTE_SIZE_PREFIX, file_name))
+            .and_then(display::parse_note_size)
+            .unwrap_or(display::DEFAULT_PAPER)
+    }
+
+    /// Store a note's paper size. The default removes the key, so the file only
+    /// carries sizes the user actually chose.
+    pub fn set_note_size(&mut self, file_name: &str, size: PaperSize) {
+        let key = format!("{}{}", keys::NOTE_SIZE_PREFIX, file_name);
+        let size = size.rounded().clamp();
+        if size == display::DEFAULT_PAPER {
+            self.remove(&key);
+        } else {
+            self.set_string(&key, &display::format_note_size(size));
+        }
+        self.save();
+    }
+
+    /// Drop a note's stored paper size (archive). The caller saves.
+    pub fn remove_note_size(&mut self, file_name: &str) {
+        let key = format!("{}{}", keys::NOTE_SIZE_PREFIX, file_name);
+        self.remove(&key);
+    }
 }
 
 /// Reads `pegged.txt`: one absolute path per line, CRLF, no quoting.
@@ -255,6 +285,7 @@ pub fn write_pegged(paths: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::note_editor::display::{DEFAULT_PAPER, MAX_PAPER};
 
     fn parse(text: &str) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
@@ -318,15 +349,45 @@ mod tests {
     }
 
     #[test]
-    fn note_colors_are_keyed_by_file_name_and_clamped() {
+    fn note_sizes_are_keyed_by_file_name_and_default_to_the_minimum() {
         let mut settings = Settings {
             values: parse(""),
             path: PathBuf::new(),
         };
-        assert_eq!(settings.note_color("便签 2026-11-02 120000.txt"), 0);
-        settings.set_string("noteColor:便签 2026-11-02 120000.txt", "2");
-        assert_eq!(settings.note_color("便签 2026-11-02 120000.txt"), 2);
-        settings.set_string("noteColor:x.txt", "99");
-        assert_eq!(settings.note_color("x.txt"), 3);
+        assert_eq!(
+            settings.note_size("便签 2026-11-02 120000.txt"),
+            DEFAULT_PAPER
+        );
+        settings.set_string("noteSize:便签 2026-11-02 120000.txt", "700x600");
+        assert_eq!(
+            settings.note_size("便签 2026-11-02 120000.txt"),
+            PaperSize::new(700.0, 600.0)
+        );
+        // Out-of-range and corrupt values degrade instead of surprising.
+        settings.set_string("noteSize:x.txt", "99999x99999");
+        assert_eq!(settings.note_size("x.txt"), MAX_PAPER);
+        settings.set_string("noteSize:x.txt", "bogus");
+        assert_eq!(settings.note_size("x.txt"), DEFAULT_PAPER);
+    }
+
+    #[test]
+    fn storing_the_default_size_removes_the_key() {
+        let mut map = parse("somethingNew=keep\r\n");
+        map.insert("noteSize:a.txt".into(), "700x600".into());
+        let mut settings = Settings {
+            values: map,
+            path: PathBuf::new(),
+        };
+        // `save` writes to the real app folder on a `PathBuf::new()` path, so
+        // exercise the map directly the way `set_note_size` does.
+        let key = format!("{}{}", keys::NOTE_SIZE_PREFIX, "a.txt");
+        settings.remove(&key);
+        assert_eq!(settings.note_size("a.txt"), DEFAULT_PAPER);
+        assert_eq!(settings.string("somethingNew"), Some("keep"));
+        settings.set_string(
+            &key,
+            &display::format_note_size(PaperSize::new(700.0, 600.0)),
+        );
+        assert_eq!(settings.note_size("a.txt"), PaperSize::new(700.0, 600.0));
     }
 }
