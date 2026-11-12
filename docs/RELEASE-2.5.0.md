@@ -50,7 +50,7 @@
 
 ## 验证
 
-- `cargo test`：**235 passed，0 failed，1 ignored**（另 `src/main.rs` 1 passed）
+- `cargo test`：**236 passed，0 failed，1 ignored**（另 `src/main.rs` 1 passed）
 - `cargo clippy --all-targets -- -D warnings`：通过
 - `cargo fmt --check`：通过
 - 真实鼠标：右边缘、下边缘、右下角、夹紧到最大/最小、边距提交、尺寸写盘/删键、

@@ -717,5 +717,5 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 - 已知未测：100% DPI 截图（本机只有 200% 显示器；96 DPI 几何由单元测试覆盖）、
   120 Hz、第二显示器、睡眠唤醒。
 
-工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 235 passed / 1 ignored，
+工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 236 passed / 1 ignored，
 `clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 全过。
