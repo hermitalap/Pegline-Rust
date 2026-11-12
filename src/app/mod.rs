@@ -2375,6 +2375,11 @@ impl App {
                     .and_then(|path| path.file_name())
                     .and_then(|name| name.to_str())
                     .map(str::to_owned);
+                logging::trace(format!(
+                    "note editor resized: name={name:?} paper={}x{}",
+                    paper.width.round(),
+                    paper.height.round()
+                ));
                 if let Some(name) = name {
                     self.settings.set_note_size(&name, paper);
                 }

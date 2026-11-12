@@ -391,6 +391,18 @@ impl super::App {
                 return;
             }
         };
+        if let Some(paper) = std::env::var("PEGLINE_NOTE_STORAGE_PAPER")
+            .ok()
+            .and_then(|value| crate::note_editor::display::parse_note_size(&value))
+        {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                self.settings.set_note_size(name, paper);
+                logging::trace(format!(
+                    "storage demo: seeded noteSize {name:?} = {}x{}",
+                    paper.width, paper.height
+                ));
+            }
+        }
         let Some(image) = notes::render(&text, 0) else {
             let _ = std::fs::remove_file(&path);
             logging::error("storage demo render failed");
