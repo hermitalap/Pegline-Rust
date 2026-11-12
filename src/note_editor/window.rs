@@ -387,9 +387,16 @@ impl NoteEditor {
     /// True when a screen-pixel point is outside the paper and its resize
     /// bands: the click that commits the note.
     pub fn is_commit_point(&self, x: i32, y: i32) -> bool {
+        // The caller is the app's low-level mouse hook, which reports screen
+        // pixels; `hit_test` works in client pixels.
+        let mut point = POINT { x, y };
+        // SAFETY: converting a screen point for our own window.
+        if !unsafe { ScreenToClient(self.hwnd, &mut point) }.as_bool() {
+            return true;
+        }
         let dpi = win32::window_dpi(self.hwnd);
         matches!(
-            hit_test(x, y, self.paper(), dpi),
+            hit_test(point.x, point.y, self.paper(), dpi),
             Hit::Margin | Hit::Outside
         )
     }
