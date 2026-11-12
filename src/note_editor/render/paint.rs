@@ -20,7 +20,8 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::{
-    BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, paper_rect, shadow_slices, utf16_offset,
+    BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, layout_end, layout_start, paper_rect,
+    shadow_slices, utf16_offset,
 };
 use crate::i18n;
 use crate::note_editor::display::{self, Block, PAD_BOTTOM, PAD_LEFT, PAD_TOP, ResizeZone, Style};
@@ -353,19 +354,12 @@ impl super::EditorState {
             };
             let display = &self.display.lines[line.index];
             for segment in display.segments(selection.clone(), line.active) {
-                let mut start = segment.start;
-                let mut end = segment.end;
-                if let Some(composition) = &line.composition {
-                    if start >= composition.end {
-                        start -= composition.len();
-                        end -= composition.len();
-                    } else if start > composition.start {
-                        start = composition.start;
-                    }
-                    if end > composition.start && end <= composition.end {
-                        end = composition.start;
-                    }
-                }
+                // `segments` are base-display offsets; the layout text has the
+                // IME composition inserted at `composition.start`. Add its
+                // length for offsets after the insertion point instead of
+                // subtracting it from the base offset.
+                let start = layout_start(&line.text, segment.start, line.composition.as_ref());
+                let end = layout_end(&line.text, segment.end, line.composition.as_ref());
                 if start >= end {
                     continue;
                 }

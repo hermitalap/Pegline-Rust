@@ -1099,13 +1099,8 @@ impl EditorState {
 
     fn display_offset(&self, laid: &LaidLine, caret: usize) -> usize {
         let line = &self.display.lines[laid.index];
-        let mut offset = caret.saturating_sub(line.source.start).min(laid.text.len());
-        if let Some(composition) = &laid.composition {
-            if caret >= line.source.start + composition.start {
-                offset += composition.len();
-            }
-        }
-        offset
+        let offset = caret.saturating_sub(line.source.start).min(laid.text.len());
+        layout_start(&laid.text, offset, laid.composition.as_ref())
     }
 
     fn max_scroll(&self) -> f32 {
@@ -1746,9 +1741,35 @@ pub fn paper_of_window(width_px: u32, height_px: u32, dpi: u32) -> PaperSize {
     )
 }
 
-/// A display byte offset as a UTF-16 position for DirectWrite.
+/// Maps a base-display byte offset to the laid-out text, adding the IME
+/// composition length when the offset is after its insertion point. A
+/// selection start at the insertion point is moved after the composition so
+/// the composition itself is not selected.
+fn layout_start(text: &str, base: usize, composition: Option<&Range<usize>>) -> usize {
+    let base = base.min(text.len());
+    let mapped = match composition {
+        Some(composition) if base >= composition.start => base.saturating_add(composition.len()),
+        _ => base,
+    };
+    model::floor_boundary(text, mapped.min(text.len()))
+}
+
+/// The end half of [`layout_start`]: an end exactly at the insertion point stays
+/// before the composition, so an empty range there stays empty.
+fn layout_end(text: &str, base: usize, composition: Option<&Range<usize>>) -> usize {
+    let base = base.min(text.len());
+    let mapped = match composition {
+        Some(composition) if base > composition.start => base.saturating_add(composition.len()),
+        _ => base,
+    };
+    model::floor_boundary(text, mapped.min(text.len()))
+}
+
+/// A display byte offset as a UTF-16 position for DirectWrite. Offsets that do
+/// not fall on a UTF-8 boundary are floored: a bad caller must not take the
+/// render thread down, and the nearest boundary still paints a useful range.
 fn utf16_offset(text: &str, byte: usize) -> u32 {
-    let byte = byte.min(text.len());
+    let byte = model::floor_boundary(text, byte.min(text.len()));
     text[..byte].encode_utf16().count() as u32
 }
 
@@ -2812,5 +2833,61 @@ mod tests {
             DEFAULT_PAPER.content_width(),
             4
         ));
+    }
+
+    #[test]
+    fn a_selection_after_a_composition_adds_its_length() {
+        // Base display text and the same line with a one-byte IME composition
+        // inserted before the Chinese character. `segments` uses base offsets;
+        // the layout uses the longer string.
+        let base = "a理b";
+        let laid = "ax理b";
+        let composition = 1..2;
+        assert_eq!(layout_start(laid, 1, Some(&composition)), 2);
+        assert_eq!(layout_end(laid, 4, Some(&composition)), 5);
+        assert!(laid.is_char_boundary(5));
+        assert_eq!(utf16_offset(laid, 5), 3);
+        // An end exactly at the insertion point stays before the composition.
+        assert_eq!(layout_end(laid, 1, Some(&composition)), 1);
+        // The base string itself has no composition.
+        assert_eq!(layout_start(base, 1, None), 1);
+        assert_eq!(layout_end(base, 4, None), 4);
+    }
+
+    #[test]
+    fn every_composition_offset_lands_on_a_char_boundary() {
+        // Exercises the 405-character note that exposed the panic: a one-byte
+        // composition shifts every Chinese character after its insertion point.
+        let base = "先使用智能体团队进行brainstorm，进行可行性分析，边界情况处理，考虑如何构建顺手流畅，模拟物理且符合直觉的动画，完成以后撰写为一个执行报告PLAN.md，文件名带上版本号说明与时间戳。";
+        let boundaries: Vec<usize> = base
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(base.len()))
+            .collect();
+        for &at in &boundaries {
+            for composition in ["x", "理"] {
+                let mut laid = String::with_capacity(base.len() + composition.len());
+                laid.push_str(&base[..at]);
+                laid.push_str(composition);
+                laid.push_str(&base[at..]);
+                let range = at..at + composition.len();
+                for &offset in &boundaries {
+                    let start = layout_start(&laid, offset, Some(&range));
+                    let end = layout_end(&laid, offset, Some(&range));
+                    assert!(laid.is_char_boundary(start));
+                    assert!(laid.is_char_boundary(end));
+                    // Must not panic even at the historical byte 85.
+                    let _ = utf16_offset(&laid, start);
+                    let _ = utf16_offset(&laid, end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_mid_char_byte_offset_is_floored_not_panicked() {
+        assert_eq!(utf16_offset("a理b", 2), 1);
+        assert_eq!(utf16_offset("a理b", 3), 1);
+        assert_eq!(utf16_offset("a理b", 4), 2);
     }
 }
