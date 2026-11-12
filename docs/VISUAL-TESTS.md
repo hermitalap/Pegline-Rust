@@ -733,6 +733,8 @@
 | 尺寸记忆 | `--note-storage-demo` + 80 px 右边缘拖动 → trace `note editor resized: name=Some("便签 ….txt") paper=500x360`，`settings.ini` 出现 `noteSize:便签 …=500x360`；归档后键消失 |
 | 读取尺寸 | `PEGLINE_NOTE_STORAGE_PAPER=600x500` → trace `note editor open: 1280x1080 px at 192 dpi, flight image 1200x1000` |
 | 拖动开销 | `handle_us_p50 ≈ 1.5 ms`、`draw_us_p50 ≈ 0.3 ms`、`lag_ms_p50 = 0.00` |
+| 选择不受缩放影响 | 纸面内按下拖动跨两行，选区反白、`##` 源文本随光标行显示，编辑器保持打开（`note-editor-selection-200.png`） |
+| 阴影 9 宫格 | 单元测试把九片拼回窗口，与整窗烘焙逐像素比较，最大差 3/255（`the_nine_slices_reproduce_the_baked_shadow`） |
 | 内存 | `probe --mode=note`：460×360 打开 56.5–57.1 MB；820×640 打开 72–73 MB；往返漂移为一次性高水位 9–15 MB |
 | 100% DPI | 本机没有 96 DPI 显示器，未截图；96 DPI 的窗口尺寸/命中/光标由单元测试覆盖 |
 | 120 Hz / 第二显示器 / 睡眠唤醒 | 未测 |
