@@ -712,3 +712,31 @@
 
 **结论**：I 形光标与拖动选区卡顿都已修复并经独立验证；渲染快路径只是附带优化，不是
 卡顿原因。详见 `PLAN.md` §12。
+
+### 3.21 便签编辑器的缩放、悬停高亮与尺寸记忆（2026-11-12）
+
+环境：release 构建，200% DPI，主显示器 3008×1692；`--note-resize-demo`（可加
+`PEGLINE_NOTE_RESIZE_PAPER=460x360|820x640`、`PEGLINE_NOTE_RESIZE_HOVER=right|bottom|corner`），
+`PEGLINE_ALLOW_SECOND_INSTANCE=1`，trace 打开。真实鼠标用 `SetCursorPos` + `mouse_event`
+注入（target/bench/drag.ps1）。
+
+| 检查 | 结果 |
+|:--|:--|
+| 默认尺寸 | 460×360 纸面 → 1000×800 px 窗口，Markdown 重排正常（`note-editor-default-200.png`） |
+| 最大尺寸 | 820×640 纸面 → 1720×1360 px 窗口；标题、粗体、任务框、引用、行内代码、代码块、中文全部正确（`note-editor-max-200.png`） |
+| 右边缘拖动 | 1000×800 → 1100×800，trace `note editor resize: paper=510x360` |
+| 夹紧 | 拖到 x=4500 → `paper=820x360`；右下角拖回左上 → `paper=460x360` |
+| 下边缘拖动 | (3000,2020)→(3000,2900) → `paper=820x640`（1720×1360 窗口） |
+| 右下角 | zone=3，宽高同时变化，夹到最大/最小 |
+| 边距提交 | 纸面下边 13 DIP 外的一次按下判为 `Margin`，编辑器提交（不会误判为缩放） |
+| 悬停高亮 | 右/下边 2 DIP `#0078D7` 像素采样命中（`note-editor-hover-bottom.png`） |
+| 尺寸记忆 | `--note-storage-demo` + 80 px 右边缘拖动 → trace `note editor resized: name=Some("便签 ….txt") paper=500x360`，`settings.ini` 出现 `noteSize:便签 …=500x360`；归档后键消失 |
+| 读取尺寸 | `PEGLINE_NOTE_STORAGE_PAPER=600x500` → trace `note editor open: 1280x1080 px at 192 dpi, flight image 1200x1000` |
+| 拖动开销 | `handle_us_p50 ≈ 1.5 ms`、`draw_us_p50 ≈ 0.3 ms`、`lag_ms_p50 = 0.00` |
+| 内存 | `probe --mode=note`：460×360 打开 56.5–57.1 MB；820×640 打开 72–73 MB；往返漂移为一次性高水位 9–15 MB |
+| 100% DPI | 本机没有 96 DPI 显示器，未截图；96 DPI 的窗口尺寸/命中/光标由单元测试覆盖 |
+| 120 Hz / 第二显示器 / 睡眠唤醒 | 未测 |
+
+**教训**：用 PowerShell 循环 `Select-String` 读 `settings.ini` 会持有文件句柄，使应用的
+原子 `fs::rename` 失败（`ERROR ACCESS DENIED (os error 5)`）；读取一次即可，应用会记录
+错误并继续运行。

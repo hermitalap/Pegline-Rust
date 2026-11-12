@@ -1,3 +1,41 @@
+## 2.5.0 — 2026-11-12
+
+### Features
+
+- **The note editor resizes.** Drag the paper's right edge, bottom edge or
+  bottom-right corner to grow it from 460×360 to 820×640 DIP (window 500×400 to
+  860×680). The top-left stays put and the window grows right and down; the paper,
+  fold, shadow, text layout, selection and scroll position follow live. Only a
+  width change reflows the text; a height-only drag just re-clamps the scroll.
+  Dragging stops at the work-area edge; the left/top edges and the window position
+  are not adjustable. Resizing is not undoable and does not dirty the note.
+- **Hover feedback on the resize bands.** The hit edge shows a 2 DIP
+  `COLOR_HIGHLIGHT` strip and the cursor becomes `IDC_SIZEWE` / `IDC_SIZENS` /
+  `IDC_SIZENWSE`. The strip is drawn in the window layer, so the paper bitmap keeps
+  ClearType and the return flight never carries it.
+- **Each note remembers its size.** Dragging writes
+  `noteSize:<file name>=WxH` (whole DIP) to `settings.ini`; reopening uses it.
+  Dragging back to 460×360 removes the key, archiving removes it, a new note is
+  only recorded once its file exists, and a discarded new note records nothing.
+  Missing, corrupt or out-of-range values fall back to (or clamp to) the default.
+- **DPI and work-area changes keep the chosen size.** `WM_DPICHANGED`,
+  `WM_DISPLAYCHANGE` and work-area changes re-flow around the growth envelope
+  instead of returning to 500×400; a work area too small for the minimum shrinks
+  the paper below its minimum and fills the work area.
+
+### Implementation
+
+- Hand-written `SetCapture` + `SetWindowPos` resize instead of `WS_THICKFRAME`
+  (no extra non-client pixels, no modal sizing loop re-entering the mouse hook,
+  IME or commit logic); hit testing is pure geometry in
+  `note_editor::display::hit_test`.
+- The shadow is a 9-patch atlas baked once per DPI (48 DIP corners, 8 DIP
+  middles) instead of a full-window blur per resize step.
+- Measured: `probe --mode=note` opens at 56.5–57.1 MB private for 460×360 and
+  72–73 MB for 820×640 (200% DPI), draw p50 0.20–0.31 ms / p95 0.23–0.33 ms,
+  60 fps budget untouched. MAX↔MIN round trips settle at a one-time 9–15 MB
+  high-water mark, not a per-cycle leak.
+
 # Changelog
 
 ## 2.4.2 — 2026-11-12

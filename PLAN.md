@@ -684,3 +684,37 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   合并/快路径单元测试。
 - 证据：`docs/VISUAL-TESTS.md` §3.20；`docs/visual/note-drag-backlog.png`（修复前，注入
   结束选区还在追）与 `note-drag-settled.png`（修复后，注入结束已追平）。
+
+## 13. 便签编辑器可缩放与尺寸记忆（2026-11-12，2.5.0）
+
+设计文档：`PLAN-2.5.0-20261112-155004.md`。用户可见行为已写进 `docs/BEHAVIOR.md` §10.1，
+取舍见 `docs/DECISIONS.md` D13。
+
+- 纸面 460×360（默认/最小）～ 820×640 DIP，窗口 = 纸面 + 2×20 DIP 阴影边距
+  （500×400 ～ 860×680）。拖右边缘/下边缘/右下角，左上角不动，窗口向右下生长。
+- 悬停时该边显示 2 DIP 的系统高亮色；光标 `IDC_SIZEWE`/`IDC_SIZENS`/`IDC_SIZENWSE`。
+- 尺寸按便签记忆：`settings.ini` 的 `noteSize:<文件名>=宽x高`；拖回默认尺寸删键，归档删键。
+- 阴影改为 9 宫格图集（每次 DPI 变化烘一次），宽度变化才重排文本，仅高度变化只夹滚动。
+
+实现（5 个提交）：`6c5f885` PaperSize + 设置；`174338d` 运行时纸面 + 9 宫格阴影；
+`1a0eaa1` 缩放 + 悬停；`67f0c54` `probe --mode=note`；`fa480cd` 屏幕坐标提交点修复；
+`2f47462` 尺寸持久化 trace 与 demo 种子。
+
+测量（200% DPI、3008×1692，release）：
+
+| 场景 | private | WS | draw p50 | draw p95 |
+|:--|--:|--:|--:|--:|
+| `probe --mode=note` 460×360 | 56.5–57.1 MB | 76.5 MB | 0.22 ms | 0.25–0.32 ms |
+| `probe --mode=note` 820×640 | 72–73 MB | 92 MB | 0.20–0.31 ms | 0.23–0.33 ms |
+| 应用内 820×640 打开编辑器 | 170.9 MB | 193.9 MB | — | — |
+
+- 20/40/100/200 次 MAX↔MIN 往返的内存漂移 9–15 MB，是**一次性高水位**（最大纸面位图
+  9.4 MB + D2D 缓存），不是每周期泄漏：1/2/3/5/10/20/40/100/200 周期 =
+  11.0/13.9/14.1/14.1/14.0/14.1/14.6/14.4/15.8 MB。
+- 真实拖动：UI `handle_us_p50 ≈ 1.5 ms`、渲染 `draw_us_p50 ≈ 0.3 ms`，无超预算帧；
+  交接与返回飞行的位图按当前纸面渲染（长边 2048 px 封顶）。
+- 已知未测：100% DPI 截图（本机只有 200% 显示器；96 DPI 几何由单元测试覆盖）、
+  120 Hz、第二显示器、睡眠唤醒。
+
+工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 234 passed / 1 ignored，
+`clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 全过。

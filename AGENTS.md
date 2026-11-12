@@ -93,7 +93,25 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
-**2.4.2 is the current version (2026-11-12)**: it gives the note editor the
+**2.5.0 is the current version (2026-11-12)**: it makes the note editor
+resizable — drag the paper's right edge, bottom edge or bottom-right corner from
+460×360 to 820×640 DIP (window 500×400 → 860×680), top-left fixed, window growing
+right/down — highlights the hovered band with a 2 DIP `COLOR_HIGHLIGHT` strip, and
+remembers each note's paper size in `settings.ini` as `noteSize:<file>=WxH`
+(whole DIP; dragging back to the default, or archiving, removes the key). The resize
+is hand-written (`SetCapture` + `SetWindowPos`, `Hit`/`hit_test` in
+`note_editor/display.rs`), not `WS_THICKFRAME`; the shadow became a 9-patch atlas
+baked once per DPI, and only a width change reflows the text. Measured at 200% DPI:
+`probe --mode=note` opens at 56.5–57.1 MB private for 460×360 and 72–73 MB for
+820×640, draw p50 0.20–0.31 ms / p95 0.23–0.33 ms; MAX↔MIN round trips settle at a
+one-time 9–15 MB high-water mark, not a leak. `--note-resize-demo` (with
+`PEGLINE_NOTE_RESIZE_PAPER` / `PEGLINE_NOTE_RESIZE_HOVER`) drives the bands without a
+mouse, and `PEGLINE_NOTE_STORAGE_PAPER=WxH` seeds the storage demo's size to check
+the read path. See `docs/RELEASE-2.5.0.md`, `docs/DECISIONS.md` D13 and
+`docs/PARITY.md` 7.18–7.21. Untested: 100% DPI screenshots (only a 200% display
+here; 96 DPI geometry is unit-tested), 120 Hz, a second monitor, sleep/wake.
+
+**2.4.2 (2026-11-12)**: it gives the note editor the
 text-editing I-beam cursor over the paper (arrow over the shadow margin, I-beam
 held through a selection drag) and fixes the drag-selection lag: the render loop
 drains the queued input each frame and coalesces consecutive pointer moves, so
