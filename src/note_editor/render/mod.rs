@@ -1861,6 +1861,16 @@ impl PixelRect {
         }
     }
 
+    #[cfg(test)]
+    fn width(self) -> u32 {
+        self.right.saturating_sub(self.left)
+    }
+
+    #[cfg(test)]
+    fn height(self) -> u32 {
+        self.bottom.saturating_sub(self.top)
+    }
+
     /// The same rectangle in DIP, for a D2D target at `scale` px/DIP.
     fn to_dip(self, scale: f32) -> D2D_RECT_F {
         D2D_RECT_F {
@@ -2523,6 +2533,50 @@ mod tests {
         assert_eq!(shadow_atlas_pixels(1.5), (72, 12));
         assert_eq!(shadow_atlas_pixels(2.0), (96, 16));
         assert_eq!(shadow_atlas_pixels(2.5), (120, 20));
+    }
+
+    #[test]
+    fn the_nine_slices_reproduce_the_baked_shadow() {
+        // The atlas is a small square; the window is a wide one. The slices
+        // must put the same shadow back, because a resize no longer re-bakes.
+        let (width, height, scale) = (300u32, 260u32, 1.0f32);
+        let (corner, middle) = shadow_atlas_pixels(scale);
+        let atlas_px = corner * 2 + middle;
+        let atlas = bake_shadow(atlas_px, atlas_px, scale);
+        let reference = bake_shadow(width, height, scale);
+        let alpha = |image: &ImageData, x: u32, y: u32| {
+            image.bgra[((y * image.width + x) * 4 + 3) as usize]
+        };
+        let mut worst = 0i32;
+        let mut worst_at = (0, 0);
+        for slice in shadow_slices(width, height, corner, middle) {
+            let dest_w = slice.dest.width();
+            let dest_h = slice.dest.height();
+            let src_w = slice.src.width();
+            let src_h = slice.src.height();
+            for y in slice.dest.top..slice.dest.bottom {
+                for x in slice.dest.left..slice.dest.right {
+                    // Nearest texel, which is what a 1:1 corner slice takes and
+                    // the closest approximation of the stretched strips.
+                    let sx = slice.src.left + (x - slice.dest.left) * src_w / dest_w;
+                    let sy = slice.src.top + (y - slice.dest.top) * src_h / dest_h;
+                    let got = alpha(&atlas, sx.min(atlas.width - 1), sy.min(atlas.height - 1));
+                    let want = alpha(&reference, x, y);
+                    let diff = (got as i32 - want as i32).abs();
+                    if diff > worst {
+                        worst = diff;
+                        worst_at = (x, y);
+                    }
+                }
+            }
+        }
+        assert!(
+            // Corners are 1:1, so only the stretched strips can differ, and
+            // then only where the corner arcs bleed in (worst seen: 3 at the
+            // top edge just past the corner slice).
+            worst <= 4,
+            "9-patch shadow differs by {worst} at {worst_at:?}"
+        );
     }
 
     #[test]

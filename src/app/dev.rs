@@ -76,7 +76,7 @@ pub(crate) struct Dev {
     /// `PEGLINE_NOTE_RESIZE_PAPER` (`WxH`, DIP) so the resize result can be
     /// photographed without a mouse.
     pub(crate) note_resize_demo: bool,
-    pub(crate) note_resize_paper: PaperSize,
+    pub(crate) note_resize_paper: Option<PaperSize>,
     /// `PEGLINE_NOTE_RESIZE_HOVER` (`right`, `bottom`, `corner`) highlights one
     /// resize edge in that demo.
     pub(crate) note_resize_hover: Option<ResizeZone>,
@@ -132,8 +132,7 @@ impl Dev {
             note_resize_demo: arg("--note-resize-demo"),
             note_resize_paper: std::env::var("PEGLINE_NOTE_RESIZE_PAPER")
                 .ok()
-                .and_then(|value| crate::note_editor::display::parse_note_size(&value))
-                .unwrap_or(crate::note_editor::display::MAX_PAPER),
+                .and_then(|value| crate::note_editor::display::parse_note_size(&value)),
             note_resize_hover: std::env::var("PEGLINE_NOTE_RESIZE_HOVER")
                 .ok()
                 .and_then(|value| parse_zone(&value)),
@@ -197,11 +196,17 @@ impl super::App {
         }
         if self.dev.note_demo && !self.dev.note_demo_opened && now - self.start_time > 1.0 {
             self.dev.note_demo_opened = true;
-            self.open_note_demo(self.dev.note_resize_paper, None);
+            // The plain editor demo keeps the default paper; only the resize
+            // demo starts at the largest one unless the env overrides it.
+            self.open_note_demo(self.dev.note_resize_paper.unwrap_or_default(), None);
         }
         if self.dev.note_resize_demo && !self.dev.note_demo_opened && now - self.start_time > 1.0 {
             self.dev.note_demo_opened = true;
-            self.open_note_demo(self.dev.note_resize_paper, self.dev.note_resize_hover);
+            let paper = self
+                .dev
+                .note_resize_paper
+                .unwrap_or(crate::note_editor::display::MAX_PAPER);
+            self.open_note_demo(paper, self.dev.note_resize_hover);
         }
         if self.dev.note_resize_demo
             && self.dev.note_demo_opened
