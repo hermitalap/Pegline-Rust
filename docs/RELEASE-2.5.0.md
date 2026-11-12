@@ -3,7 +3,7 @@
 发布日期：2026-11-12
 产物：`dist/Pegline-2.5.0-win-x64.zip`（单文件 exe + README + LICENSE + CHANGELOG）
 
-`pegline.exe` 为 **1,879,040 B（1.88 MB）**，ProductVersion `2.5.0.0`（2.4.2 的 1,840,640 B
+`pegline.exe` 为 **1,878,528 B（1.88 MB）**，ProductVersion `2.5.0.0`（2.4.2 的 1,840,640 B
 增加 38,400 B，来自 PaperSize、命中测试、9 宫格图集与设置项）。
 
 ## 2.5.0 新功能
@@ -39,8 +39,8 @@
 
 | 场景 | private | draw p50 | draw p95 |
 |:--|--:|--:|--:|
-| `probe --mode=note` 460×360 | 56.5–57.3 MB | 0.22–0.25 ms | 0.25–0.32 ms |
-| `probe --mode=note` 820×640 | 72–72.8 MB | 0.20–0.22 ms | 0.23–0.28 ms |
+| `probe --mode=note` 460×360 | 56.5–57.3 MB（终版 57.0） | 0.22–0.25 ms | 0.25–0.32 ms |
+| `probe --mode=note` 820×640 | 72–72.8 MB（终版 72.3） | 0.20–0.22 ms | 0.23–0.28 ms |
 | 应用内 820×640 打开编辑器 | 170.9 MB（WS 193.9） | — | — |
 
 - 20/40/100/200 次 MAX↔MIN 往返漂移 9–15 MB，是一次性高水位（最大纸面位图
@@ -50,7 +50,7 @@
 
 ## 验证
 
-- `cargo test`：**234 passed，0 failed，1 ignored**（另 `src/main.rs` 1 passed）
+- `cargo test`：**235 passed，0 failed，1 ignored**（另 `src/main.rs` 1 passed）
 - `cargo clippy --all-targets -- -D warnings`：通过
 - `cargo fmt --check`：通过
 - 真实鼠标：右边缘、下边缘、右下角、夹紧到最大/最小、边距提交、尺寸写盘/删键、

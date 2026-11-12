@@ -243,7 +243,7 @@ MVP 验收只看：能挂图、能飞、能复制/打开/拖走/删掉、能常�
 
 | 项 | 实测 |
 |:--|:--|
-| exe | 1,385,984 B（1.32 MB，含 2.0.0 版本资源） |
+| exe (2.5.0) | 1,878,528 B（1.88 MB，版本资源 2.5.0.0） |
 | 6 卡线带 @60 Hz | 60.30 fps，p95 16.96 ms，draw p50 0.79 / p95 1.11 ms |
 | 飞行 1600 px | 61.52 fps，draw max 10.9 ms（首帧上传） |
 | 私有内存（6 卡可见） | 92.4 MB |
@@ -716,5 +716,5 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 - 已知未测：100% DPI 截图（本机只有 200% 显示器；96 DPI 几何由单元测试覆盖）、
   120 Hz、第二显示器、睡眠唤醒。
 
-工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 234 passed / 1 ignored，
+工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 235 passed / 1 ignored，
 `clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 全过。
