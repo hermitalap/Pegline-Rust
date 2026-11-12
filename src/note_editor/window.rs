@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU64, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, Ordering,
 };
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -118,6 +118,10 @@ struct Shared {
     /// A left-button press started on the paper and still owns the mouse
     /// capture; the I-beam has to stay up when that drag leaves the paper.
     pointer_down: AtomicBool,
+    /// Frames presented and the duration of the last one, published by the
+    /// render thread. `probe --mode=note` reads them to time a resize.
+    frames: AtomicU64,
+    last_draw_us: AtomicU32,
     /// The resize band the pointer is over: 0 none, 1 right, 2 bottom,
     /// 3 corner. Deduplicates `Command::Hover`, so only an entry or an exit
     /// repaints.
@@ -289,6 +293,8 @@ impl NoteEditor {
             last_click_x: AtomicI32::new(0),
             last_click_y: AtomicI32::new(0),
             pointer_down: AtomicBool::new(false),
+            frames: AtomicU64::new(0),
+            last_draw_us: AtomicU32::new(0),
             hover_kind: AtomicU8::new(0),
             resize: Mutex::new(Resize {
                 explicit: paper,
@@ -402,6 +408,15 @@ impl NoteEditor {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    /// Frames presented so far, and how long the last one took in
+    /// microseconds. `probe --mode=note` uses both to time a resize repaint.
+    pub fn frames(&self) -> (u64, u32) {
+        (
+            self.shared.frames.load(Ordering::Acquire),
+            self.shared.last_draw_us.load(Ordering::Relaxed),
+        )
     }
 
     /// Highlights one resize edge, or clears it: the scripted acceptance run
@@ -772,11 +787,21 @@ fn render_thread(
     };
     let mut batch: Vec<Command> = Vec::with_capacity(BATCH_LIMIT);
     loop {
+        let frames_before = state.frames();
         let draw_started = Instant::now();
         if !draw_frame(&mut state, &shared, hwnd.0, &mut lost) {
             break;
         }
         let draw_us = draw_started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+        if state.frames() != frames_before {
+            // Publish the duration before the count: a reader that sees a new
+            // frame must see the time it took. The per-frame trace keeps the
+            // wall time (present included); the probe reads the CPU paint.
+            shared
+                .last_draw_us
+                .store(state.last_paint_us(), Ordering::Relaxed);
+            shared.frames.store(state.frames(), Ordering::Release);
+        }
         publish_caret(&state, &shared);
         // Wait only when nothing is queued: while the input queue has work, keep
         // draining and drawing instead of sleeping between single commands.
@@ -1437,6 +1462,9 @@ fn handle_resize(
             let dpi = win32::window_dpi(hwnd);
             if let Ok(mut ui) = shared.resize.lock() {
                 ui.effective = crate::note_editor::render::paper_of_window(width, height, dpi);
+            }
+            if logging_trace_on() {
+                logging::trace(format!("note editor WM_SIZE {width}x{height} dpi={dpi}"));
             }
             shared.send(Command::Resize {
                 width_px: width.max(1),

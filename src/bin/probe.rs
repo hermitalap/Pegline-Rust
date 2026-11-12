@@ -8,6 +8,8 @@
 //! probe --mode=idle   --seconds=10   # 6 cards, settled, no frame loop
 //! probe --mode=flight --seconds=5    # the real flight window
 //! probe --mode=static --seconds=10   # one frame, then no presents
+//! probe --mode=note   --seconds=2    # the note editor at its largest paper
+//! probe --mode=note --big=0          # ... at the default (smallest) paper
 //! probe --mode=timer                 # frame-cap wait precision, no window
 //! ```
 //!
@@ -25,13 +27,17 @@ use windows::Win32::System::ProcessStatus::{
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_SHOWNOACTIVATE, ShowWindow,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MA_NOACTIVATE, MSG,
+    PM_REMOVE, PeekMessageW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    SetWindowPos, ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
 use pegline::layout;
+use pegline::note_editor::display::{MAX_PAPER, MIN_PAPER, PaperSize};
+use pegline::note_editor::window::NoteEditor;
 use pegline::render::{Present, Renderer};
 use pegline::scene::{Command, Scene};
 use pegline::types::{CardId, CardSpec, FrameSnapshot, ImageData, RectI};
@@ -49,6 +55,7 @@ fn main() {
         }
     };
     win32::ensure_dpi_awareness();
+    pegline::logging::init();
     let _com = match pegline::window::ComGuard::apartment() {
         Ok(guard) => guard,
         Err(error) => {
@@ -63,6 +70,7 @@ fn main() {
         Mode::Atlas => run_atlas(&config),
         Mode::Timer => run_timer(&config),
         Mode::Duo => run_duo(&config),
+        Mode::Note => run_note(&config),
     };
     match result {
         Ok(line) => println!("{line}"),
@@ -87,6 +95,9 @@ enum Mode {
     Timer,
     /// Two renderers in one process, to price a second window's device.
     Duo,
+    /// The note editor at one paper size: memory, resize repaint time and the
+    /// drift over twenty resize cycles.
+    Note,
 }
 
 impl Mode {
@@ -101,6 +112,7 @@ impl Mode {
             Mode::Flight => "flight",
             Mode::Timer => "timer",
             Mode::Duo => "duo",
+            Mode::Note => "note",
         }
     }
 }
@@ -115,6 +127,7 @@ struct Config {
     big: bool,
     no_img: bool,
     small_img: bool,
+    cycles: usize,
 }
 
 impl Default for Config {
@@ -129,6 +142,7 @@ impl Default for Config {
             big: false,
             no_img: false,
             small_img: false,
+            cycles: 20,
         }
     }
 }
@@ -152,6 +166,7 @@ impl Config {
                         "clear" => Mode::Clear,
                         "prim" => Mode::Primitive,
                         "atlas" => Mode::Atlas,
+                        "note" => Mode::Note,
                         other => return Err(format!("unknown mode {other}")),
                     }
                 }
@@ -167,6 +182,9 @@ impl Config {
                 "--noimg" => config.no_img = value == "1",
                 "--big" => config.big = value == "1",
                 "--smallimg" => config.small_img = value == "1",
+                "--cycles" => {
+                    config.cycles = value.parse().map_err(|_| "bad --cycles".to_string())?
+                }
                 other => return Err(format!("unknown switch {other}")),
             }
         }
@@ -548,6 +566,152 @@ fn run_duo(config: &Config) -> Result<String, String> {
 }
 
 /// One 1024x512 atlas uploaded once, six sub-region blits per frame.
+/// The note editor at one paper size: private memory, the repaint time after a
+/// resize, and the drift over twenty resize cycles (PLAN-2.5.0 §11, Phase 4).
+fn run_note(config: &Config) -> Result<String, String> {
+    let monitor = primary_monitor()?;
+    let paper = if config.big { MAX_PAPER } else { MIN_PAPER };
+    // Cycles alternate with the reported size, so the first one always moves:
+    // a SetWindowPos to the size the window already has sends no WM_SIZE.
+    let other = if paper.width >= MAX_PAPER.width {
+        MIN_PAPER
+    } else {
+        MAX_PAPER
+    };
+    let text = "# Pegline
+
+A note that resizes from its right and bottom edges.
+
+- one
+- two
+
+> quote
+
+```rust
+fn main() {}
+```
+
+中文便签：拖动右下角改变大小。"
+        .to_string();
+    let editor = NoteEditor::open_hidden(text, 0, paper, monitor.dpi, monitor, Box::new(|_| {}))?;
+    let hwnd = editor.hwnd();
+    let dpi = win32::window_dpi(hwnd).max(96);
+    let scale = dpi as f32 / 96.0;
+    let window_px = |paper: PaperSize| {
+        let (width, height) = paper.window_size();
+        (
+            (width * scale).round().max(1.0) as i32,
+            (height * scale).round().max(1.0) as i32,
+        )
+    };
+    // Let the opening frame and the flight image settle before sampling.
+    pump_for(Duration::from_millis(600), &editor);
+    let (private_open, ws_open) = process_memory_mb();
+    let (private_before, _) = process_memory_mb();
+
+    let mut paint_us: Vec<f64> = Vec::new();
+    let mut draw_us: Vec<f64> = Vec::new();
+    let mut timeouts = 0usize;
+    let trace = std::env::var("PEGLINE_PROBE_TRACE").is_ok();
+    for cycle in 0..config.cycles {
+        let target = if cycle % 2 == 0 { other } else { paper };
+        let (width, height) = window_px(target);
+        let (frames_before, _) = editor.frames();
+        let started = std::time::Instant::now();
+        // SAFETY: re-sizing our own probe window from its own thread.
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                width,
+                height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+        let deadline = started + Duration::from_millis(500);
+        let mut painted = false;
+        loop {
+            pump_once();
+            if editor.frames().0 != frames_before {
+                painted = true;
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        if !painted {
+            timeouts += 1;
+        }
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        if !painted {
+            // A timeout is not a paint sample; counting 500 ms as one would
+            // poison the percentile.
+            continue;
+        }
+        if trace {
+            let mut client = windows::Win32::Foundation::RECT::default();
+            // SAFETY: query on our own window.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+            }
+            eprintln!(
+                "cycle={cycle} to={}x{} client={}x{} painted={painted} paint={ms:.2}ms draw={:.3}ms",
+                target.width,
+                target.height,
+                client.right - client.left,
+                client.bottom - client.top,
+                editor.frames().1 as f64 / 1000.0
+            );
+        }
+        paint_us.push(ms);
+        draw_us.push(editor.frames().1 as f64 / 1000.0);
+    }
+    pump_for(Duration::from_millis(400), &editor);
+    let (private_after, ws_after) = process_memory_mb();
+    drop(editor);
+
+    let paint_p50 = percentile(&paint_us, 0.50);
+    let paint_p95 = percentile(&paint_us, 0.95);
+    let draw_p50 = percentile(&draw_us, 0.50);
+    let draw_p95 = percentile(&draw_us, 0.95);
+    let (width, height) = window_px(paper);
+    let mut line = format!(
+        "PROBE mode=note paper={}x{} window={width}x{height} dpi={dpi} cycles={} open={private_open:.1}MB before={private_before:.1}MB after={private_after:.1}MB drift={:.1}MB",
+        paper.width,
+        paper.height,
+        config.cycles,
+        private_after - private_before,
+    );
+    line.push_str(&format!(
+        " timeouts={timeouts} paint_p50={paint_p50:.2}ms paint_p95={paint_p95:.2}ms draw_p50={draw_p50:.3}ms draw_p95={draw_p95:.3}ms ws={ws_after:.1}MB open_ws={ws_open:.1}MB"
+    ));
+    Ok(line)
+}
+
+/// Pumps the editor's window messages until `duration` has passed. `WM_SIZE`
+/// is queued, so without a pump the render thread never learns about a resize.
+fn pump_for(duration: Duration, _editor: &NoteEditor) {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        pump_once();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn pump_once() {
+    let mut message = MSG::default();
+    // SAFETY: standard message pump owned by this thread.
+    unsafe {
+        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = DispatchMessageW(&message);
+        }
+    }
+}
+
 fn run_atlas(config: &Config) -> Result<String, String> {
     let monitor = primary_monitor()?;
     let width_px = monitor.work.width().max(1) as u32;

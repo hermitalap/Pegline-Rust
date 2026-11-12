@@ -512,6 +512,10 @@ pub struct EditorState {
     scale: f32,
     /// The parse and layout inputs of the last full rebuild, see [`Parsed`].
     parsed: Parsed,
+    /// Presented frames; the probe uses it to time a resize repaint.
+    frames: u64,
+    /// CPU time of the last painted frame, before `Present` blocks on vsync.
+    last_paint_us: u32,
 }
 
 impl EditorState {
@@ -566,6 +570,8 @@ impl EditorState {
             height_px: height_px.max(1),
             scale,
             parsed: Parsed::default(),
+            frames: 0,
+            last_paint_us: 0,
         };
         state.rebuild_scenery()?;
         state.rebuild_shadow()?;
@@ -1323,7 +1329,18 @@ impl EditorState {
         }
         self.dirty = false;
         self.paint()?;
+        self.frames += 1;
         Ok(())
+    }
+
+    /// How many frames the editor has presented since it opened.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// CPU time of the last painted frame, in microseconds, without `Present`.
+    pub fn last_paint_us(&self) -> u32 {
+        self.last_paint_us
     }
 
     /// How long until the next caret blink, or `None` when asleep.
@@ -1340,6 +1357,7 @@ impl EditorState {
     }
 
     fn paint(&mut self) -> Result<(), String> {
+        let started = std::time::Instant::now();
         self.surface.begin_paper()?;
         let target = self.surface.rt.clone();
         self.paint_paper_on(&target);
@@ -1348,6 +1366,9 @@ impl EditorState {
         self.surface.begin_window()?;
         self.paint_window();
         self.surface.end()?;
+        // Measured without the present: `Present(1, 0)` waits for vsync and
+        // would report the display's cadence, not the drawing cost.
+        self.last_paint_us = started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
 
         if self.surface.present(true) == Present::DeviceLost {
             return Err("device lost in the note editor".to_string());
