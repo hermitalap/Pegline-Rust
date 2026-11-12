@@ -19,11 +19,11 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
-use super::{BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, paper_rect, utf16_offset};
-use crate::i18n;
-use crate::note_editor::display::{
-    self, Block, CONTENT_WIDTH, PAD_BOTTOM, PAD_LEFT, PAD_TOP, PAPER_HEIGHT, PAPER_WIDTH, Style,
+use super::{
+    BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, paper_rect, shadow_slices, utf16_offset,
 };
+use crate::i18n;
+use crate::note_editor::display::{self, Block, PAD_BOTTOM, PAD_LEFT, PAD_TOP, Style};
 
 impl super::EditorState {
     /// Paints the paper (gradient, dog-ear, text) into `context`. The same code
@@ -32,6 +32,7 @@ impl super::EditorState {
     pub(super) fn paint_paper_on(&mut self, context: &ID2D1RenderTarget) {
         // The paper is opaque, so the whole bitmap can simply be filled.
         let palette = crate::notes::color(self.color);
+        let content_width = self.paper.content_width();
         // SAFETY: the context is drawing to the paper target.
         unsafe {
             context.Clear(Some(&color_of(palette.paper, 1.0)));
@@ -40,8 +41,8 @@ impl super::EditorState {
                     rect: D2D_RECT_F {
                         left: 0.0,
                         top: 0.0,
-                        right: PAPER_WIDTH,
-                        bottom: PAPER_HEIGHT,
+                        right: self.paper.width,
+                        bottom: self.paper.height,
                     },
                     radiusX: RADIUS_DIP,
                     radiusY: RADIUS_DIP,
@@ -77,7 +78,7 @@ impl super::EditorState {
                                 &D2D_RECT_F {
                                     left: origin_x + 2.0,
                                     top,
-                                    right: origin_x + CONTENT_WIDTH,
+                                    right: origin_x + content_width,
                                     bottom: top + height,
                                 },
                                 &self.assets.code_background,
@@ -114,7 +115,7 @@ impl super::EditorState {
                                 &D2D_RECT_F {
                                     left: origin_x,
                                     top: top + height * 0.5,
-                                    right: origin_x + CONTENT_WIDTH,
+                                    right: origin_x + content_width,
                                     bottom: top + height * 0.5 + 1.0,
                                 },
                                 &self.assets.rule,
@@ -429,7 +430,7 @@ impl super::EditorState {
         let rect = D2D_RECT_F {
             left: origin_x,
             top: PAD_TOP,
-            right: origin_x + CONTENT_WIDTH,
+            right: origin_x + self.paper.content_width(),
             bottom: PAD_TOP + display::BODY_SIZE * display::BODY_SPACING,
         };
         // SAFETY: drawing on the paper target with the body format.
@@ -456,22 +457,28 @@ impl super::EditorState {
                 a: 0.0,
             }));
             if let Some(shadow) = self.shadow.as_ref() {
-                let window = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: self.width_px as f32 / self.scale,
-                    bottom: self.height_px as f32 / self.scale,
-                };
-                context.DrawBitmap(
-                    shadow,
-                    Some(&window),
-                    1.0,
-                    D2D1_INTERPOLATION_MODE_LINEAR,
-                    None,
-                    None,
-                );
+                // Nine stretches: four corners 1:1, edges and middle scaled. Each
+                // destination is whole device pixels, so no seam can open at a
+                // slice boundary.
+                for slice in shadow_slices(
+                    self.width_px,
+                    self.height_px,
+                    shadow.corner_px,
+                    shadow.middle_px,
+                ) {
+                    let destination = slice.dest.to_dip(self.scale);
+                    let source = slice.src.to_dip(self.scale);
+                    context.DrawBitmap(
+                        &shadow.bitmap,
+                        Some(&destination),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        Some(&source),
+                        None,
+                    );
+                }
             }
-            let paper = paper_rect(self.scale);
+            let paper = paper_rect(self.paper);
             let Some(geometry) = self.clip.as_ref() else {
                 return;
             };
