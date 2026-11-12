@@ -93,7 +93,16 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
-**2.4.1 is the current version (2026-11-10)**: it fixes the annotation editor's
+**2.4.2 is the current version (2026-11-12)**: it gives the note editor the
+text-editing I-beam cursor over the paper (arrow over the shadow margin, I-beam
+held through a selection drag) and fixes the drag-selection lag: the render loop
+drains the queued input each frame and coalesces consecutive pointer moves, so
+the queue peaks at 12 instead of 543 and applied-move lag drops from p50 4.5 s
+to 0.8 ms. It also fixes the unreachable Ctrl+C in the editor, and
+`PEGLINE_ALLOW_SECOND_INSTANCE=1` lets the scripted acceptance runs start a
+second copy. See `docs/RELEASE-2.4.2.md`.
+
+**2.4.1 (2026-11-10)** fixes the annotation editor's
 disabled Undo/Redo labels, which used `#9A9A9A` and nearly vanished on the light
 Mica pills; disabled actions now use `#4A4A4A`, enabled ones stay `#1E1E1E`.
 No layout, animation or memory change; see `docs/RELEASE-2.4.1.md`.

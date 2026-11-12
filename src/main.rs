@@ -16,13 +16,33 @@ fn main() {
     // log them so one bad gesture cannot take the tray icon down.
     std::panic::set_hook(Box::new(|info| logging::error(format!("panic: {info}"))));
 
-    if already_running() {
+    if already_running() && !second_instance_allowed() {
         logging::trace("second instance started; exiting");
         return;
     }
 
     let code = app::run();
     std::process::exit(code);
+}
+
+/// `PEGLINE_ALLOW_SECOND_INSTANCE=1` lets a second copy run beside the user's
+/// instance. The scripted visual acceptance runs need it: the tray app is a
+/// singleton, so every `--note-*-demo` would otherwise exit before it opens a
+/// window. The override is only read here and never changes normal starts.
+fn second_instance_allowed() -> bool {
+    let allowed = second_instance_allowed_value(
+        std::env::var("PEGLINE_ALLOW_SECOND_INSTANCE")
+            .ok()
+            .as_deref(),
+    );
+    if allowed {
+        logging::trace("second instance allowed by PEGLINE_ALLOW_SECOND_INSTANCE");
+    }
+    allowed
+}
+
+fn second_instance_allowed_value(value: Option<&str>) -> bool {
+    value == Some("1")
 }
 
 /// Holds the named mutex for the lifetime of the process.
@@ -55,4 +75,17 @@ fn already_running() -> bool {
         let _ = handle;
     }
     already
+}
+
+#[cfg(test)]
+mod tests {
+    use super::second_instance_allowed_value;
+
+    #[test]
+    fn second_instance_needs_an_explicit_opt_in() {
+        assert!(!second_instance_allowed_value(None));
+        assert!(!second_instance_allowed_value(Some("0")));
+        assert!(!second_instance_allowed_value(Some("true")));
+        assert!(second_instance_allowed_value(Some("1")));
+    }
 }

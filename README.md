@@ -64,8 +64,8 @@ raw numbers are in [PLAN.md](PLAN.md) §3.3 and §11.
 
 ## Get Pegline
 
-Pegline runs on Windows 10 and 11 (x64). The current release is **2.4.1**
-(2026-11-10); see [docs/RELEASE-2.4.1.md](docs/RELEASE-2.4.1.md).
+Pegline runs on Windows 10 and 11 (x64). The current release is **2.4.2**
+(2026-11-12); see [docs/RELEASE-2.4.2.md](docs/RELEASE-2.4.2.md).
 
 1. Download the portable zip from the [Releases page](https://github.com/2829632740/Pegline/releases),
    or build the package with `pwsh tools\package-release.ps1`.
@@ -123,8 +123,8 @@ a UI language. Stress the capture pipeline with
 | | |
 |:--|:--|
 | [PLAN.md](PLAN.md) | milestones, performance budget, measurements, next steps |
-| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.4.1 and earlier |
-| [docs/RELEASE-2.4.1.md](docs/RELEASE-2.4.1.md) | current release notes and checksum |
+| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.4.2 and earlier |
+| [docs/RELEASE-2.4.2.md](docs/RELEASE-2.4.2.md) | current release notes and checksum |
 | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | the complete behavioural spec |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | target architecture |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | implementation choices and rejected optimisations |

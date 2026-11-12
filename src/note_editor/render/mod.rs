@@ -394,6 +394,53 @@ impl Assets {
     }
 }
 
+/// The inputs of the last full rebuild: the text the current [`DisplayDoc`] was
+/// parsed from, the active line index, the IME composition and the render
+/// target generation the cached layouts belong to.
+///
+/// Moving the caret or extending the selection inside the active line changes
+/// none of them, so [`EditorState::rebuild`] can skip both the document parse
+/// and every laid-out line and only keep the caret on screen.
+#[derive(Debug, Default)]
+struct Parsed {
+    /// A copy of the document text `display` was parsed from, compared byte for
+    /// byte by [`Parsed::is_current`] (no allocation per rebuild).
+    text: String,
+    /// The active line index of that parse (`display.line_index(caret)`).
+    active: usize,
+    /// The IME composition that parse laid out, if one was open.
+    composition: Option<String>,
+    /// The caret position of that parse. Only the composition insertion offset
+    /// depends on it, so [`Parsed::is_current`] compares it only then.
+    caret: usize,
+    /// The `layout_generation` the cached layouts belong to.
+    generation: u64,
+    /// Cleared until the first rebuild finishes and when the surface is resized.
+    ready: bool,
+}
+
+impl Parsed {
+    /// Whether the current display and its laid-out lines are still valid for
+    /// `text` with the caret in `active` and the given composition/generation.
+    fn is_current(
+        &self,
+        text: &str,
+        active: usize,
+        composition: Option<&str>,
+        caret: usize,
+        generation: u64,
+    ) -> bool {
+        self.ready
+            && self.generation == generation
+            && self.active == active
+            && self.composition.as_deref() == composition
+            && self.text == text
+            // An open composition is laid out at the caret, so moving the caret
+            // within the active line moves the composition too.
+            && (composition.is_none() || self.caret == caret)
+    }
+}
+
 /// The render thread's whole editor state.
 pub struct EditorState {
     doc: Doc,
@@ -435,6 +482,8 @@ pub struct EditorState {
     width_px: u32,
     height_px: u32,
     scale: f32,
+    /// The parse and layout inputs of the last full rebuild, see [`Parsed`].
+    parsed: Parsed,
 }
 
 impl EditorState {
@@ -485,6 +534,7 @@ impl EditorState {
             width_px: width_px.max(1),
             height_px: height_px.max(1),
             scale,
+            parsed: Parsed::default(),
         };
         state.rebuild_scenery()?;
         state.rebuild();
@@ -579,6 +629,8 @@ impl EditorState {
         self.dpi = dpi.max(96);
         self.scale = self.dpi as f32 / 96.0;
         self.rebuild_scenery()?;
+        // The paper bitmap was recreated; rebuild the display from scratch.
+        self.parsed.ready = false;
         self.rebuild();
         self.dirty = true;
         Ok(())
@@ -996,10 +1048,38 @@ impl EditorState {
     }
 
     fn rebuild(&mut self) {
-        self.display = DisplayDoc::parse(self.doc.text());
         let caret = self.doc.caret();
+        // `display` still belongs to the last full rebuild here.
+        let active = self.display.line_index(caret);
+        let caret_only = self.parsed.is_current(
+            self.doc.text(),
+            active,
+            self.composition.as_deref(),
+            caret,
+            self.layout_generation,
+        );
+        if caret_only {
+            // The document text, the IME composition and the active line are
+            // unchanged, so the display map and every layout are still current.
+            // Only the caret pixel and the selection rectangles moved, and
+            // `paint` derives both from the live document: keep the caret on
+            // screen and repaint instead of re-parsing the note.
+            self.ensure_caret_visible();
+            self.dirty = true;
+            return;
+        }
+        self.display = DisplayDoc::parse(self.doc.text());
         let active = self.display.line_index(caret);
         let generation = self.layout_generation;
+        // Remember what this full rebuild was built from; the next caret-only
+        // move is then a byte comparison instead of a parse.
+        self.parsed.text.clear();
+        self.parsed.text.push_str(self.doc.text());
+        self.parsed.active = active;
+        self.parsed.composition.clone_from(&self.composition);
+        self.parsed.caret = caret;
+        self.parsed.generation = generation;
+        self.parsed.ready = true;
         self.layout_stamp = self.layout_stamp.wrapping_add(1);
         let stamp = self.layout_stamp;
         self.lines.clear();
@@ -1202,6 +1282,7 @@ impl EditorState {
         self.surface.begin_window()?;
         self.paint_window();
         self.surface.end()?;
+
         if self.surface.present(true) == Present::DeviceLost {
             return Err("device lost in the note editor".to_string());
         }
@@ -2193,5 +2274,87 @@ mod tests {
         // Over the paper centre: 18 % black.
         let centre = ((200 * 500 + 250) * 4) as usize;
         assert!(shadow.bgra[centre + 3] > 30 && shadow.bgra[centre + 3] < 55);
+    }
+
+    /// A two-line document parsed once with the caret at its start and no
+    /// composition: the state a drag-selection begins from.
+    fn parsed_document() -> (DisplayDoc, Parsed) {
+        let text = "alpha\nbeta";
+        let display = DisplayDoc::parse(text);
+        let parsed = Parsed {
+            text: text.to_string(),
+            active: display.line_index(0),
+            composition: None,
+            caret: 0,
+            generation: 3,
+            ready: true,
+        };
+        (display, parsed)
+    }
+
+    #[test]
+    fn moving_the_caret_inside_the_active_line_skips_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // A click or a drag extends the selection inside the first line: the
+        // text is unchanged and the caret still lands on the same active line,
+        // so the display map and every layout stay valid.
+        for caret in [1, 3, 5] {
+            assert!(parsed.is_current(text, display.line_index(caret), None, caret, 3));
+        }
+    }
+
+    #[test]
+    fn a_text_change_forces_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let caret = 2;
+        assert!(!parsed.is_current("alpha!\nbeta", display.line_index(caret), None, caret, 3));
+    }
+
+    #[test]
+    fn a_caret_line_change_forces_the_reparse() {
+        let (display, parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // Taken from the display map so the test does not depend on whether the
+        // newline belongs to the first or the second source line.
+        let boundary = display.lines[1].source.start;
+        let before = boundary - 1;
+        assert_eq!(display.line_index(before), 0);
+        assert!(parsed.is_current(text, display.line_index(before), None, before, 3));
+        // The caret crossed into the next source line, which now becomes the
+        // active line showing its Markdown markers: both lines need layout.
+        assert_eq!(display.line_index(boundary), 1);
+        assert!(!parsed.is_current(text, display.line_index(boundary), None, boundary, 3));
+    }
+
+    #[test]
+    fn an_open_composition_tracks_the_caret() {
+        let text = "alpha";
+        let display = DisplayDoc::parse(text);
+        let parsed = Parsed {
+            text: text.to_string(),
+            active: 0,
+            composition: Some("ni".to_string()),
+            caret: 3,
+            generation: 0,
+            ready: true,
+        };
+        // The composition is laid out at the caret, so even without a text or
+        // active-line change a caret move inside the line has to rebuild.
+        assert!(parsed.is_current(text, display.line_index(3), Some("ni"), 3, 0));
+        assert!(!parsed.is_current(text, display.line_index(1), Some("ni"), 1, 0));
+    }
+
+    #[test]
+    fn a_new_render_target_or_an_unfinished_build_forces_the_reparse() {
+        let (display, mut parsed) = parsed_document();
+        let text = "alpha\nbeta";
+        // A device loss or the flight-image render replaces the layout target.
+        assert!(!parsed.is_current(text, display.line_index(0), None, 0, 4));
+        parsed.generation = 4;
+        assert!(parsed.is_current(text, display.line_index(0), None, 0, 4));
+        // Until the first rebuild finished there is nothing to keep.
+        parsed.ready = false;
+        assert!(!parsed.is_current(text, display.line_index(0), None, 0, 4));
     }
 }

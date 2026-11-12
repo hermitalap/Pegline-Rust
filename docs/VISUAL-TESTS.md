@@ -678,3 +678,37 @@
 **验证**：`--editor-demo --editor-hold` 打开 900×600 源图，在 200% DPI 下截取
 底部操作栏；“撤销/重做”在不可用状态下清晰可读，“取消”仍为近黑，“保存”白字
 蓝底。`cargo test` 212 passed / 1 ignored，clippy/fmt 通过。
+
+### 3.20 便签编辑器的 I 形光标与拖动选区（2026-11-12）
+
+**问题**：便签编辑器纸面上是系统箭头（窗口类光标 `NULL`，且窗口过程没有 `WM_SETCURSOR`
+分支）；拖动选择时选区追赶指针，指针停下后还要数秒才追平。
+
+**做法**：窗口过程处理 `WM_SETCURSOR`（纸面/拖动中 I 形、阴影边距箭头；拖动期间捕获
+抑制 `WM_SETCURSOR`，由 `WM_MOUSEMOVE` 维持 I 形）；渲染线程每轮把命令队列一次取空，
+连续 `PointerMove` 只应用最后一条；可选的同活动行跳过重解析快路径。
+
+**验证**（release，6016×3384 @200%，1000×800 编辑窗口；独立智能体用独立 worktree
+构建与独立脚本验证，30 项检查 0 FAIL）：
+
+| 检查 | 结果 | 证据 |
+|:--|:--|:--|
+| 光标：纸面中心 / 纸面文字 / 纸面远端 | `65541` `IDC_IBEAM`，`WM_SETCURSOR` 返回 1 | `target\bench\verify\evidence\final4\cursor-rows.json`、`cursor-*.png` |
+| 光标：右侧 / 顶部 / 角落边距 | `65539` `IDC_ARROW` | 同上 |
+| 光标：按住拖到纸面外 | 仍是 `65541` I 形；松开后回到 `65539` 箭头 | 同上 |
+| 拖动静止 | 真实拖动松开后 0 ms 静止；合成 500 条移动注入结束后 0 ms 静止，仅 154 px 光标闪烁尾差 | `drag-real-settled.png`、`burst-settled.png` |
+| 修复前对照 | 光标全程 `65543`（`IDC_WAIT` 句柄）且 `WM_SETCURSOR` 返回 0；500 条移动后 1,533–6,385 ms 仍有 77,590 px 尾迹 | `prefix-baseline.md`（独立 worktree 构建） |
+| 回归 | 双击选词、点击外部 / Esc / Ctrl+S 提交、输入、Ctrl+C 剪贴板 125 字、Ctrl+X、`--note-storage-demo` / `--note-flow-demo` / `--note-discard-demo` 全过；`error.log` 只有预期热键占用；用户实例存活 | `final-verification.md` |
+
+可复现数字：合并前队列 p50 290 / max 543、移动生效延迟 p50 4482 ms、注入结束后追平
+9063 ms → 合并后队列 max 12、延迟 p50 0.76 ms / p95 1.58 ms、追平 1.1 ms。
+
+**截图**：`docs/visual/note-drag-backlog.png`（修复前，注入结束选区还在 "Lists" 附近
+追赶）、`docs/visual/note-drag-settled.png`（修复后，注入结束选区已在最后一行）、
+`note-word-select.png`。光标句柄是会话级共享值，截图本身不含光标，判定以上表句柄为准。
+
+**测试**：`cargo test` 223 passed / 1 ignored（另 `src/main.rs` 1 项）；clippy/fmt 通过；
+新增 10 项窗口/光标/合并/快路径单元测试。
+
+**结论**：I 形光标与拖动选区卡顿都已修复并经独立验证；渲染快路径只是附带优化，不是
+卡顿原因。详见 `PLAN.md` §12。

@@ -633,3 +633,54 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   `docs/visual/mica-line-testwall.png`（线带卡片）、`docs/visual/mica-line.png`（深色壁纸）。
 - **2.4.1（2026-11-10）**：标注编辑器不可用的撤销/重做标签从 `#9A9A9A` 改为
   `#4A4A4A`，在浅色 Mica 胶囊上可读；可用标签仍是 `#1E1E1E`。布局、动画和内存不变。
+
+## 12. 便签编辑器的鼠标光标与拖动选区卡顿（2026-11-12）
+
+需求（用户）：便签编辑页面的鼠标光标要是文本编辑的 I 形光标；拖动选择时感觉很卡。
+用智能体团队检查并修复（一个修复窗口/输入、一个测渲染热路径、一个独立验证）。
+
+**两个根因**
+
+| 现象 | 根因 |
+|:--|:--|
+| 纸面上显示系统箭头，不像可编辑文本 | 编辑窗口类注册时 `hCursor = NULL`，且窗口过程完全没有 `WM_SETCURSOR` 分支；系统只能用箭头或上一个窗口留下的光标（实测进入窗口后一直是共享句柄 `0x10007`，即 `IDC_WAIT`） |
+| 拖动选区明显滞后，指针停下后选区还在追 | 渲染线程每轮只 `recv_timeout` 处理**一条**命令，再画一帧（`Present(1)` 阻塞到 vsync）；`WM_MOUSEMOVE` 按鼠标上报率无上限入队，60–120 Hz 的绘制追不上，队列深度 p50 290 / max 543，移动生效延迟 p50 4482 ms |
+
+**修复**（`src/note_editor/window.rs`、`src/note_editor/render/mod.rs`，另有 `src/main.rs` 的测试开关）
+
+- `WM_SETCURSOR`：纸面/拖动中 → `IDC_IBEAM`，阴影边距 → `IDC_ARROW`；拖动期间捕获会
+  抑制 `WM_SETCURSOR`，由 `WM_MOUSEMOVE` 维持 I 形，松开恢复。只在光标类型变化时记
+  trace，不写日志。
+- 渲染循环：每轮把队列一次取空（单轮上限 512 条），连续的 `PointerMove` 只应用最后
+  一条，其余命令保持原顺序；`Step` 语义（Stop/Copy/Commit/Resume）不变；批量 `Vec`
+  预分配，稳态无堆分配；空闲仍阻塞在 `recv_timeout(tick_in)`。
+- 顺带修复：`Ctrl+C` 以前不可达（`key_code` 没有 `VK_C` 映射，`Ctrl+X` 却正常）。
+- 可选快路径（已保留）：文本、活动行或 IME 组合不变时跳过整篇解析与行重建；实测只
+  省 0.2–0.4% 一帧，不是卡顿原因，但正确且风险低。
+- 验收开关：`PEGLINE_ALLOW_SECOND_INSTANCE=1` 允许第二个实例（脚本化验收需要，正常
+  启动不变；托盘应用本身仍是单实例）；`PEGLINE_TRACE=1` 才输出 `note editor drag:` /
+  `note editor loop:` 统计，trace 关闭时零开销。
+
+**实测（release，6016×3384 @200%，1000×800 编辑窗口；600 条 `WM_MOUSEMOVE` 按 ~1.5 ms 注入）**
+
+| 项 | 修复前 | 修复后 |
+|:--|--:|--:|
+| 队列深度 max | 543 | 12 |
+| 移动生效延迟 p50 | 4482 ms | 0.76 ms |
+| 移动生效延迟 p95 | 8578 ms | 1.58 ms |
+| 注入结束后追平 | 9063 ms | 1.1 ms |
+| 拖动期间的绘制 | 每条命令一帧（~10 s） | ~936 ms，每帧一批 |
+| 光标：纸面 / 边距 / 拖出纸面 | 0x10007 / 0x10007 / 0x10007 | 65541 IBeam / 65539 Arrow / 65541 IBeam |
+| `WM_SETCURSOR` 返回值 | 无处理（0） | 客户端 1 |
+
+- 光标句柄是会话共享值：`IDC_IBEAM(32513)=65541`、`IDC_ARROW(32512)=65539`、
+  `IDC_WAIT(32514)=65543`；截图本身不含光标，判定以 `GetCursorInfo` 句柄为准。
+- 独立验证（另一智能体、独立 worktree 构建与脚本）：30 项检查 0 FAIL；真实拖动松开
+  后 0 ms 静止（修复前 1,533–6,385 ms、77,590 px 尾迹 → 154 px 光标闪烁）；双击选词、
+  点击外部 / Esc / Ctrl+S 提交、输入、Ctrl+C/X、`--note-storage-demo` / `--note-flow-demo`
+  / `--note-discard-demo` 全部通过；`error.log` 无 panic；用户正在运行的实例未受影响。
+- 测试：`cargo test` 223 passed / 1 ignored（另 `src/main.rs` 1 项）、
+  `clippy --all-targets -- -D warnings`、`cargo fmt --check` 全过；新增 10 项窗口/光标/
+  合并/快路径单元测试。
+- 证据：`docs/VISUAL-TESTS.md` §3.20；`docs/visual/note-drag-backlog.png`（修复前，注入
+  结束选区还在追）与 `note-drag-settled.png`（修复后，注入结束已追平）。
