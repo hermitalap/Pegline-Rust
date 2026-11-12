@@ -1,3 +1,17 @@
+## 2.5.1 — 2026-11-12
+
+### Changes
+
+- **The note editor now resizes around its centre.** Dragging the paper's right
+  edge, bottom edge or bottom-right corner used to keep the top-left corner
+  fixed and grow the window to the right and down. The dragged edge now tracks
+  the pointer 1:1 and the opposite edge mirrors it, so the paper grows (or
+  shrinks) by twice the pointer's travel — half on each side — and the paper's
+  centre never moves. The window is centred in the work area when the editor
+  opens, and the work-area edge only clamps the size; it never shifts the
+  centre. The size range (460×360 to 820×640 DIP), the clamps, the hover strip,
+  the per-note size memory and the rendering are unchanged.
+
 ## 2.5.0 — 2026-11-12
 
 ### Features

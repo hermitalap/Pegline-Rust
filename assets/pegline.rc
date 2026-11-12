@@ -16,12 +16,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Pegline"
             VALUE "FileDescription", "Pegline screenshot clothesline"
-            VALUE "FileVersion", "2.5.0.0"
+            VALUE "FileVersion", "2.5.1.0"
             VALUE "InternalName", "pegline"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "pegline.exe"
             VALUE "ProductName", "Pegline"
-            VALUE "ProductVersion", "2.5.0.0"
+            VALUE "ProductVersion", "2.5.1.0"
         END
     END
     BLOCK "VarFileInfo"

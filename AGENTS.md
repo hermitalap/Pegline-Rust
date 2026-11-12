@@ -93,7 +93,18 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
-**2.5.0 is the current version (2026-11-12)**: it makes the note editor
+**2.5.1 is the current version (2026-11-12)**: it changes only the geometry of
+the resize drag — see the 2.5.0 paragraph below for the feature itself. The paper
+now resizes **around its centre**: the dragged edge tracks the pointer 1:1, the
+opposite edge mirrors it, so the size changes by twice the pointer's travel and
+the centre never moves (a +100 px drag grows the window by 200 px, 100 on each
+side). `frame_for` only centres the window; the work-area edge clamps the size
+and does not shift the centre. Verified with a real mouse at 200% DPI:
+1000×800 → right +100 px → 1200×800 → bottom +60 px → 1200×920, with
+`GetWindowRect` reporting the same centre (3008,1644) all three times; the corner
+drag still clamps at the 1000×800 minimum. 237 tests.
+
+**2.5.0 (2026-11-12)**: it makes the note editor
 resizable — drag the paper's right edge, bottom edge or bottom-right corner from
 460×360 to 820×640 DIP (window 500×400 → 860×680); the dragged edge tracks the
 pointer 1:1 and the opposite edge mirrors it, so the paper's centre never moves and
