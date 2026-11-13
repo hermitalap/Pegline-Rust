@@ -383,5 +383,9 @@ There is no MSBuild, no .NET, no WPF in the new code. The old build scripts unde
 
 - `target/` and any generated icons are ignored; never commit build output.
 - Commit subjects: short imperative, `feat:` / `fix:` / `perf:` / `docs:`.
+- Releases: push a `v*` tag to the `fork` remote (`hermitalap/Pegline-Rust`).
+  `.github/workflows/release.yml` then publishes **only `pegline.exe`** — never a
+  zip — and uses `docs/RELEASE-<version>.md` (written in Chinese) as the release
+  body, so that file must exist and read as the changelog for the release.
 - `archive/wpf-v1/` is frozen: do not fix or refactor it. If the reference is
   wrong, change `docs/BEHAVIOR.md` and say why.

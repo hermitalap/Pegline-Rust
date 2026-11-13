@@ -1,43 +1,33 @@
 ## 2.6.2 — 2026-11-13
 
-### Changes
+### 变更
 
-- **The clothespin drag is now direct manipulation.** The dragged card sits
-  exactly under the pointer (1:1, no follow spring and no lag), the neighbour
-  slides one slot with a single critically damped 0.24 s spring, and the order
-  changes when the card centre crosses the neighbouring slot's midpoint by
-  12 DIP — 24 DIP of hysteresis instead of a dwell timer, a cooldown and a
-  re-arm distance. The pendulum, air drag, relative wind, flex shear, squeeze,
-  swap hop/recoil and all their tuning plumbing are deleted:
-  `src/scene/pendulum.rs`, `src/scene/trace.rs`, `docs/PAPER-TUNING.md`,
-  `tools/paper-trace.ps1`, `tools/paper-plot.py`, `tools/paper-sim.html` and the
-  `PEGLINE_PAPER_*` variables are gone. Three springs (neighbour 0.24/1.0,
-  release 0.30/1.0, speed lean 0.14/1.0) and two thresholds (4 DIP slop,
-  12 DIP order deadband) are the whole gesture. A 4° lean scaled by pointer
-  speed keeps the weight cue; release inherits the pointer velocity (capped at
-  600 DIP/s) and settles without overshoot; `pegged.txt` and `Tink` still fire
-  once, only when the order actually changed.
-- **The note editor's bottom-right resize anchor is 16×16 DIP.** 24² = 576 DIP²
-  becomes 16² = 256 DIP², a 56 % area cut. The edge bands stay 2 DIP and the
-  diagonal resize cursor still appears as soon as the pointer enters the anchor.
-- **A pin drag no longer drops the "new note" entry.** While the clothespin is
-  held, the entry ignores the pointer even when the drag crosses its hotspot,
-  and the peeking corner retracts on the existing 0.22 s reveal spring. The next
-  tick after release brings the corner back the same way (or drops the full note
-  if the pointer is still over the hotspot).
+- **夹子拖拽改为直接操纵。** 被拖的卡片严格贴在指针下（1:1 跟手，没有跟手弹簧、
+  没有滞后），邻卡用一条临界阻尼弹簧（0.24 s）滑过一整格；卡片中心越过相邻槽位
+  中点 12 DIP 才换位（24 DIP 回差），不再有停留计时、冷却和回撤距离。摆锤、空气
+  阻力、相对风、柔性剪切、挤压、交换小跳/回弹以及它们的调参管线全部删除：
+  `src/scene/pendulum.rs`、`src/scene/trace.rs`、`docs/PAPER-TUNING.md`、
+  `tools/paper-trace.ps1`、`tools/paper-plot.py`、`tools/paper-sim.html` 和
+  `PEGLINE_PAPER_*` 变量都不在了。整个手势现在只有三条弹簧（邻卡 0.24/1.0、
+  松手 0.30/1.0、倾斜 0.14/1.0）和两个阈值（4 DIP 起拖、12 DIP 换位死区）。
+  4° 的速度倾斜保留“重量感”；松手继承指针速度（上限 600 DIP/s）且不过冲；
+  `pegged.txt` 和 `Tink` 仍然只在顺序真的变化时写一次、响一次。
+- **便签编辑器右下角的缩放锚点缩为 16×16 DIP。** 24² = 576 DIP² 变成 16² =
+  256 DIP²，面积 −56 %。2 DIP 的边带不变，指针一进入锚点仍会显示斜向缩放光标。
+- **夹子拖拽不再掉下“新建便签”入口。** 夹子按住期间，入口忽略指针（拖过入口
+  热区也不会掉下整张便签），露出的一角沿既有 0.22 s 弹簧收回；松手后的下一 tick
+  用同一弹簧把一角带回（若指针仍在入口上则掉下整张便签）。
 
-### Verification
+### 验证
 
-- 248 lib tests + 1 main test pass; `cargo clippy --all-targets -- -D warnings`
-  and `cargo fmt --check` are clean.
-- Real mouse at 200 % DPI (`--demo`, 3 cards): 1:1 tracking, one reorder at the
-  midpoint, the neighbour glides a full slot with no overshoot, the row settles
-  on the three slots after release (`docs/visual/pin-2.6.2-*.png`).
-- Real mouse: dragging a card across the note-entry hotspot leaves the entry
-  alone and retracts the peeking corner (`note peek false`, no hover lines); it
-  reappears with the same spring after the release (`pin-2.6.2-entry-*.png`).
-- `probe --mode=line`: 60.06 fps, draw p50 0.677 / p95 1.027 ms, private
-  97.0 MB; `pegline.exe` 1,903,104 B (2.6.1: 1,920,512 B).
+- 248 个 lib 测试 + 1 个 main 测试通过；`cargo clippy --all-targets -- -D warnings`
+  与 `cargo fmt --check` 干净。
+- 200 % DPI 真实鼠标（`--demo` 三卡）：1:1 跟手、越过中点只换位一次、邻卡无过冲
+  滑满一格、松手后整排落在三个槽位（`docs/visual/pin-2.6.2-*.png`）。
+- 真实鼠标：拖过便签入口热区时入口不响应、一角收回（`note peek false`，无 hover
+  行），松手后用同一弹簧重新冒出（`pin-2.6.2-entry-*.png`）。
+- `probe --mode=line`：60.06 fps，draw p50 0.677 / p95 1.027 ms，private 97.0 MB；
+  `pegline.exe` 1,903,104 B（2.6.1：1,920,512 B）。
 
 ## 2.6.1 — 2026-11-13
 

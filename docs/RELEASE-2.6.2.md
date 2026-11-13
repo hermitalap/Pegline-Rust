@@ -1,10 +1,10 @@
 # Pegline 2.6.2 发布说明
 
 发布日期：2026-11-13
-产物：`dist/Pegline-2.6.2-win-x64.zip`（单文件 exe + README + LICENSE + CHANGELOG）。
-`target\release\pegline.exe` 为 **1,903,104 B（1.90 MB）**，ProductVersion
-`2.6.2.0`；`Pegline-2.6.2-win-x64.zip` 为 **835,605 B（0.84 MB）**，SHA-256
-`9be2a5c82352b24ab21c3254e058f923fa07b83caf7309fb17c61fede1af087e`。
+产物：GitHub Release 只提供单文件 **`pegline.exe`**，ProductVersion `2.6.2.0`；
+本机 release 构建为 1,903,104 B（1.90 MB）。不再提供便携压缩包——需要
+README/LICENSE/CHANGELOG 随附时，可以在本地运行 `pwsh tools\package-release.ps1`
+自行打包，但它不随本次 Release 发布。
 
 ## 2.6.2 变更
 
@@ -79,9 +79,8 @@
 
 ## 安装
 
-1. 下载 `Pegline-2.6.2-win-x64.zip`（**835,605 B（0.84 MB）**，SHA-256
-   `9be2a5c82352b24ab21c3254e058f923fa07b83caf7309fb17c61fede1af087e`），解压到任意目录。
-2. 运行 `pegline.exe`；程序从托盘启动。
+1. 在本页 Release 资产中下载 **`pegline.exe`**（单文件，无需解压）。
+2. 把它放到任意目录，双击运行；程序从托盘启动。
 3. 按 **Ctrl+Alt+K** 截图，截图会挂到屏幕顶部的晾衣绳上。
 
 设置、便签和线序保存在 `%APPDATA%\Pegline` 与 `%LOCALAPPDATA%\Pegline`。
