@@ -41,23 +41,16 @@ impl super::Scene {
         }
 
         let grab_id = self.grab.as_ref().map(|grab| grab.id);
-        // Ordinary cards first, then the swapping neighbours (their hop must
-        // show above the row), then the card in hand on top of everything.
+        // The row first, then the card in hand on top of it: the card being
+        // reordered must never be painted under a neighbour it passes.
         for card in &self.cards {
-            if grab_id == Some(card.id) || card.hop_t >= 0.0 {
+            if grab_id == Some(card.id) {
                 continue;
             }
             let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
             let hovered =
                 self.hover == Some(card.id) && self.dragging.is_none() && grab_id.is_none();
             self.draw_card(card, renderer, slot_left, hovered, false);
-        }
-        for card in &self.cards {
-            if grab_id == Some(card.id) || card.hop_t < 0.0 {
-                continue;
-            }
-            let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
-            self.draw_card(card, renderer, slot_left, false, true);
         }
         if let Some(card) = grab_id.and_then(|id| self.cards.iter().find(|card| card.id == id)) {
             let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
@@ -118,31 +111,29 @@ impl super::Scene {
             return;
         }
         let (card_w, card_h) = card.card_size;
-        let slot_top = layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE
-            + card.drop.value
-            + card.hop_offset();
-        let angle = card.swing.value + card.tilt + card.pendulum.angle + card.squeeze.value;
-        // Row-vector matrices compose in application order: scale the frame,
-        // shear the lower edge for the paper flex, swing it around the pin,
-        // then move it to the slot (the slide is part of the placement because
-        // this transform replaces the base one).
-        let shear = card.flex.value.to_radians().tan();
-        let transform = windows_numerics::Matrix3x2::scale_around(
-            card.press.value,
-            card.press.value,
-            windows_numerics::Vector2 {
-                X: layout::CARD_WIDTH * 0.5,
-                Y: layout::CARD_OFFSET_BELOW_TOP,
-            },
-        ) * shear_around(shear, layout::CARD_WIDTH * 0.5, 0.0)
-            * windows_numerics::Matrix3x2::rotation_around(
+        let slot_top =
+            layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE + card.drop.value;
+        let angle = card.swing.value + card.tilt + card.lean.value;
+        // Row-vector matrices compose in application order: lift the frame,
+        // swing it about the pin, then move it to the slot (the slide is part
+        // of the placement because this transform replaces the base one).
+        let lift = if lifted { super::DRAG_LIFT_SCALE } else { 1.0 };
+        let scale = card.press.value * lift;
+        let transform =
+            windows_numerics::Matrix3x2::scale_around(
+                scale,
+                scale,
+                windows_numerics::Vector2 {
+                    X: layout::CARD_WIDTH * 0.5,
+                    Y: layout::CARD_OFFSET_BELOW_TOP,
+                },
+            ) * windows_numerics::Matrix3x2::rotation_around(
                 angle,
                 windows_numerics::Vector2 {
                     X: layout::CARD_WIDTH * 0.5,
                     Y: 0.0,
                 },
-            )
-            * windows_numerics::Matrix3x2::translation(slot_left, slot_top + self.slide.value);
+            ) * windows_numerics::Matrix3x2::translation(slot_left, slot_top + self.slide.value);
         let frame = RectF::from_xywh(
             (layout::CARD_WIDTH - card_w) * 0.5,
             layout::CARD_OFFSET_BELOW_TOP,
@@ -273,19 +264,4 @@ impl super::Scene {
             renderer.pop_opacity();
         }
     }
-}
-
-/// A horizontal shear around `(cx, cy)`, in the same row-vector convention as
-/// [`windows_numerics::Matrix3x2::rotation_around`]: x += k * (y - cy).
-fn shear_around(k: f32, cx: f32, cy: f32) -> windows_numerics::Matrix3x2 {
-    windows_numerics::Matrix3x2::translation(-cx, -cy)
-        * windows_numerics::Matrix3x2 {
-            M11: 1.0,
-            M12: k,
-            M21: 0.0,
-            M22: 1.0,
-            M31: 0.0,
-            M32: 0.0,
-        }
-        * windows_numerics::Matrix3x2::translation(cx, cy)
 }

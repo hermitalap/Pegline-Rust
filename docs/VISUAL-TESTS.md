@@ -766,3 +766,24 @@
 与 `pin-swing.ps1`（8 步 ×30 px、25 ms，停 60 ms 后拍 drag；纸片模型松手 160 ms 后拍 swap）
 生成（DPI-aware、`SetCursorPos` + `mouse_event` + `CopyFromScreen`，2400×420，从物理
 x=600 起）；PowerShell 的屏幕坐标被 DPI 虚拟化为 3008×1692，而应用看到 6016×3384、scale 2.00。
+
+### 3.23 夹子直接操纵重排（2026-11-13，2.6.2）
+
+目的：2.6.2 把夹子拖拽从纸片物理换成直接操纵，按 `docs/DECISIONS.md` D18 的手感目标
+逐项截图（200% DPI、6016×3384 桌面；隔离配置 + `--demo` 三卡，`settings.ini` 里
+`lineAlways=1` 让线带常驻，`PEGLINE_TRACE=1` 写 `trace.log`）。
+
+| 步骤 | 证据 |
+|:--|:--|
+| 抓取 | 夹子在物理 (3008,85)，`trace.log` 记录 `pin press 3 at 3008,85`；按住 250 ms 后夹子缩到 0.94 |
+| 跟手 | 拖 +40 DIP 后停 150 ms 截图：卡片中心正好在 `slot + 40`（物理 3048），1:1、没有被跟手弹簧拖慢（`pin-2.6.2-drag-200.png`） |
+| 换位 | 继续拖到 +146 DIP：越过中点 12 DIP 后右邻卡已滑到旧槽位（临界阻尼、无过冲），被拖卡仍贴在指针 (3300,85)，移动中带 ≤4° 倾斜（`pin-2.6.2-swap-200.png`） |
+| 松手 | `pin release 3 at 3300,85`，160 ms 后整排落在 2660/3008/3356 三个槽位、顺序 `[1,2,3]`，无 hop、无回弹，悬停药丸与叉恢复（`pin-2.6.2-release-200.png`） |
+| 倾斜 | 移动中倾斜、指针停住约 150 ms 后回正；4° 上限由单元测试 `the_lean_follows_the_pointer_speed_and_is_capped` 覆盖 |
+| 单击 | 4 DIP 内的夹子点击不换位、不复制、不收起线带（单元测试 `a_plain_pin_click_does_not_reorder`） |
+| 帧率/内存 | `probe --mode=line` 60.06 fps、draw p50 0.677 / p95 1.027 ms、private 97.0 MB（2.6.1 基线 97.5 MB）；`pegline.exe` 1,903,616 B |
+| 未测 | 120 Hz、第二显示器、睡眠/唤醒、100% DPI；便签右下角 19×19 DIP 锚点只做了 96/192 DPI 单元测试，没有再用真实鼠标复测边界 |
+
+截图由一次性 DPI-aware PowerShell 生成（`SetProcessDPIAware` + `SetCursorPos` +
+`mouse_event` + `CopyFromScreen` 到 6016×420，再从物理 x=2350..3650 裁切），脚本未入库；
+PowerShell 的屏幕坐标被 DPI 虚拟化为 3008×1692，而应用看到 6016×3384、scale 2.00。

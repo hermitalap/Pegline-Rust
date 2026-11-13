@@ -12,5 +12,5 @@ build/
 # Release packages (built by tools/package-release.ps1)
 /dist/
 
-# Python cache from tools/paper-plot.py
+# Python cache
 __pycache__/

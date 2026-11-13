@@ -1,3 +1,37 @@
+## 2.6.2 — 2026-11-13
+
+### Changes
+
+- **The clothespin drag is now direct manipulation.** The dragged card sits
+  exactly under the pointer (1:1, no follow spring and no lag), the neighbour
+  slides one slot with a single critically damped 0.24 s spring, and the order
+  changes when the card centre crosses the neighbouring slot's midpoint by
+  12 DIP — 24 DIP of hysteresis instead of a dwell timer, a cooldown and a
+  re-arm distance. The pendulum, air drag, relative wind, flex shear, squeeze,
+  swap hop/recoil and all their tuning plumbing are deleted:
+  `src/scene/pendulum.rs`, `src/scene/trace.rs`, `docs/PAPER-TUNING.md`,
+  `tools/paper-trace.ps1`, `tools/paper-plot.py`, `tools/paper-sim.html` and the
+  `PEGLINE_PAPER_*` variables are gone. Three springs (neighbour 0.24/1.0,
+  release 0.30/1.0, speed lean 0.14/1.0) and two thresholds (4 DIP slop,
+  12 DIP order deadband) are the whole gesture. A 4° lean scaled by pointer
+  speed keeps the weight cue; release inherits the pointer velocity (capped at
+  600 DIP/s) and settles without overshoot; `pegged.txt` and `Tink` still fire
+  once, only when the order actually changed.
+- **The note editor's bottom-right resize anchor is 19×19 DIP.** 24² = 576 DIP²
+  becomes 19² = 361 DIP², a 37 % area cut (19 is the nearest whole DIP to
+  24·√0.6). The edge bands stay 2 DIP and the diagonal resize cursor still
+  appears as soon as the pointer enters the anchor.
+
+### Verification
+
+- 248 lib tests + 1 main test pass; `cargo clippy --all-targets -- -D warnings`
+  and `cargo fmt --check` are clean.
+- Real mouse at 200 % DPI (`--demo`, 3 cards): 1:1 tracking, one reorder at the
+  midpoint, the neighbour glides a full slot with no overshoot, the row settles
+  on the three slots after release (`docs/visual/pin-2.6.2-*.png`).
+- `probe --mode=line`: 60.06 fps, draw p50 0.677 / p95 1.027 ms, private
+  97.0 MB; `pegline.exe` 1,903,616 B (2.6.1: 1,920,512 B).
+
 ## 2.6.1 — 2026-11-13
 
 ### Fixes

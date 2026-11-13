@@ -93,6 +93,22 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
+**2.6.2 (2026-11-13)**: it replaces the 2.6.1 pin-drag paper model with direct
+manipulation. The dragged card is placed on the pointer 1:1 (no follow spring,
+no lag), the neighbour glides one slot on a single critically damped 0.24 s
+spring, and the order swaps when the card centre passes the neighbouring slot's
+midpoint by 12 DIP (24 DIP hysteresis) — no dwell timer, cooldown or re-arm
+distance. A 4° speed lean is the only extra rotation, and release inherits the
+pointer velocity (600 DIP/s cap) and settles without overshoot. The paper model
+is deleted with its tooling: `src/scene/pendulum.rs`, `src/scene/trace.rs`,
+`docs/PAPER-TUNING.md`, `tools/paper-trace.ps1`, `tools/paper-plot.py`,
+`tools/paper-sim.html` and every `PEGLINE_PAPER_*` variable; the gesture is now
+three springs and two thresholds (`docs/DECISIONS.md` D18, supersedes D16/D17).
+It also shrinks the note editor's bottom-right resize anchor from 24×24 to
+19×19 DIP (576 → 361 DIP², −37 %). 248 lib + 1 main tests pass, clippy/fmt
+clean, probe 60.06 fps / draw p50 0.677 ms / 97.0 MB private (2.6.1: 97.5 MB),
+exe 1,903,616 B. Real-mouse check and screenshots in `docs/PARITY.md`.
+
 **2.6.1 (2026-11-13)**: it fixes the last preview leak in the pin gesture — while
  the clothespin is held, the UI no longer reports the card as hovered, hides and
  resets any preview state, and drops a preview decode that finishes mid-drag, so
