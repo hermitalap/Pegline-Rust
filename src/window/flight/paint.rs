@@ -186,7 +186,7 @@ pub(super) fn draw_flight_card(
             ),
             pin * chrome,
         );
-        renderer.draw_pin(pin_left, pin_top);
+        renderer.draw_pin(pin_left, pin_top, 1.0, 0.0, 0.0);
         if pushed {
             renderer.pop_opacity();
         }

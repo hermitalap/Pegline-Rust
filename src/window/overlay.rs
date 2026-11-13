@@ -11,12 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
-    IDC_ARROW, IDC_HAND, LoadCursorW, MA_NOACTIVATE, SPI_SETDESKWALLPAPER, SW_HIDE, SetCursor,
-    SetWindowLongPtrW, ShowWindow, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR,
-    WM_SETTINGCHANGE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    IDC_ARROW, IDC_HAND, IDC_SIZEWE, LoadCursorW, MA_NOACTIVATE, SPI_SETDESKWALLPAPER, SW_HIDE,
+    SetCursor, SetWindowLongPtrW, ShowWindow, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_MOUSEACTIVATE,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -43,6 +44,10 @@ unsafe impl Send for SendHwnd {}
 #[derive(Default)]
 struct CursorState {
     hand: AtomicBool,
+    /// While a clothespin is held the line is a horizontal grab, so the
+    /// cursor is the left-right resize arrow (same as the note editor's
+    /// horizontal band).
+    drag: AtomicBool,
     /// Set once the render channel exists; `WM_SETTINGCHANGE` uses it to wake
     /// an idle line after a wallpaper change.
     commands: Mutex<Option<Sender<Command>>>,
@@ -244,6 +249,11 @@ impl Overlay {
         self.cursor.hand.store(hand, Ordering::Release);
     }
 
+    /// True while a card is being dragged by its clothespin.
+    pub fn set_drag_cursor(&self, drag: bool) {
+        self.cursor.drag.store(drag, Ordering::Release);
+    }
+
     pub fn set_click_through(&mut self, enabled: bool) {
         if self.click_through == enabled {
             return;
@@ -419,6 +429,22 @@ fn render_thread(
         let now = win32::now_seconds();
         let dt = ((now - last) as f32).clamp(0.0, 0.05);
         last = now;
+
+        // A pin drag is sampled here, once per frame, at the display's rate:
+        // the 33 ms UI tick and the command queue would both make the card lag
+        // behind the pointer. The async key state is the fallback for a missed
+        // button-up (the low-level hook can drop events under load).
+        if scene.grabbing() {
+            if let Some((x, y)) = win32::client_cursor(hwnd.0) {
+                let scale = renderer.scale().max(0.01);
+                scene.set_pointer(x as f32 / scale, y as f32 / scale, now);
+            }
+            let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            if !down {
+                scene.end_grab(now);
+            }
+        }
+
         let animating = scene.update(dt, now);
 
         if let Err(error) = renderer.begin() {
@@ -594,7 +620,14 @@ unsafe fn overlay_wndproc_inner(
             // overlay exists; the pointer is only read on this thread.
             let raw = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const CursorState;
             let hand = !raw.is_null() && unsafe { (*raw).hand.load(Ordering::Acquire) };
-            let cursor = if hand { IDC_HAND } else { IDC_ARROW };
+            let drag = !raw.is_null() && unsafe { (*raw).drag.load(Ordering::Acquire) };
+            let cursor = if drag {
+                IDC_SIZEWE
+            } else if hand {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
             // SAFETY: system cursors are process-wide and never freed.
             unsafe {
                 let loaded = LoadCursorW(None, cursor).unwrap_or_default();

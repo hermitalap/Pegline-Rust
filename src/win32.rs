@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint,
+    MonitorFromPoint, ScreenToClient,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -146,6 +146,19 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
     let mut point = POINT::default();
     // SAFETY: GetCursorPos writes one POINT.
     if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return None;
+    }
+    Some((point.x, point.y))
+}
+
+/// The cursor position in the window's client area, in device pixels. The
+/// render thread uses this to sample the drag pointer once per frame without
+/// routing coordinates through the UI queue.
+pub fn client_cursor(hwnd: HWND) -> Option<(i32, i32)> {
+    let (x, y) = cursor_pos()?;
+    let mut point = POINT { x, y };
+    // SAFETY: ScreenToClient writes one POINT; the window is owned by us.
+    if !unsafe { ScreenToClient(hwnd, &mut point) }.as_bool() {
         return None;
     }
     Some((point.x, point.y))

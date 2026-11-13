@@ -724,3 +724,71 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 
 工时：计划 5–7 天，实际按 Phase 0–4 一次走完；测试 236 passed / 1 ignored，
 `clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 全过。
+
+## 14. 夹子拖拽：线内重排（2026-11-13，2.6.0）
+
+需求（PLAN-2.6.0）：指针悬停挂图的夹子时高亮、放大、发光；按住左键拖动卡片，
+水平有弹性与惯性；右邻卡被挤压（位移 + 旋转），挤到阈值时弹向左侧并交换；被拖卡
+也可能受到向左的挤压；Y 轴有弹簧把夹子拉回挂绳附近。
+
+实现：
+
+- 独立的 `Scene.grab` 状态与 `Command::Grab/EndGrab/PinHover`，不复用 OLE 的
+  `Command::Dragging`；`next_wake_in` 在 grab 时返回 `Some(0.0)`，渲染线程不睡。
+- 渲染线程每帧 `GetCursorPos` + `ScreenToClient` 采样，按 DIP 调用 `scene.set_pointer`；
+  松手由 UI 的鼠标钩子发 `EndGrab`，渲染线程用 `GetAsyncKeyState(VK_LBUTTON)` 兜底。
+- 夹子命中框 20×34 DIP，绕 pin 反向旋转；优先于顶边点击、色板、按钮和 OLE；按下不设
+  `state.pressed`，因此长按/双击/`DoDragDrop` 不会抢走手势；<4 DIP 松开是无操作。
+- X 跟手 0.075/0.85，`x.target = clamp(pointer + grabOffset, 75, width−75)`；Y 橡胶
+  0–18 DIP 线性、之后 0.22×、上限 26 DIP，弹簧 0.30/0.55，只向下。
+- 挤压用碰撞前穿透量 `pen = A.right − B.left`，第一张上限 34 DIP、第二张 10 DIP，
+  邻卡旋转最多 3°；穿透 ≥28 DIP 持续 0.06 s 后交换，冷却 0.18 s，反向需回撤 43 DIP。
+- 交换只换向量索引：邻卡弹向旧槽位（−260 DIP/s + 0.20 s/6 DIP 小跳），被拖卡后坐
+  −160 DIP/s 并继续跟指针，交换后两卡重叠约 98 DIP，松手才归位；不在交换时
+  `relayout_cards`，否则被拖卡会瞬移回槽位。
+- 纸片模型：被拖卡和交换跳位卡不是统一参数的刚体，而是有自己摆长的纸片。
+  `L_eff=(w²/12+h²/3)/(h/2)`（60–220 DIP），`ω=sqrt(g_eff/L_eff)`；自定义
+  `Pendulum` 积分器用线性阻尼 1.116 + 二次阻力 0.279（当前“更强空气”预设），X 加速度驱动目标
+  `atan(a_x/g_eff)`（±6°），Y 加速度改变有效重力 `g_eff=clamp(35500-a_y, 0.25g, 1.75g)`；
+  另叠加 ±1.2° 的柔性剪切（0.006×角速度，0.12/0.55）。旧的“按水平速度倾斜 ±5°”
+  和线性 0.30/0.30 摆已删除。只看到一次过冲，约半秒停住（D17 更强空气预设）；6 DIP 小跳不变。
+  设计见 `PLAN-2.6.0-PENDULUM-20261113-011909.md` 与 `docs/DECISIONS.md` D16。
+- 纸片空气阻力：每卡按 `aspect=h/w`、`tall=clamp((aspect−1)/1.2,0,1)` 推导线性阻尼 `1.116+0.434·tall`、二次阻力 `0.279+0.31·tall`、风增益 `4.34e-5·(0.7+0.6·tall)`；压心 `r=h/2` 的相对风扭矩
+  `Q=wind_gain·|v_p|·(v_p·(cosθ,sinθ))·r`（限 ±6000）直接加进摆角加速度，所以匀速运动也会略微向后倒。旧的“匀速竖直”结论已修正。
+- 调参追踪：`PEGLINE_PAPER_TRACE` 逐帧写 `t,id,grabbed,hop,release,x,vx,drop,vy,angle,omega,target,ax,ay,g_eff,wind,flex,swap_dir`；`tools/paper-trace.ps1` 驱动一次 200% DPI 的夹子拖拽，`tools/paper-plot.py` 生成角度/角速度/线速度图和峰值/过零/停稳指标；`PEGLINE_PAPER_DAMPING/DRAG/WIND/ASPECT` 覆盖系数。流程见 `docs/PAPER-TUNING.md`。
+- 松手 0.46/0.80 回槽位，速度上限 600 DIP/s，Y 回 0、摆角保留并继续衰减；UI tick 在
+  `snapshot.grabbing == false` 后按 `snapshot.order` 重排 `line.items`，顺序变化才写
+  `pegged.txt` 并播一次 `Tink`。
+- 光晕在启动/DPI 变化时烘焙一次（`create_blurred_rect` 增加 tint），每帧只多一个
+  `DrawBitmap`；夹子四态 1.0/1.12/0.94/1.08，光晕 0/0.22/0.26/0.20，`metal_hot` 提亮。
+
+测量（release，200% DPI，probe 窗口 6016×420）：
+
+| 项目 | 基线 HEAD bc30655 | 2.6.0 |
+|:--|--:|--:|
+| `probe --mode=line` fps | 60.10 / 60.06 | 59.88–60.16（空气阻力版 60.16） |
+| p50 帧时间 | 16.66 ms | 16.64–16.67 ms |
+| p95 帧时间 | — | 16.91–17.19 ms |
+| draw p50 | 0.658 / 0.660 ms | 0.585–0.701 ms（空气阻力版 0.585） |
+| draw p95 | — | 0.859–1.698 ms（空气阻力版 0.915） |
+| private | 97.1–97.4 MB | 96.9–98.9 MB（空气阻力版 98.4） |
+| probe 自身 exe | 926,720 B | 961,536 B |
+
+- 夹子悬停时 draw p50 约 1.2 ms（多一个光晕 `DrawBitmap`），远低于 8.3 ms 预算；
+  指针离开线带时重复测量无回退。空气阻力版复测 98.4 MB / 60.16 fps /
+  draw p50 0.585 / p95 0.915 ms；此前的线性摆是 97.5 MB / 60.09 fps /
+  draw p50 0.640 ms，差异为运行噪声，仍在 8.3 ms 预算和 60 MB 目标之外的历史区间内。
+- 旧 0.45/0.05 模型的 `--demo` CSV 基线：峰值 5.50°、7 次过零（含小角度抖动）、817 ms 停稳，
+  max |ω| 97.5°/s，max |vx|/|vy| 3444/311 DIP/s（仅历史参考；当前“更强空气”预设待手测）；
+  `tools/paper-plot.py` 生成 `target/paper-trace.html`。
+- 真实 6 卡：夹子 (2138,87) 按下、拖 +200 px、释放后 `pegged.txt` 第一行从便签变为
+  `屏幕截图 2026-11-10 201140.png`，便签第二行，其余不变（测试后已恢复原文件）。
+- `--demo` 三卡：夹子 (1614,87)，拖动 +200 px，顺序 `[7,8,9] → [8,7,9]`，卡片移动
+  +351 px（174 DIP 一格）；截图在 `.../pegline-pin2/{hover,press,drag,release}.png`。
+- 测试 255 lib + 1 main 通过（1 ignored）；`clippy --all-targets -- -D warnings`、`cargo fmt --check`
+  全过。已知未测：120 Hz、第二显示器、睡眠/唤醒、100% DPI 的夹子截图。
+
+2.6.1（2026-11-13）只修一个交互泄漏：夹子按住/拖拽时，`update_pointer` 不再在
+`pin_held` 时计算卡片 hover，`update_preview` 在 `pin_press` 期间隐藏并重置预览，
+`on_preview_ready` 丢弃拖拽中才完成的解码；于是底部的 0.35 s 大预览不会在拖动时
+弹出，松手后恢复。没有几何、物理或持久化改动，测试数与像素输出不变。

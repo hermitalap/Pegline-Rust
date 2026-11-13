@@ -40,12 +40,28 @@ impl super::Scene {
             }
         }
 
+        let grab_id = self.grab.as_ref().map(|grab| grab.id);
+        // Ordinary cards first, then the swapping neighbours (their hop must
+        // show above the row), then the card in hand on top of everything.
         for card in &self.cards {
-            // The drawn position is the spring value, not the final slot: the
-            // row glides when a card is added, removed or lands.
+            if grab_id == Some(card.id) || card.hop_t >= 0.0 {
+                continue;
+            }
             let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
-            let hovered = self.hover == Some(card.id) && self.dragging.is_none();
-            self.draw_card(card, renderer, slot_left, hovered);
+            let hovered =
+                self.hover == Some(card.id) && self.dragging.is_none() && grab_id.is_none();
+            self.draw_card(card, renderer, slot_left, hovered, false);
+        }
+        for card in &self.cards {
+            if grab_id == Some(card.id) || card.hop_t < 0.0 {
+                continue;
+            }
+            let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
+            self.draw_card(card, renderer, slot_left, false, true);
+        }
+        if let Some(card) = grab_id.and_then(|id| self.cards.iter().find(|card| card.id == id)) {
+            let slot_left = card.x.value - layout::CARD_WIDTH * 0.5;
+            self.draw_card(card, renderer, slot_left, false, true);
         }
         renderer.reset_transform();
     }
@@ -90,32 +106,43 @@ impl super::Scene {
     /// Draws one card in the slot starting at `slot_left`. The card is scaled
     /// by its press spring and swung about its pin by `swing + tilt`; nothing
     /// on it is written back.
-    fn draw_card(&self, card: &Card, renderer: &mut Renderer, slot_left: f32, hovered: bool) {
+    fn draw_card(
+        &self,
+        card: &Card,
+        renderer: &mut Renderer,
+        slot_left: f32,
+        hovered: bool,
+        lifted: bool,
+    ) {
         if card.opacity <= 0.01 {
             return;
         }
         let (card_w, card_h) = card.card_size;
-        let slot_top =
-            layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE + card.drop.value;
-        let angle = card.swing.value + card.tilt;
+        let slot_top = layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE
+            + card.drop.value
+            + card.hop_offset();
+        let angle = card.swing.value + card.tilt + card.pendulum.angle + card.squeeze.value;
         // Row-vector matrices compose in application order: scale the frame,
-        // then swing it around the pin, then move it to the slot (the slide is
-        // part of the placement because this transform replaces the base one).
-        let transform =
-            windows_numerics::Matrix3x2::scale_around(
-                card.press.value,
-                card.press.value,
-                windows_numerics::Vector2 {
-                    X: layout::CARD_WIDTH * 0.5,
-                    Y: layout::CARD_OFFSET_BELOW_TOP,
-                },
-            ) * windows_numerics::Matrix3x2::rotation_around(
+        // shear the lower edge for the paper flex, swing it around the pin,
+        // then move it to the slot (the slide is part of the placement because
+        // this transform replaces the base one).
+        let shear = card.flex.value.to_radians().tan();
+        let transform = windows_numerics::Matrix3x2::scale_around(
+            card.press.value,
+            card.press.value,
+            windows_numerics::Vector2 {
+                X: layout::CARD_WIDTH * 0.5,
+                Y: layout::CARD_OFFSET_BELOW_TOP,
+            },
+        ) * shear_around(shear, layout::CARD_WIDTH * 0.5, 0.0)
+            * windows_numerics::Matrix3x2::rotation_around(
                 angle,
                 windows_numerics::Vector2 {
                     X: layout::CARD_WIDTH * 0.5,
                     Y: 0.0,
                 },
-            ) * windows_numerics::Matrix3x2::translation(slot_left, slot_top + self.slide.value);
+            )
+            * windows_numerics::Matrix3x2::translation(slot_left, slot_top + self.slide.value);
         let frame = RectF::from_xywh(
             (layout::CARD_WIDTH - card_w) * 0.5,
             layout::CARD_OFFSET_BELOW_TOP,
@@ -132,7 +159,19 @@ impl super::Scene {
         // A fully opaque card skips the layer; the card is still drawn.
         let pushed = renderer.push_opacity(bounds, card.opacity);
 
-        renderer.draw_shadow(frame, if hovered { 0.26 } else { 0.18 }, hovered);
+        // The lifted card gets the deepest shadow; it reads as being held
+        // above its neighbours even before the pointer moves.
+        renderer.draw_shadow(
+            frame,
+            if lifted {
+                0.30
+            } else if hovered {
+                0.26
+            } else {
+                0.18
+            },
+            hovered,
+        );
         renderer.draw_glass(frame, layout::CARD_RADIUS, false);
         if let Some(image) = card.image.as_ref() {
             let photo = RectF::from_xywh(
@@ -144,7 +183,13 @@ impl super::Scene {
             renderer.draw_photo(image, photo, layout::PHOTO_RADIUS);
         }
         renderer.stroke_card(frame, layout::CARD_RADIUS, 0.75);
-        renderer.draw_pin(layout::CARD_WIDTH * 0.5 - layout::PIN_WIDTH * 0.5, 0.0);
+        renderer.draw_pin(
+            layout::CARD_WIDTH * 0.5 - layout::PIN_WIDTH * 0.5,
+            0.0,
+            card.pin_scale.value,
+            card.pin_glow.value,
+            card.pin_hot.value,
+        );
         renderer.draw_cross(
             frame.left + layout::CROSS_MARGIN,
             frame.top + layout::CROSS_MARGIN,
@@ -228,4 +273,19 @@ impl super::Scene {
             renderer.pop_opacity();
         }
     }
+}
+
+/// A horizontal shear around `(cx, cy)`, in the same row-vector convention as
+/// [`windows_numerics::Matrix3x2::rotation_around`]: x += k * (y - cy).
+fn shear_around(k: f32, cx: f32, cy: f32) -> windows_numerics::Matrix3x2 {
+    windows_numerics::Matrix3x2::translation(-cx, -cy)
+        * windows_numerics::Matrix3x2 {
+            M11: 1.0,
+            M12: k,
+            M21: 0.0,
+            M22: 1.0,
+            M31: 0.0,
+            M32: 0.0,
+        }
+        * windows_numerics::Matrix3x2::translation(cx, cy)
 }

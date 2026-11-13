@@ -6,8 +6,10 @@
 //! for hit testing, so no rendering result is ever read back.
 
 mod paint;
+mod pendulum;
+mod trace;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 
@@ -15,6 +17,9 @@ use crate::layout;
 use crate::render::{ActionsLayout, Renderer};
 use crate::spring::{Spring, ease};
 use crate::types::{ActionKind, CardId, CardSpec, FrameSnapshot, HitCard, ImageData, RectF};
+
+use pendulum::Pendulum;
+use trace::{PaperTrace, TraceRow};
 
 /// Time for the "Copied" label, seconds.
 const COPIED_SECONDS: f64 = 1.2;
@@ -27,6 +32,180 @@ const ROW_RESPONSE: f32 = 0.55;
 /// Damping ratio of the row's horizontal spring. The note entry uses the same
 /// curve, so it reflows exactly with the last hanging card.
 const ROW_DAMPING: f32 = 0.78;
+
+// Pin drag. The follow spring is deliberately quick and only lightly damped:
+// the card should trail the pointer by a few DIP, not lag behind it.
+const GRAB_RESPONSE: f32 = 0.075;
+const GRAB_DAMPING: f32 = 0.85;
+const GRAB_DROP_RESPONSE: f32 = 0.30;
+const GRAB_DROP_DAMPING: f32 = 0.55;
+/// Release spring: softer than the follow, so the card settles with a visible
+/// elastic overshoot instead of stopping dead.
+const RELEASE_RESPONSE: f32 = 0.46;
+const RELEASE_DAMPING: f32 = 0.80;
+/// Travel before a pin press becomes a drag, in DIP.
+const GRAB_DRAG_DIP: f32 = 4.0;
+/// The Y rubber band: free travel, then a compressed slope and a hard cap.
+const RUBBER_FREE_DIP: f32 = 18.0;
+const RUBBER_SLOPE: f32 = 0.22;
+const RUBBER_MAX_DIP: f32 = 26.0;
+/// How far the first and second neighbours may be pushed, in DIP.
+const SQUEEZE_CAP: f32 = 34.0;
+const SQUEEZE_CHAIN_CAP: f32 = 10.0;
+/// The neighbour's lean at full push, degrees.
+const SQUEEZE_ANGLE: f32 = 3.0;
+/// Pre-collision penetration that arms a swap, its dwell and its cooldown.
+const SWAP_PENETRATION: f32 = 28.0;
+const SWAP_DWELL: f64 = 0.06;
+const SWAP_COOLDOWN: f64 = 0.18;
+/// After a swap, the dragged card must retreat this far before the reverse
+/// swap arms. Without it the two cards would swap back and forth forever while
+/// the dragged one still overlaps its neighbour.
+const SWAP_REARM_DIP: f32 = 43.0;
+const SWAP_HOP_SECONDS: f32 = 0.20;
+const SWAP_HOP_DIP: f32 = 6.0;
+const SWAP_POP_VELOCITY: f32 = 260.0;
+const SWAP_RECOIL_VELOCITY: f32 = 160.0;
+
+/// Effective gravity at the pin, DIP/s². The pendulum's natural frequency is
+/// `sqrt(g_eff / L_eff)`; a pin accelerating downwards makes the card lighter
+/// and slows its swing.
+const GRAVITY_DIP: f32 = 35_500.0;
+/// A card behaves like a uniform rectangle. Keep its effective length in a
+/// sane range for the smallest note and the widest screenshot.
+const PENDULUM_L_MIN: f32 = 60.0;
+const PENDULUM_L_MAX: f32 = 220.0;
+/// Safety limits for the pin acceleration fed into the pendulum.
+const PENDULUM_ACCEL_CLAMP: f32 = 6000.0;
+const PENDULUM_MAX_DEG: f32 = 6.0;
+const PENDULUM_DEADZONE: f32 = 300.0;
+/// The bottom edge lags the rigid rotation by a small shear: response,
+/// damping, degrees per degree/second of swing, and the clamp.
+const FLEX_RESPONSE: f32 = 0.12;
+const FLEX_DAMPING: f32 = 0.55;
+const FLEX_GAIN: f32 = 0.006;
+const FLEX_MAX_DEG: f32 = 1.2;
+
+// Paper coefficients. Air drag grows with the card's aspect ratio: a tall
+// strip sweeps a longer arc and loses its swing sooner than a wide screenshot.
+// The relative-wind torque uses the card's own linear velocity, so a card
+// dragged at constant speed keeps a small backward tilt instead of hanging
+// perfectly vertical like a block on a hinge.
+// The “stronger air” tuner preset, converted to effective coefficients:
+// air 1.55 x (damping 0.72 + 0.28*tall, drag 0.18 + 0.20*tall, wind 2.8e-5).
+// The drag aspect slider is 0.20; after the 1.55x air multiplier it is 0.31 here.
+const PAPER_DAMPING_BASE: f32 = 1.116;
+const PAPER_DAMPING_ASPECT: f32 = 0.434;
+const PAPER_DRAG_BASE: f32 = 0.279;
+const PAPER_DRAG_ASPECT: f32 = 0.31;
+const PAPER_WIND_BASE: f32 = 4.34e-5;
+const PAPER_ASPECT_NORM: f32 = 1.2;
+
+// Pin visual states: scale and glow opacity.
+const PIN_HOVER_SCALE: f32 = 1.12;
+const PIN_HOVER_GLOW: f32 = 0.22;
+const PIN_PRESS_SCALE: f32 = 0.94;
+const PIN_PRESS_GLOW: f32 = 0.26;
+const PIN_DRAG_SCALE: f32 = 1.08;
+const PIN_DRAG_GLOW: f32 = 0.20;
+
+/// The Y rubber band: linear to [`RUBBER_FREE_DIP`], then compressed, capped.
+pub(crate) fn rubber_y(raw: f32) -> f32 {
+    let raw = raw.max(0.0);
+    let stretched = if raw <= RUBBER_FREE_DIP {
+        raw
+    } else {
+        RUBBER_FREE_DIP + (raw - RUBBER_FREE_DIP) * RUBBER_SLOPE
+    };
+    stretched.min(RUBBER_MAX_DIP)
+}
+
+/// The pre-collision penetration the next card feels, in DIP.
+pub(crate) fn squeeze_push(prev_edge: f32, slot: f32, width: f32, cap: f32) -> f32 {
+    (prev_edge - (slot - width * 0.5)).clamp(0.0, cap)
+}
+
+/// Effective length of a uniform rectangular card pivoting at its top edge:
+/// `(w²/12 + h²/3) / (h/2)`, clamped for the smallest note and the widest
+/// screenshot.
+fn effective_length((w, h): (f32, f32)) -> f32 {
+    let h = h.max(1.0);
+    (((w * w) / 12.0 + (h * h) / 3.0) / (h * 0.5)).clamp(PENDULUM_L_MIN, PENDULUM_L_MAX)
+}
+
+/// Tuning values read once from the environment, so the trace tool can try a
+/// damping or wind strength without a rebuild. The defaults are the shipped
+/// paper model.
+#[derive(Clone, Copy)]
+struct PaperTuning {
+    damping_base: f32,
+    damping_aspect: f32,
+    drag_base: f32,
+    drag_aspect: f32,
+    wind_base: f32,
+    aspect_norm: f32,
+}
+
+impl PaperTuning {
+    fn from_env() -> Self {
+        fn value(name: &str, default: f32) -> f32 {
+            std::env::var(name)
+                .ok()
+                .and_then(|text| text.trim().parse::<f32>().ok())
+                .filter(|number| number.is_finite() && *number >= 0.0)
+                .unwrap_or(default)
+        }
+        Self {
+            damping_base: value("PEGLINE_PAPER_DAMPING", PAPER_DAMPING_BASE),
+            damping_aspect: PAPER_DAMPING_ASPECT,
+            drag_base: value("PEGLINE_PAPER_DRAG", PAPER_DRAG_BASE),
+            drag_aspect: PAPER_DRAG_ASPECT,
+            wind_base: value("PEGLINE_PAPER_WIND", PAPER_WIND_BASE),
+            aspect_norm: value("PEGLINE_PAPER_ASPECT", PAPER_ASPECT_NORM).max(0.1),
+        }
+    }
+}
+
+fn paper_tuning() -> &'static PaperTuning {
+    static TUNING: OnceLock<PaperTuning> = OnceLock::new();
+    TUNING.get_or_init(PaperTuning::from_env)
+}
+
+#[derive(Clone, Copy)]
+struct PaperCoefficients {
+    damping: f32,
+    drag: f32,
+    wind_gain: f32,
+}
+
+/// Per-card paper constants. `tall` is 0 for a wide card and 1 for an aspect
+/// ratio 1.2 above square (or higher); the wind gain also grows with it.
+fn paper_coefficients((width, height): (f32, f32)) -> PaperCoefficients {
+    let tuning = paper_tuning();
+    let aspect = (height / width.max(1.0)).max(0.01);
+    let tall = ((aspect - 1.0) / tuning.aspect_norm).clamp(0.0, 1.0);
+    PaperCoefficients {
+        damping: (tuning.damping_base + tuning.damping_aspect * tall).max(0.0),
+        drag: (tuning.drag_base + tuning.drag_aspect * tall).max(0.0),
+        wind_gain: (tuning.wind_base * (0.7 + 0.6 * tall)).max(0.0),
+    }
+}
+
+/// The relative-wind angular acceleration at the card's centre of pressure.
+/// Positive is clockwise (bottom left): a card dragged right leaves its bottom
+/// behind, and a card dragged left does the mirror image. `height` is the card
+/// height in DIP; the centre of pressure is halfway down.
+fn relative_wind(angle_deg: f32, omega_deg: f32, vx: f32, vy: f32, height: f32, gain: f32) -> f32 {
+    let theta = angle_deg.to_radians();
+    let omega = omega_deg.to_radians();
+    let radius = (height * 0.5).max(1.0);
+    let (sin, cos) = theta.sin_cos();
+    let vx_point = vx - radius * omega * cos;
+    let vy_point = vy - radius * omega * sin;
+    let speed = (vx_point * vx_point + vy_point * vy_point).sqrt();
+    (gain * speed * (vx_point * cos + vy_point * sin) * radius)
+        .clamp(-PENDULUM_ACCEL_CLAMP, PENDULUM_ACCEL_CLAMP)
+}
 
 /// What the UI thread asks the line to do.
 #[derive(Debug)]
@@ -58,6 +237,13 @@ pub enum Command {
     Press(Option<CardId>),
     /// Which card is being dragged (its frame goes translucent).
     Dragging(Option<CardId>),
+    /// Begin a pin drag. `pointer` is the current cursor position in window
+    /// DIP; the render thread updates it every frame afterwards.
+    Grab { id: CardId, pointer: (f32, f32) },
+    /// End the pin drag: settle the card into its (possibly new) slot.
+    EndGrab,
+    /// Which clothespin the pointer is over.
+    PinHover(Option<CardId>),
     /// The flight window carries this card; keep it invisible until it lands.
     SetFlying { id: CardId, flying: bool },
     /// The flight window carries an existing card back to its slot. Unlike
@@ -136,10 +322,36 @@ struct Card {
     nudge_to: f32,
     /// -1 is idle, 0..1 is the ease-out progress of an active nudge.
     nudge_t: f32,
+    /// The hanging card's inertial sway: a damped pendulum with the card's
+    /// own effective length and quadratic air drag.
+    pendulum: Pendulum,
+    /// Effective pendulum length for this card, DIP.
+    pendulum_length: f32,
+    /// Per-card relative-wind gain, degrees/s² per (DIP/s)² at the pin.
+    wind_gain: f32,
+    /// The previous frame's X velocity, for the pendulum's acceleration.
+    last_vx: f32,
+    /// The previous frame's drop velocity, for the vertical excitation.
+    last_vy: f32,
+    /// A small shear of the lower card, degrees; the bottom edge lags the pin.
+    flex: Spring,
+    /// The neighbour's extra rotation while the dragged card squeezes it.
+    squeeze: Spring,
+    /// The clothespin's scale, glow and hot-metal cross-fade.
+    pin_scale: Spring,
+    pin_glow: Spring,
+    pin_hot: Spring,
+    /// -1 is idle, otherwise 0..1 of the 20 ms swap hop.
+    hop_t: f32,
+    /// True between a release and the moment the row spring has settled, so
+    /// the faster release response can be swapped back to the row response.
+    release_spring: bool,
 }
 
 impl Card {
     fn new(spec: CardSpec, slot_x: f32) -> Self {
+        let pendulum_length = effective_length(spec.card_size);
+        let paper = paper_coefficients(spec.card_size);
         let mut card = Self {
             id: spec.id,
             card_size: spec.card_size,
@@ -163,6 +375,22 @@ impl Card {
             nudge_from: 0.0,
             nudge_to: 0.0,
             nudge_t: -1.0,
+            pendulum: Pendulum::new_with(
+                (GRAVITY_DIP / pendulum_length).sqrt(),
+                paper.damping,
+                paper.drag,
+            ),
+            pendulum_length,
+            wind_gain: paper.wind_gain,
+            last_vx: 0.0,
+            last_vy: 0.0,
+            flex: Spring::new(FLEX_RESPONSE, FLEX_DAMPING, 0.0),
+            squeeze: Spring::new(0.22, 0.80, 0.0),
+            pin_scale: Spring::new(0.16, 0.85, 1.0),
+            pin_glow: Spring::new(0.16, 0.85, 0.0),
+            pin_hot: Spring::new(0.18, 0.90, 0.0),
+            hop_t: -1.0,
+            release_spring: false,
         };
         card.x.target = slot_x;
         if spec.arriving {
@@ -248,6 +476,16 @@ impl Card {
         self.swing.step(dt);
     }
 
+    /// The swap hop's vertical offset: a half sine, up and back down in
+    /// [`SWAP_HOP_SECONDS`]. Zero when no hop is running.
+    fn hop_offset(&self) -> f32 {
+        if self.hop_t < 0.0 {
+            0.0
+        } else {
+            -SWAP_HOP_DIP * (std::f32::consts::PI * self.hop_t).sin()
+        }
+    }
+
     /// Top of the card frame in slot-local DIP (before rotation).
     fn frame_top(&self) -> f32 {
         layout::CARD_OFFSET_BELOW_TOP
@@ -317,6 +555,29 @@ impl Rng {
     }
 }
 
+/// The active clothespin drag: which card, where the pointer grabbed it and
+/// the last sample the render thread took.
+struct Grab {
+    id: CardId,
+    /// Pin anchor minus pointer at press time, in DIP. The anchor is the card's
+    /// top-centre, the point the card swings around.
+    offset: (f32, f32),
+    press: (f32, f32),
+    pointer: (f32, f32),
+    /// The last horizontal direction the pointer moved, +1 right and -1 left.
+    /// The squeeze follows the drag, not which side of the press it is on, so
+    /// pulling back after a swap still squeezes the card on that side.
+    move_dir: i32,
+    moved: bool,
+    /// The last swap direction, +1 right and -1 left, and where the dragged
+    /// card was when it happened. The reverse swap only arms after the card
+    /// has retreated [`SWAP_REARM_DIP`] from this anchor.
+    swap_dir: i32,
+    swap_anchor: f32,
+    swap_since: Option<f64>,
+    cooldown_until: f64,
+}
+
 /// The line itself.
 pub struct Scene {
     width_dip: f32,
@@ -337,6 +598,13 @@ pub struct Scene {
     hover_action: Option<(CardId, ActionKind)>,
     pressed: Option<CardId>,
     dragging: Option<CardId>,
+    /// The clothespin the pointer is over. Kept separate from `hover`: the pin
+    /// is outside the card frame and needs its own highlight.
+    pin_hover: Option<CardId>,
+    /// The active pin drag. It is not `dragging`: `dragging` is the OLE drag
+    /// out of a card and must keep the frame loop asleep behind its modal
+    /// loop, while a pin drag runs at display rate and never blocks.
+    grab: Option<Grab>,
     copied: Option<CardId>,
     copied_until: f64,
     hint_alpha: f32,
@@ -349,6 +617,8 @@ pub struct Scene {
     copied_height: f32,
     snapshot: Arc<Mutex<FrameSnapshot>>,
     dirty: bool,
+    /// Optional CSV trace, opened only when `PEGLINE_PAPER_TRACE` is set.
+    trace: Option<PaperTrace>,
 }
 
 impl Scene {
@@ -382,6 +652,8 @@ impl Scene {
             hover_action: None,
             pressed: None,
             dragging: None,
+            pin_hover: None,
+            grab: None,
             copied: None,
             copied_until: 0.0,
             hint_alpha: 0.0,
@@ -392,6 +664,7 @@ impl Scene {
             copied_height,
             snapshot,
             dirty: true,
+            trace: PaperTrace::open(),
         };
         scene.publish(0.0);
         scene
@@ -409,10 +682,49 @@ impl Scene {
     /// until then. `None` means no timer is pending (hidden line, no cards, or
     /// a drag in progress).
     pub fn next_wake_in(&self, now: f64) -> Option<f64> {
-        if !self.visible || !self.revealed || self.cards.is_empty() || self.dragging.is_some() {
+        if !self.visible || !self.revealed {
+            return None;
+        }
+        // A pin drag runs at display rate: the pointer is sampled every frame
+        // and the card follows it, so the loop must never sleep until the
+        // grab ends. `Some(0.0)` asks for the next frame immediately.
+        if self.grab.is_some() {
+            return Some(0.0);
+        }
+        if self.cards.is_empty() || self.dragging.is_some() {
             return None;
         }
         Some((self.next_gust - now).max(0.001))
+    }
+
+    /// True while a pin drag owns the pointer. The render thread samples the
+    /// cursor while this holds.
+    pub fn grabbing(&self) -> bool {
+        self.grab.is_some()
+    }
+
+    /// Feeds the latest cursor sample, in window DIP, into the active drag.
+    /// Called from the render thread; it must not allocate or log.
+    pub fn set_pointer(&mut self, x: f32, y: f32, _now: f64) {
+        let Some(grab) = self.grab.as_mut() else {
+            return;
+        };
+        let step = x - grab.pointer.0;
+        if step.abs() > 0.5 {
+            let dir = if step > 0.0 { 1 } else { -1 };
+            if dir != grab.move_dir {
+                grab.move_dir = dir;
+                grab.swap_since = None;
+            }
+        }
+        grab.pointer = (x, y);
+        if !grab.moved {
+            let dx = x - grab.press.0;
+            let dy = y - grab.press.1;
+            if dx.abs() + dy.abs() > GRAB_DRAG_DIP {
+                grab.moved = true;
+            }
+        }
     }
 
     /// Debug summary of the cards, for the trace log.
@@ -450,9 +762,13 @@ impl Scene {
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
         if !visible {
+            // A hide must not leave the drag half alive: settle the card into
+            // its slot and let the release spring run when the line returns.
+            self.end_grab(0.0);
             self.hover = None;
             self.hover_action = None;
             self.pressed = None;
+            self.pin_hover = None;
             self.note_peek.snap(0.0);
             self.dirty = true;
         }
@@ -470,6 +786,7 @@ impl Scene {
                 if self.revealed != revealed {
                     self.revealed = revealed;
                     if !revealed {
+                        self.end_grab(now);
                         self.hide_t = -1.0;
                         // The peeking corner belongs to a line that is down; it
                         // must not pop back when the strip returns.
@@ -535,6 +852,12 @@ impl Scene {
                     if self.copied == Some(id) {
                         self.copied = None;
                     }
+                    if self.pin_hover == Some(id) {
+                        self.pin_hover = None;
+                    }
+                    if self.grab.as_ref().is_some_and(|grab| grab.id == id) {
+                        self.grab = None;
+                    }
                     self.relayout_cards();
                     self.dirty = true;
                 }
@@ -562,8 +885,19 @@ impl Scene {
                 if self.dragging != id {
                     self.dragging = id;
                     if id.is_some() {
+                        // An OLE drag-out owns the pointer; a pin drag cannot
+                        // also be running.
+                        self.end_grab(now);
                         self.hover_action = None;
                     }
+                    self.dirty = true;
+                }
+            }
+            Command::Grab { id, pointer } => self.begin_grab(id, pointer, now),
+            Command::EndGrab => self.end_grab(now),
+            Command::PinHover(id) => {
+                if self.pin_hover != id {
+                    self.pin_hover = id;
                     self.dirty = true;
                 }
             }
@@ -586,6 +920,10 @@ impl Scene {
                             // same landing sway from a known state.
                             card.opacity = 0.0;
                             card.swing.snap(0.0);
+                            card.pendulum.snap(0.0);
+                            card.flex.snap(0.0);
+                            card.last_vx = 0.0;
+                            card.last_vy = 0.0;
                             card.nudge_t = -1.0;
                             card.x.value = landing_x;
                             card.x.velocity = 0.0;
@@ -600,6 +938,9 @@ impl Scene {
                             // transparency dip.
                             card.opacity = 1.0;
                             card.x.velocity = 0.0;
+                            card.last_vx = 0.0;
+                            card.last_vy = 0.0;
+                            card.flex.snap(0.0);
                             card.nudge(2.2);
                         }
                         changed = true;
@@ -634,6 +975,248 @@ impl Scene {
             Command::WallpaperChanged => self.dirty = true,
             Command::SetFrameCap(_) | Command::Stop => {}
         }
+    }
+
+    /// The pin anchor in window DIP: the slot centre and the rope height at
+    /// the current x, plus the card's drop and the line's slide.
+    fn pin_window_pos(&self, card: &Card) -> (f32, f32) {
+        (
+            card.x.value,
+            layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE
+                + card.drop.value
+                + self.slide.value,
+        )
+    }
+
+    fn begin_grab(&mut self, id: CardId, pointer: (f32, f32), now: f64) {
+        let Some(index) = self.cards.iter().position(|card| card.id == id) else {
+            return;
+        };
+        {
+            let card = &self.cards[index];
+            if card.flying || card.rehang || !card.arrived || card.hop_t >= 0.0 {
+                return;
+            }
+        }
+        let pin = self.pin_window_pos(&self.cards[index]);
+        // A new grab supersedes any stale one; there is no animation to run
+        // because the old card never left the vector.
+        self.grab = None;
+        let card = &mut self.cards[index];
+        card.x.set_response(GRAB_RESPONSE, GRAB_DAMPING);
+        card.x.target = card.x.value;
+        card.drop
+            .set_response(GRAB_DROP_RESPONSE, GRAB_DROP_DAMPING);
+        card.pendulum.snap(0.0);
+        card.flex.snap(0.0);
+        card.last_vx = card.x.velocity;
+        card.last_vy = card.drop.velocity;
+        card.press.set_response(0.12, 1.0);
+        card.press.target = 1.0;
+        card.release_spring = false;
+        self.grab = Some(Grab {
+            id,
+            offset: (pin.0 - pointer.0, pin.1 - pointer.1),
+            press: pointer,
+            pointer,
+            move_dir: 0,
+            moved: false,
+            swap_dir: 0,
+            swap_anchor: card.x.value,
+            swap_since: None,
+            cooldown_until: now,
+        });
+        self.pin_hover = Some(id);
+        self.hover = None;
+        self.hover_action = None;
+        self.dirty = true;
+    }
+
+    pub fn end_grab(&mut self, _now: f64) {
+        let Some(grab) = self.grab.take() else {
+            return;
+        };
+        // A swap may have changed the vector order; the row settles into the
+        // new slots on the release spring. This is also the cancel path, so it
+        // must not rely on the pointer still being over anything.
+        self.relayout_cards();
+        if let Some(card) = self.cards.iter_mut().find(|card| card.id == grab.id) {
+            card.x.set_response(RELEASE_RESPONSE, RELEASE_DAMPING);
+            card.x.velocity = card.x.velocity.clamp(-600.0, 600.0);
+            card.drop.target = 0.0;
+            card.drop.set_response(0.42, 0.72);
+            card.press.set_response(0.3, 0.6);
+            card.press.target = 1.0;
+            // Keep the current pendulum angle and angular velocity: the
+            // release deceleration is what makes the card swing back.
+            card.pendulum.target = 0.0;
+            card.release_spring = true;
+        }
+        self.pin_hover = None;
+        self.dirty = true;
+    }
+
+    /// Turns the latest pointer sample into the dragged card's targets. The
+    /// pointer may not move the card outside the window: the card's half width
+    /// is the clamp, and the rubber band caps the drop at 26 DIP.
+    fn apply_grab_targets(&mut self, grab: &Grab) {
+        let half = layout::CARD_WIDTH * 0.5;
+        let target_x = (grab.pointer.0 + grab.offset.0).clamp(half, self.width_dip - half);
+        // `offset` was taken from the pin's window position, which includes the
+        // whole line's slide; cancel that here so a grab during the reveal does
+        // not add the slide to the card's own drop.
+        let rest_y =
+            layout::rope_y(target_x, self.width_dip) - layout::PIN_ABOVE + self.slide.value;
+        let raw = (grab.pointer.1 + grab.offset.1 - rest_y).max(0.0);
+        let drop_target = rubber_y(raw);
+        if let Some(card) = self.cards.iter_mut().find(|card| card.id == grab.id) {
+            card.x.target = target_x;
+            card.drop.target = drop_target;
+        }
+    }
+
+    /// Pushes the cards ahead of the dragged one and arms the swap when the
+    /// pre-collision penetration is held past the threshold.
+    fn update_contacts(&mut self, grab: &mut Grab, index: usize, now: f64) {
+        for card in &mut self.cards {
+            card.squeeze.target = 0.0;
+        }
+        let dir = grab.move_dir;
+        // Count the visible cards without collecting them: this runs every
+        // frame of a drag, so it must not allocate.
+        let visible = |card: &Card| !card.flying && !card.rehang;
+        if !visible(&self.cards[index]) {
+            grab.swap_since = None;
+            return;
+        }
+        let count = self.cards.iter().filter(|card| visible(card)).count();
+        let vpos = self.cards[..index]
+            .iter()
+            .filter(|card| visible(card))
+            .count();
+        if dir == 0 {
+            grab.swap_since = None;
+            return;
+        }
+        let (a_x, a_half) = (
+            self.cards[index].x.value,
+            self.cards[index].card_size.0 * 0.5,
+        );
+        // The front edge of the card just pushed; the next card tests against
+        // it. The first neighbour gets the full cap, the second a soft one.
+        let mut front = if dir > 0 { a_x + a_half } else { a_x - a_half };
+        let mut first_pen = 0.0;
+        let mut first_neighbour = None;
+        let mut cursor = index;
+        for hop in 0..2 {
+            let next = if dir > 0 {
+                (cursor + 1..self.cards.len()).find(|&i| visible(&self.cards[i]))
+            } else {
+                (0..cursor).rev().find(|&i| visible(&self.cards[i]))
+            };
+            let Some(j) = next else {
+                break;
+            };
+            cursor = j;
+            if hop == 0 {
+                first_neighbour = Some(j);
+            }
+            let card = &mut self.cards[j];
+            let position = if dir > 0 {
+                vpos + hop + 1
+            } else {
+                vpos - hop - 1
+            };
+            let slot = layout::slot_x(position, count, self.width_dip);
+            let cap = if hop == 0 {
+                SQUEEZE_CAP
+            } else {
+                SQUEEZE_CHAIN_CAP
+            };
+            let pen = if dir > 0 {
+                squeeze_push(front, slot, card.card_size.0, cap)
+            } else {
+                // Mirrored: the neighbour's right edge is in front of the
+                // dragged card's left edge, so penetration is right minus left.
+                (slot + card.card_size.0 * 0.5 - front).clamp(0.0, cap)
+            };
+            if hop == 0 {
+                first_pen = pen;
+            }
+            if dir > 0 {
+                card.x.target = slot + pen;
+                front = slot + pen + card.card_size.0 * 0.5;
+            } else {
+                card.x.target = slot - pen;
+                front = slot - pen - card.card_size.0 * 0.5;
+            }
+            // The neighbour leans away from the squeeze: a right push turns
+            // it counter-clockwise (negative degrees), a left push clockwise.
+            card.squeeze.target = -(pen / SQUEEZE_CAP) * SQUEEZE_ANGLE * dir as f32;
+        }
+
+        let Some(neighbour) = first_neighbour else {
+            grab.swap_since = None;
+            return;
+        };
+        if first_pen < SWAP_PENETRATION {
+            grab.swap_since = None;
+            return;
+        }
+        if now < grab.cooldown_until {
+            return;
+        }
+        // The reverse swap must wait until the dragged card has retreated far
+        // enough from the anchor of the previous swap; otherwise the two cards
+        // would trade places on every frame around the threshold.
+        if grab.swap_dir != 0 && dir == -grab.swap_dir {
+            let retreat = (a_x - grab.swap_anchor) * grab.swap_dir as f32;
+            if retreat > -SWAP_REARM_DIP {
+                return;
+            }
+        }
+        let since = grab.swap_since.get_or_insert(now);
+        if now - *since >= SWAP_DWELL {
+            self.do_swap(grab, index, neighbour, dir, now);
+        }
+    }
+
+    fn do_swap(&mut self, grab: &mut Grab, a_index: usize, b_index: usize, dir: i32, now: f64) {
+        let visible = |card: &Card| !card.flying && !card.rehang;
+        let count = self.cards.iter().filter(|card| visible(card)).count();
+        let vpos = self.cards[..a_index]
+            .iter()
+            .filter(|card| visible(card))
+            .count();
+        let slot = layout::slot_x(vpos, count, self.width_dip);
+        let a_x = self.cards[a_index].x.value;
+        let a_velocity = self.cards[a_index].x.velocity;
+        self.cards.swap(a_index, b_index);
+        // The neighbour takes the dragged card's old slot, pops towards it and
+        // hops a little; the dragged card keeps following the pointer and
+        // gets a recoil away from the card that just left.
+        let neighbour = &mut self.cards[a_index];
+        // Capture the pre-pop velocity so the next update's acceleration
+        // includes the whole impulse, not just the spring's own step.
+        neighbour.last_vx = neighbour.x.velocity;
+        neighbour.x.set_response(0.28, 0.75);
+        neighbour.x.target = slot;
+        neighbour.x.velocity = -(SWAP_POP_VELOCITY) * dir as f32;
+        neighbour.hop_t = 0.0;
+        // The pop uses a faster spring than the row; restore the row response
+        // once it has settled so later relayouts feel like every other card.
+        neighbour.release_spring = true;
+        let dragged = &mut self.cards[b_index];
+        dragged.last_vx = a_velocity;
+        dragged.x.velocity = a_velocity - SWAP_RECOIL_VELOCITY * dir as f32;
+        grab.swap_anchor = a_x;
+        grab.swap_dir = dir;
+        grab.swap_since = None;
+        grab.cooldown_until = now + SWAP_COOLDOWN;
+        for card in &mut self.cards {
+            card.squeeze.target = 0.0;
+        }
+        self.dirty = true;
     }
 
     fn relayout_cards(&mut self) {
@@ -679,9 +1262,16 @@ impl Scene {
                     // the row never moves.
                     card.opacity = 0.0;
                     card.swing.snap(0.0);
+                    card.pendulum.snap(0.0);
+                    card.flex.snap(0.0);
+                    card.last_vx = 0.0;
+                    card.last_vy = 0.0;
                     card.nudge_t = -1.0;
                 } else {
                     card.opacity = 1.0;
+                    card.last_vx = 0.0;
+                    card.last_vy = 0.0;
+                    card.flex.snap(0.0);
                     card.nudge(2.2);
                 }
                 self.dirty = true;
@@ -777,15 +1367,48 @@ impl Scene {
             self.gust(now);
         }
 
+        // The pin drag is integrated before the cards: its follow target comes
+        // from the render thread's latest sample, the squeeze targets from the
+        // row's current spring values, and a swap may reorder the vector before
+        // the cards step.
+        if let Some(mut grab) = self.grab.take() {
+            if let Some(index) = self.cards.iter().position(|card| card.id == grab.id) {
+                self.apply_grab_targets(&grab);
+                self.update_contacts(&mut grab, index, now);
+                self.grab = Some(grab);
+            }
+        }
+        let grab_id = self.grab.as_ref().map(|grab| grab.id);
+        let grab_moved = self.grab.as_ref().is_some_and(|grab| grab.moved);
+        let grab_dir = self.grab.as_ref().map(|grab| grab.swap_dir).unwrap_or(0);
+        let pin_hover = self.pin_hover;
         let hover = self.hover;
         let pressed = self.pressed;
         let dragging = self.dragging;
         let copied = self.copied;
+        // Take the trace out of `self` so the card loop can hold `cards`
+        // mutably without a second borrow of the scene.
+        let mut trace = self.trace.take();
         for card in self.cards.iter_mut() {
             let was = card.x.value;
             card.x.step(dt);
+            // Once the release spring has arrived, hand the card back to the
+            // slower row spring so later reflows feel like the rest of the row.
+            if card.release_spring && card.x.settled() {
+                card.x.set_response(ROW_RESPONSE, ROW_DAMPING);
+                card.release_spring = false;
+            }
             card.drop.step(dt);
-            let hovered = hover == Some(card.id) && dragging.is_none();
+            let last_vy = card.last_vy;
+            card.last_vy = card.drop.velocity;
+            let ay = if dt >= 0.001 {
+                ((card.drop.velocity - last_vy) / dt)
+                    .clamp(-PENDULUM_ACCEL_CLAMP, PENDULUM_ACCEL_CLAMP)
+            } else {
+                0.0
+            };
+            let grabbed_here = grab_id == Some(card.id);
+            let hovered = hover == Some(card.id) && dragging.is_none() && grab_id.is_none();
             let pressed_here = pressed == Some(card.id);
             let copying = copied == Some(card.id);
 
@@ -796,7 +1419,9 @@ impl Scene {
             } else {
                 card.press.set_response(0.3, 0.6);
             }
-            card.press.target = if pressed_here {
+            card.press.target = if grabbed_here {
+                1.0
+            } else if pressed_here {
                 0.95
             } else if hovered {
                 1.035
@@ -804,6 +1429,132 @@ impl Scene {
                 1.0
             };
             card.press.step(dt);
+
+            // The clothespin's own state. The card follows the pointer at full
+            // opacity while the pin shrinks slightly under the press, grows
+            // and glows on hover and settles at 1.08 while dragging.
+            let (pin_scale, pin_glow) = if grabbed_here {
+                if grab_moved {
+                    (PIN_DRAG_SCALE, PIN_DRAG_GLOW)
+                } else {
+                    (PIN_PRESS_SCALE, PIN_PRESS_GLOW)
+                }
+            } else if pin_hover == Some(card.id) {
+                (PIN_HOVER_SCALE, PIN_HOVER_GLOW)
+            } else {
+                (1.0, 0.0)
+            };
+            if grabbed_here {
+                card.pin_scale.set_response(0.12, 1.0);
+            } else {
+                card.pin_scale.set_response(0.16, 0.85);
+            }
+            card.pin_scale.target = pin_scale;
+            card.pin_glow.target = pin_glow;
+            card.pin_hot.target = if pin_hover == Some(card.id) || grabbed_here {
+                1.0
+            } else {
+                0.0
+            };
+            card.pin_scale.step(dt);
+            card.pin_glow.step(dt);
+            card.pin_hot.step(dt);
+
+            // The card is a damped pendulum hanging from the pin. Its natural
+            // frequency comes from its own effective length and the effective
+            // gravity at the pin: a pin accelerating downwards makes the card
+            // lighter, while the drop's vertical motion also excites a swing.
+            // The X spring's velocity difference keeps this frame-rate
+            // independent and needs no extra simulation state.
+            let last_vx = card.last_vx;
+            card.last_vx = card.x.velocity;
+            let ax = if dt >= 0.001 {
+                ((card.x.velocity - last_vx) / dt)
+                    .clamp(-PENDULUM_ACCEL_CLAMP, PENDULUM_ACCEL_CLAMP)
+            } else {
+                0.0
+            };
+            let g_eff = (GRAVITY_DIP - ay).clamp(GRAVITY_DIP * 0.25, GRAVITY_DIP * 1.75);
+            card.pendulum
+                .set_omega((g_eff / card.pendulum_length).sqrt());
+            let swinging = grabbed_here || card.hop_t >= 0.0 || card.release_spring;
+            card.pendulum.target = if swinging
+                && !card.flying
+                && !card.rehang
+                && card.arrived
+                && ax.abs() > PENDULUM_DEADZONE
+            {
+                (ax / g_eff)
+                    .atan()
+                    .to_degrees()
+                    .clamp(-PENDULUM_MAX_DEG, PENDULUM_MAX_DEG)
+            } else {
+                0.0
+            };
+            // Still air resists the card's own translation: the point halfway
+            // down the card moves with the pin plus the rotation, and the drag
+            // there is a torque about the pin. It is a force, not a target, so
+            // a card dragged at constant speed keeps a small backward tilt.
+            let wind = if swinging && !card.flying && !card.rehang && card.arrived {
+                relative_wind(
+                    card.pendulum.angle,
+                    card.pendulum.velocity,
+                    card.x.velocity,
+                    card.drop.velocity,
+                    card.card_size.1,
+                    card.wind_gain,
+                )
+            } else {
+                0.0
+            };
+            card.pendulum.step_with(dt, wind);
+            // A paper card's bottom edge lags the pin by a small shear. This
+            // is visual only; hit testing still uses the rigid angle.
+            card.flex.target = if card.flying || card.rehang {
+                0.0
+            } else {
+                (card.pendulum.velocity * FLEX_GAIN).clamp(-FLEX_MAX_DEG, FLEX_MAX_DEG)
+            };
+            card.flex.step(dt);
+            if trace.is_some() {
+                let row = TraceRow {
+                    t: now,
+                    id: card.id,
+                    grabbed: grabbed_here,
+                    hop: card.hop_t >= 0.0,
+                    release: card.release_spring,
+                    x: card.x.value,
+                    vx: card.x.velocity,
+                    drop: card.drop.value,
+                    vy: card.drop.velocity,
+                    angle: card.pendulum.angle,
+                    omega: card.pendulum.velocity,
+                    target: card.pendulum.target,
+                    ax,
+                    ay,
+                    g_eff,
+                    wind,
+                    flex: card.flex.value,
+                    swap_dir: grab_dir,
+                };
+                let failed = if let Some(writer) = trace.as_mut() {
+                    writer.row(&row).is_err()
+                } else {
+                    false
+                };
+                if failed {
+                    trace = None;
+                }
+            }
+            // The squeeze target was written by `update_contacts`; the spring
+            // advances here so the neighbour lags the push by ~80 ms.
+            card.squeeze.step(dt);
+            if card.hop_t >= 0.0 {
+                card.hop_t = (card.hop_t + dt / SWAP_HOP_SECONDS).min(1.0);
+                if card.hop_t >= 1.0 {
+                    card.hop_t = -1.0;
+                }
+            }
 
             // Fade-in follows the drop; a card only becomes visible once it has
             // arrived, and a card in flight is drawn by the flight window.
@@ -841,6 +1592,13 @@ impl Scene {
                 || (card.cross_alpha - if hovered { 1.0 } else { 0.0 }).abs() > 0.002
                 || (card.actions_alpha - if show_actions { 1.0 } else { 0.0 }).abs() > 0.002
                 || (card.copied_alpha - if copying { 1.0 } else { 0.0 }).abs() > 0.002
+                || !card.pin_scale.settled()
+                || !card.pin_glow.settled()
+                || !card.pin_hot.settled()
+                || !card.pendulum.settled()
+                || !card.flex.settled()
+                || !card.squeeze.settled()
+                || card.hop_t >= 0.0
                 || (card.x.value - was).abs() > 0.001;
             if (card.x.value - was).abs() > 0.01 {
                 self.dirty = true;
@@ -850,6 +1608,7 @@ impl Scene {
         if animating || self.dirty {
             self.publish(now);
         }
+        self.trace = trace;
         animating || self.dirty
     }
 
@@ -874,6 +1633,9 @@ impl Scene {
         // The UI keeps the entry hotspot under the drawn corner; the corner
         // glides with the row while a card is removed or added.
         snapshot.note_entry_x = self.note_entry_center().map(|_| self.note_peek_x.value);
+        snapshot.grabbing = self.grab.is_some();
+        snapshot.order.clear();
+        snapshot.order.extend(self.cards.iter().map(|card| card.id));
         snapshot.cards.clear();
         snapshot.cards.reserve(self.cards.len());
         for card in &self.cards {
@@ -888,6 +1650,7 @@ impl Scene {
             // rope height, the drop offset and the slide.
             let slot_top = layout::rope_y(slot_center, self.width_dip) - layout::PIN_ABOVE
                 + card.drop.value
+                + card.hop_offset()
                 + self.slide.value;
             let frame = card.frame_rect(slot_left).offset(0.0, slot_top);
             // The card is drawn rotated about its pin, the clothespin at the
@@ -896,7 +1659,9 @@ impl Scene {
             // and are in the same frame, so hit testing undoes the rotation
             // about this point before testing them.
             let pin = (slot_center, slot_top);
-            let hovered = self.hover == Some(card.id) && self.dragging.is_none();
+            let grabbed = self.grab.as_ref().is_some_and(|grab| grab.id == card.id);
+            let hovered =
+                self.hover == Some(card.id) && self.dragging.is_none() && self.grab.is_none();
             let actions_layout = self.actions_for(card.note);
             let actions = if hovered {
                 card.actions_rect(slot_left, actions_layout)
@@ -918,6 +1683,7 @@ impl Scene {
             let swatches = if card.note
                 && self.hover == Some(card.id)
                 && self.dragging.is_none()
+                && self.grab.is_none()
                 && card.actions_alpha > 0.01
             {
                 card.swatch_rects(slot_left)
@@ -933,8 +1699,13 @@ impl Scene {
                 primary_action,
                 open_button,
                 note: card.note,
-                angle: card.swing.value + card.tilt,
+                angle: card.swing.value + card.tilt + card.pendulum.angle + card.squeeze.value,
                 pin,
+                pin_box: RectF::new(pin.0 - 10.0, pin.1 - 4.0, pin.0 + 10.0, pin.1 + 30.0),
+                // A card in flight is drawn by the flight window, and the card
+                // already in hand must not swallow a second press.
+                pin_ready: card.arrived && !grabbed && card.hop_t < 0.0,
+                dragged: grabbed,
                 swatches,
             });
         }
@@ -967,9 +1738,9 @@ mod tests {
             32.0,
             std::sync::Arc::clone(&snapshot),
         );
-        // The line is part-way up, the card leans and swings: the pin must
-        // carry the slot, the drop and the slide, and the angle the lean and
-        // the swing, or the hit boxes drift away from the card.
+        // The line is part-way up, the card swings: the pin must carry the
+        // slot, the drop and the slide, and the angle the pendulum and the
+        // swing, or the hit boxes drift away from the card.
         scene.slide.value = -37.0;
         let mut item = card();
         item.tilt = 2.5;
@@ -1469,5 +2240,248 @@ mod tests {
             ),
             Some((2, ActionKind::Copy))
         );
+    }
+
+    #[test]
+    fn the_rubber_band_is_linear_then_soft_and_capped() {
+        assert_eq!(rubber_y(-4.0), 0.0);
+        assert_eq!(rubber_y(0.0), 0.0);
+        assert_eq!(rubber_y(18.0), 18.0);
+        assert!((rubber_y(28.0) - 20.2).abs() < 1e-3);
+        assert_eq!(rubber_y(400.0), 26.0);
+    }
+
+    #[test]
+    fn squeeze_push_is_the_penetration_clamped_to_the_cap() {
+        // The neighbour's left edge is at 1059; the dragged card's right edge
+        // at 1000 leaves a gap, so there is nothing to push.
+        assert_eq!(squeeze_push(1000.0, 1134.0, 150.0, 34.0), 0.0);
+        // 10 DIP of penetration pushes by exactly 10.
+        assert_eq!(squeeze_push(1069.0, 1134.0, 150.0, 34.0), 10.0);
+        // Deep penetration is capped instead of shoving the row off screen.
+        assert_eq!(squeeze_push(1135.0, 1134.0, 150.0, 34.0), 34.0);
+    }
+
+    fn three_cards() -> (
+        Scene,
+        std::sync::Arc<std::sync::Mutex<crate::types::FrameSnapshot>>,
+    ) {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            crate::render::ActionsLayout::default(),
+            32.0,
+            std::sync::Arc::clone(&snapshot),
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.snap(0.0);
+        for (index, id) in [1u64, 2, 3].into_iter().enumerate() {
+            let mut item = card();
+            item.id = id;
+            item.x.value = layout::slot_x(index, 3, 1920.0);
+            item.x.target = item.x.value;
+            item.drop.snap(0.0);
+            scene.cards.push(item);
+        }
+        (scene, snapshot)
+    }
+
+    #[test]
+    fn a_grab_during_the_reveal_does_not_add_the_slide_to_the_drop() {
+        let (mut scene, _) = three_cards();
+        scene.slide.value = -30.0;
+        scene.cards[1].drop.value = 0.0;
+        let pin = scene.pin_window_pos(&scene.cards[1]);
+        scene.begin_grab(2, pin, 0.0);
+        let grab = scene.grab.take().expect("grab");
+        scene.apply_grab_targets(&grab);
+        assert_eq!(
+            scene.cards[1].drop.target, 0.0,
+            "the line's slide is not part of the card's drop"
+        );
+    }
+
+    #[test]
+    fn a_right_pull_squeezes_then_swaps_and_publishes_the_new_order() {
+        let (mut scene, snapshot) = three_cards();
+        scene.begin_grab(2, (960.0, 30.0), 0.0);
+        scene.set_pointer(1060.0, 30.0, 0.0);
+        let mut grab = scene.grab.take().expect("grab");
+        grab.pointer = (1060.0, 30.0);
+        scene.cards[1].x.value = 1060.0;
+
+        scene.update_contacts(&mut grab, 1, 100.0);
+        assert_eq!(scene.cards[1].id, 2, "the 60 ms dwell has not elapsed");
+        assert!(
+            scene.cards[2].x.target > 1134.0,
+            "the right neighbour is pushed, target={}",
+            scene.cards[2].x.target
+        );
+
+        scene.update_contacts(&mut grab, 1, 100.07);
+        scene.grab = Some(grab);
+        scene.publish(100.1);
+
+        assert_eq!(scene.cards[1].id, 3);
+        assert_eq!(scene.cards[2].id, 2);
+        assert!(scene.cards[1].hop_t >= 0.0, "the neighbour hops off");
+        assert!(scene.cards[2].x.velocity < 0.0, "the dragged card recoils");
+        assert_eq!(snapshot.lock().unwrap().order, vec![1, 3, 2]);
+
+        // The pop is a real velocity impulse: the neighbour must swing, not
+        // just slide. The acceleration is read from the X spring after the
+        // swap, so one update is enough to seed the pendulum.
+        scene.update(1.0 / 60.0, 100.12);
+        let neighbour = &scene.cards[1];
+        assert!(
+            neighbour.pendulum.angle.abs() > 0.05 || neighbour.pendulum.velocity.abs() > 0.05,
+            "the popped neighbour swings: angle={} velocity={}",
+            neighbour.pendulum.angle,
+            neighbour.pendulum.velocity
+        );
+    }
+
+    #[test]
+    fn a_left_pull_squeezes_the_left_neighbour_and_swaps() {
+        let (mut scene, _) = three_cards();
+        scene.begin_grab(2, (960.0, 30.0), 0.0);
+        scene.set_pointer(860.0, 30.0, 0.0);
+        let mut grab = scene.grab.take().expect("grab");
+        grab.pointer = (860.0, 30.0);
+        scene.cards[1].x.value = 860.0;
+
+        scene.update_contacts(&mut grab, 1, 100.0);
+        assert_eq!(scene.cards[0].id, 1);
+        assert!(
+            scene.cards[0].x.target < 786.0,
+            "the left neighbour is pushed, target={}",
+            scene.cards[0].x.target
+        );
+
+        scene.update_contacts(&mut grab, 1, 100.07);
+        scene.grab = Some(grab);
+
+        assert_eq!(scene.cards[0].id, 2);
+        assert_eq!(scene.cards[1].id, 1);
+        assert!(scene.cards[1].x.velocity > 0.0, "the neighbour pops right");
+    }
+
+    #[test]
+    fn the_pendulum_swings_with_acceleration_and_settles() {
+        let (mut scene, _) = three_cards();
+        scene.begin_grab(2, (960.0, 30.0), 0.0);
+        scene.set_pointer(1000.0, 30.0, 0.0);
+        scene.update(1.0 / 60.0, 0.016);
+        assert!(
+            scene.cards[1].pendulum.angle > 0.0,
+            "rightward acceleration tips the bottom left, angle={}",
+            scene.cards[1].pendulum.angle
+        );
+        for frame in 1..6 {
+            scene.update(1.0 / 60.0, 0.016 * (frame + 1) as f64);
+        }
+        let card = &scene.cards[1];
+        assert!(
+            card.pendulum.angle.abs() > 0.05 || card.pendulum.velocity.abs() > 0.05,
+            "the grab acceleration should tip the card: angle={} velocity={}",
+            card.pendulum.angle,
+            card.pendulum.velocity
+        );
+        assert!(
+            card.flex.value.abs() > 0.01,
+            "the bottom edge lags the swing, flex={}",
+            card.flex.value
+        );
+
+        scene.end_grab(1.0);
+        for frame in 0..240 {
+            scene.update(1.0 / 60.0, 1.0 + frame as f64 / 60.0);
+        }
+        assert!(
+            scene.cards[1].pendulum.settled(),
+            "the swing damps out, angle={} velocity={}",
+            scene.cards[1].pendulum.angle,
+            scene.cards[1].pendulum.velocity
+        );
+        assert!(
+            scene.cards[1].flex.settled(),
+            "the shear settles with the swing, flex={}",
+            scene.cards[1].flex.value
+        );
+    }
+
+    #[test]
+    fn a_downward_drop_makes_the_pendulum_lighter_and_slower() {
+        let (mut level, _) = three_cards();
+        let (mut dropped, _) = three_cards();
+        for scene in [&mut level, &mut dropped] {
+            scene.begin_grab(2, (960.0, 30.0), 0.0);
+            let card = &mut scene.cards[1];
+            card.pendulum.angle = 3.0;
+            card.pendulum.velocity = 0.0;
+            card.drop.value = 0.0;
+            card.drop.velocity = 0.0;
+            card.drop.target = 0.0;
+        }
+        // The card above the rope accelerates downwards; the pin's effective
+        // gravity is lower, so the same 3° displacement restores more slowly.
+        dropped.cards[1].drop.value = -20.0;
+        level.update(1.0 / 60.0, 0.016);
+        dropped.update(1.0 / 60.0, 0.016);
+        assert!(
+            dropped.cards[1].pendulum.angle.abs() > level.cards[1].pendulum.angle.abs(),
+            "the dropping card swings slower: dropped={} level={}",
+            dropped.cards[1].pendulum.angle,
+            level.cards[1].pendulum.angle
+        );
+    }
+
+    #[test]
+    fn the_swap_hop_is_a_small_six_dip_bump() {
+        assert_eq!(SWAP_HOP_DIP, 6.0);
+        let mut item = card();
+        item.hop_t = 0.5;
+        assert!(
+            (item.hop_offset() + 6.0).abs() < 1e-4,
+            "peak={}",
+            item.hop_offset()
+        );
+    }
+
+    #[test]
+    fn a_tall_card_has_more_paper_drag_than_a_wide_one() {
+        let wide = paper_coefficients((144.0, 96.0));
+        let tall = paper_coefficients((80.0, 140.0));
+        assert!(
+            tall.damping > wide.damping,
+            "tall damping={} wide={}",
+            tall.damping,
+            wide.damping
+        );
+        assert!(
+            tall.drag > wide.drag,
+            "tall drag={} wide={}",
+            tall.drag,
+            wide.drag
+        );
+        assert!(
+            tall.wind_gain > wide.wind_gain,
+            "tall wind={} wide={}",
+            tall.wind_gain,
+            wide.wind_gain
+        );
+    }
+
+    #[test]
+    fn relative_wind_follows_the_direction_of_travel() {
+        let right = relative_wind(0.0, 0.0, 500.0, 0.0, 100.0, 1.0e-5);
+        let left = relative_wind(0.0, 0.0, -500.0, 0.0, 100.0, 1.0e-5);
+        assert!(right > 0.0, "rightward wind={right}");
+        assert!(left < 0.0, "leftward wind={left}");
+        assert_eq!(relative_wind(0.0, 0.0, 0.0, 0.0, 100.0, 1.0e-5), 0.0);
     }
 }

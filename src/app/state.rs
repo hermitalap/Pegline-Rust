@@ -46,6 +46,16 @@ pub(super) struct LineState {
     pub(super) note_hotspot_hovered: bool,
     pub(super) note_pin: bool,
     pub(super) pressed: Option<Press>,
+    /// The card whose clothespin is held. Separate from `pressed` on purpose:
+    /// a pin drag must never become an OLE drag, a long press or a click.
+    pub(super) pin_press: Option<CardId>,
+    /// The clothespin under the pointer; the card itself stays unhovered so
+    /// its action pills and the hover preview do not appear.
+    pub(super) pin_hover: Option<CardId>,
+    /// The grab was released but the scene has not yet published the final
+    /// order (or the render thread has not ended the grab). The next tick
+    /// applies the order to `line.items` and saves it once.
+    pub(super) pending_order: bool,
     /// Last click, for double-click detection.
     pub(super) last_click: Option<(f64, CardId)>,
     /// The hover preview's cross-fade state.

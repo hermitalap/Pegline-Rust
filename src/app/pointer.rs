@@ -18,7 +18,7 @@ use super::{
 use crate::layout;
 use crate::logging;
 use crate::scene::Command;
-use crate::types::ActionKind;
+use crate::types::{ActionKind, CardId};
 use crate::win32;
 use crate::window::overlay::Overlay;
 
@@ -100,6 +100,12 @@ impl super::App {
             self.cancel_note_hover();
         }
         self.hide_preview();
+        // The clothespin is the card's reorder handle and must win over the
+        // band click, the swatches, the action pills and the OLE drag path.
+        if let Some(id) = self.pin_at(x, y) {
+            self.begin_pin_press(id, x, y, now);
+            return;
+        }
         self.on_band_click(x, y);
         if let Some((id, color)) = self.swatch_at(x, y) {
             self.set_note_color(id, color);
@@ -144,6 +150,13 @@ impl super::App {
     }
 
     pub(super) fn on_left_up(&mut self, x: i32, y: i32, now: f64) {
+        // A pin press is a reorder, never a click: releasing inside the slop
+        // still settles the card back and does nothing else.
+        if let Some(id) = self.state.pin_press {
+            self.finish_pin_press();
+            logging::trace(format!("pin release {id} at {x},{y}"));
+            return;
+        }
         let Some(press) = self.state.pressed.take() else {
             return;
         };
@@ -218,6 +231,9 @@ impl super::App {
     }
 
     pub(super) fn on_right_down(&mut self, x: i32, y: i32) {
+        if self.state.pin_press.is_some() {
+            return;
+        }
         if self.windows.note_editor.is_some() || self.windows.editor.is_some() {
             return;
         }
@@ -225,6 +241,9 @@ impl super::App {
         self.on_band_click(x, y);
     }
     pub(super) fn on_right_up(&mut self, x: i32, y: i32) {
+        if self.state.pin_press.is_some() {
+            return;
+        }
         let Some((id, _)) = self.hit_test_exact(x, y) else {
             return;
         };
@@ -287,6 +306,12 @@ impl super::App {
             .map(|current| current.handle != screen.handle || current.dpi != screen.dpi)
             .unwrap_or(true);
         if screen_changed && self.state.is_revealed {
+            // The card under the cursor is about to be re-placed on another
+            // monitor or at another scale; a drag cannot survive that because
+            // the pin's window coordinates changed underneath it.
+            if self.state.pin_press.is_some() {
+                self.finish_pin_press();
+            }
             self.place_on_screen(screen);
         }
 
@@ -301,6 +326,14 @@ impl super::App {
 
         let blocked = win32::foreground_is_fullscreen_on(screen.bounds);
         let button_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+
+        // The render thread follows the pointer and ends the grab itself when
+        // the button is up; this is the UI-side mirror of that fallback. A
+        // hidden line can no longer be grabbed, so release it too.
+        if self.state.pin_press.is_some() && (!button_down || !self.state.is_revealed) {
+            self.finish_pin_press();
+        }
+        let pin_held = self.state.pin_press.is_some();
 
         // The line may already be down when a full screen app comes forward
         // (video, game, slideshow). Take it away instead of waiting for the
@@ -343,6 +376,7 @@ impl super::App {
             let busy = self.state.pinned
                 || self.state.note_pin
                 || self.settings.line_always()
+                || pin_held
                 || self.state.pressed.is_some()
                 || self.windows.menu_open
                 || now < self.state.peek_until
@@ -358,8 +392,25 @@ impl super::App {
             }
         }
 
-        // Hover and click-through.
-        let hover = if self.state.is_revealed
+        // Hover and click-through. A pin under the pointer owns the hover:
+        // the card does not lift, its buttons do not appear and the 0.35 s
+        // preview does not start while the pin is lit.
+        let pin_hover = if self.state.is_revealed
+            && !pin_held
+            && self.windows.note_editor.is_none()
+            && self.windows.editor.is_none()
+        {
+            self.pin_at(x, y)
+        } else {
+            None
+        };
+        if self.state.pin_hover != pin_hover {
+            self.state.pin_hover = pin_hover;
+            self.send_scene(Command::PinHover(pin_hover));
+        }
+        let hover = if !pin_held
+            && pin_hover.is_none()
+            && self.state.is_revealed
             && self.windows.note_editor.is_none()
             && self.windows.editor.is_none()
         {
@@ -374,7 +425,8 @@ impl super::App {
         // The hover buttons light up individually. The scene only publishes
         // their boxes while the card is hovered, so this is None the rest of
         // the time.
-        let hover_action = if self.state.is_revealed
+        let hover_action = if !pin_held
+            && self.state.is_revealed
             && self.windows.note_editor.is_none()
             && self.windows.editor.is_none()
         {
@@ -395,9 +447,11 @@ impl super::App {
             overlay.set_hand_cursor(
                 hover_action.is_some()
                     || on_swatch
+                    || pin_hover.is_some()
                     || self.state.note_hotspot_hovered
                     || self.state.note_hover.is_some(),
             );
+            overlay.set_drag_cursor(pin_held);
         }
         if let Some(press) = self.state.pressed.as_mut() {
             let scale = self
@@ -437,8 +491,74 @@ impl super::App {
         };
         let pass = self.state.hover.is_none()
             && self.state.pressed.is_none()
+            && self.state.pin_press.is_none()
+            && self.state.pin_hover.is_none()
             && !self.state.note_hotspot_hovered
             && self.state.note_hover.is_none();
         overlay.set_click_through(pass);
+    }
+
+    /// The clothespin under the pointer, in window DIP. Only an arrived,
+    /// published pin is draggable.
+    pub(super) fn pin_at(&self, x: i32, y: i32) -> Option<CardId> {
+        if !self.state.is_revealed {
+            return None;
+        }
+        let (dip_x, dip_y) = self.to_window_dip(x, y);
+        if !dip_x.is_finite() || !dip_y.is_finite() {
+            return None;
+        }
+        let overlay = self.windows.overlay.as_ref()?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        snapshot.pin_at(dip_x, dip_y)
+    }
+
+    fn begin_pin_press(&mut self, id: CardId, x: i32, y: i32, now: f64) {
+        let (dip_x, dip_y) = self.to_window_dip(x, y);
+        if !dip_x.is_finite() || !dip_y.is_finite() {
+            return;
+        }
+        // A pin click must not pair with an earlier card click into a double
+        // click, and must never arm the long press or the OLE drag.
+        self.state.last_click = None;
+        self.state.pin_press = Some(id);
+        self.state.pin_hover = Some(id);
+        if self.state.hover.take().is_some() {
+            self.send_scene(Command::Hover(None));
+        }
+        if self.state.hover_action.take().is_some() {
+            self.send_scene(Command::HoverAction(None));
+        }
+        self.state.pressed = None;
+        self.send_scene(Command::Press(None));
+        // The press may have landed on a card whose 0.35 s preview was about
+        // to appear; kill it before the grab starts so nothing pops up below
+        // the card while it is being dragged.
+        self.hide_preview();
+        self.state.preview_state.reset();
+        self.send_scene(Command::Grab {
+            id,
+            pointer: (dip_x, dip_y),
+        });
+        if let Some(overlay) = self.windows.overlay.as_mut() {
+            overlay.set_click_through(false);
+            overlay.set_hand_cursor(false);
+            overlay.set_drag_cursor(true);
+        }
+        logging::trace(format!("pin press {id} at {x},{y} ({now:.3})"));
+    }
+
+    fn finish_pin_press(&mut self) {
+        if self.state.pin_press.take().is_none() {
+            return;
+        }
+        self.state.pin_hover = None;
+        self.state.pending_order = true;
+        self.send_scene(Command::PinHover(None));
+        self.send_scene(Command::EndGrab);
+        if let Some(overlay) = self.windows.overlay.as_ref() {
+            overlay.set_drag_cursor(false);
+        }
     }
 }

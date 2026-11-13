@@ -24,6 +24,7 @@ generated for the recording. [Animated WebP](docs/demo/pegline-demo.webp) (1.7 M
 | Click a picture | Copies it; a check confirms |
 | Click a note | Opens the Markdown editor |
 | Hover a picture, choose **Annotate** | Draw, then save back to the line |
+| Drag a card's clothespin | Reorders the line with a springy squeeze |
 
 The line stays out of the way: it is always on top, click-through everywhere
 except a card, and never takes focus from what you are doing. There is no
@@ -64,8 +65,8 @@ raw numbers are in [PLAN.md](PLAN.md) §3.3 and §11.
 
 ## Get Pegline
 
-Pegline runs on Windows 10 and 11 (x64). The current release is **2.5.1**
-(2026-11-12); see [docs/RELEASE-2.5.1.md](docs/RELEASE-2.5.1.md).
+Pegline runs on Windows 10 and 11 (x64). The current release is **2.6.1**
+(2026-11-13); see [docs/RELEASE-2.6.1.md](docs/RELEASE-2.6.1.md).
 
 1. Download the portable zip from the [Releases page](https://github.com/2829632740/Pegline/releases),
    or build the package with `pwsh tools\package-release.ps1`.
@@ -123,12 +124,13 @@ a UI language. Stress the capture pipeline with
 | | |
 |:--|:--|
 | [PLAN.md](PLAN.md) | milestones, performance budget, measurements, next steps |
-| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.5.1 and earlier |
-| [docs/RELEASE-2.5.1.md](docs/RELEASE-2.5.1.md) | current release notes and checksum |
+| [CHANGELOG.md](CHANGELOG.md) | what changed in 2.6.1 and earlier |
+| [docs/RELEASE-2.6.1.md](docs/RELEASE-2.6.1.md) | current release notes |
 | [docs/BEHAVIOR.md](docs/BEHAVIOR.md) | the complete behavioural spec |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | target architecture |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | implementation choices and rejected optimisations |
 | [docs/VISUAL-TESTS.md](docs/VISUAL-TESTS.md) | visual acceptance evidence |
+| [docs/PAPER-TUNING.md](docs/PAPER-TUNING.md) | paper-physics trace, plot and parameter tuning |
 | [docs/PARITY.md](docs/PARITY.md) | acceptance checklist for the port |
 | [AGENTS.md](AGENTS.md) | working notes for agents |
 

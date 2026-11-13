@@ -1,3 +1,61 @@
+## 2.6.1 — 2026-11-13
+
+### Fixes
+
+- **The bottom hover preview no longer appears while a clothespin is held.**
+  When the pin takes the pointer, the UI stops reporting a card hover, clears
+  any pending preview and ignores a preview decode that finishes mid-drag; the
+  0.35 s preview starts again only after the button is released. This also
+  removes the stale preview that could stay visible underneath the dragged
+  card. The pin gesture itself is unchanged.
+
+## 2.6.0 — 2026-11-13
+
+### Features
+
+- **Drag a card by its clothespin.** Hovering the pin scales it to 1.12, adds a
+  warm white glow and brightens the metal; holding the left button drags the
+  card with a 0.075 s spring, an inertial release and a downward-only rubber
+  band on Y (linear to 18 DIP, then 0.22x, capped at 26). The pin shrinks to
+  0.94 while pressed and tracks at 1.08
+  while dragging; a click shorter than 4 DIP is a no-op.
+- **The right neighbour is squeezed and swapped.** The card ahead of the drag
+  is pushed by the pre-collision penetration (34 DIP cap, 10 for a second card)
+  and rotates up to 3 degrees. At 28 DIP for 60 ms the two cards swap slots:
+  the neighbour springs left at 260 DIP/s with a 6 DIP hop, the dragged card
+  recoils at 160 DIP/s and keeps following the pointer, so it floats over its
+  neighbour until release. A 180 ms cooldown and a 43 DIP re-arm prevent
+  chattering; dragging left mirrors the whole behaviour.
+- **The cards swing like paper, not like an iron block.** Each card gets its
+  own effective pendulum length from its size (`L_eff=(w²/12+h²/3)/(h/2)`,
+  60–220 DIP), so a landscape photo, a portrait photo, a square and a note have
+  different periods. A hand-written integrator uses linear damping 1.116 plus
+  quadratic air drag 0.279 (aspect-ratio scaled: a tall card gets 1.550/0.589);
+  horizontal acceleration drives the angle (atan(a_x / g_eff), ±6 degrees), and
+  the Y drop also excites it by changing the effective gravity. A ±1.2 degree
+  shear, driven by the angular velocity, bends the card slightly around the
+  pin. A normal stop or swap now gives one visible overshoot and settles within
+  about half a second instead of ringing two or three times; the CSV trace counts the
+  small-angle ring separately. The popped neighbour gets the same sway from its
+  260 DIP/s impulse; the 6 DIP hop is only a hint, not a jump.
+- **Paper picks up air drag.** Each card's linear damping, quadratic drag and
+  wind gain now scale with its aspect ratio (a tall card gets 1.550/0.589 and a
+  stronger wind gain); a relative-wind torque at the centre of pressure
+  (`Q=wind_gain·|v_p|·(v_p·(cosθ,sinθ))·r`) tilts a card back while it moves.
+  `PEGLINE_PAPER_TRACE` writes a per-frame CSV; `tools/paper-trace.ps1` drives a
+  demo drag and `tools/paper-plot.py` plots angle/target, angular and linear
+  velocity with peak/zero-crossing/settle metrics. The earlier 0.45/0.05 baseline
+  was 5.50°, 7 crossings (including small-angle ring) and 817 ms to settle; the
+  stronger-air preset is tuned with `tools/paper-sim.html` and by hand.
+- **The order persists.** On release the UI thread reorders `line.items` from
+  the scene snapshot and writes `pegged.txt` only when the order changed,
+  playing `Tink` once. Pin hover owns the card's hover state, so hovering the
+  pin does not show the action pills or the large preview.
+- The pin glow is baked once at startup and on DPI changes; each frame adds one
+  bitmap blit. Measured at 200% DPI: 59.88–60.16 fps, draw p50 0.585–0.701 ms,
+  private 96.9–98.9 MB (HEAD baseline 60.10/60.06 fps, 0.658/0.660 ms, 97.1–97.4 MB);
+  255 lib + 1 main tests pass (1 ignored).
+
 ## 2.5.1 — 2026-11-12
 
 ### Changes

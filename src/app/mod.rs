@@ -966,6 +966,7 @@ impl App {
         }
         self.drain_mouse(now);
         self.update_pointer(now);
+        self.sync_pin_order();
         self.update_resident();
         self.update_note_entry(now);
         self.update_timers(now);
@@ -1963,10 +1964,20 @@ impl App {
         if self.state.note_hover.is_some() {
             return;
         }
+        // A held clothespin owns the pointer for the whole reorder gesture.
+        // The render thread keeps the card following the cursor, but the UI
+        // hover must stay empty until the button is released, otherwise the
+        // bottom preview can pop up underneath the drag.
+        if self.state.pin_press.is_some() {
+            self.hide_preview();
+            self.state.preview_state.reset();
+            return;
+        }
         let wanted = self.state.hover.filter(|id| {
             self.state.is_present
                 && self.state.is_revealed
                 && self.state.pressed.is_none()
+                && self.state.pin_press.is_none()
                 && !self.windows.menu_open
                 && self.line.items.iter().any(|item| item.id == *id)
         });
@@ -2084,7 +2095,10 @@ impl App {
         bounds: RectI,
         dpi: u32,
     ) {
-        if !self.state.preview_state.is_current(version) || self.state.hover != Some(id) {
+        if !self.state.preview_state.is_current(version)
+            || self.state.hover != Some(id)
+            || self.state.pin_press.is_some()
+        {
             return;
         }
         let Some(item) = self.line.items.iter().find(|item| item.id == id) else {

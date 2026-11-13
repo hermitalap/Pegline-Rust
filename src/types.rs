@@ -262,6 +262,17 @@ pub struct HitCard {
     /// top of the frame. The card is drawn swung about this point, so the hit
     /// tests turn the pointer back around it.
     pub pin: (f32, f32),
+    /// The clothespin's grab box in the card's own frame: 20 DIP wide and 34
+    /// DIP tall, reaching 4 DIP above the pin and 30 below it. It is tested
+    /// after [`HitCard::in_card_frame`], so it swings with the card.
+    pub pin_box: RectF,
+    /// False while the card is in flight, held by the flight window, or being
+    /// dragged; a pin that cannot be grabbed must not swallow a click.
+    pub pin_ready: bool,
+    /// True while this card is the one the pin drag is moving. The scene
+    /// publishes it so the UI can keep the pointer captured and the order
+    /// pending.
+    pub dragged: bool,
     /// The four colour dots, in colour order; empty unless the note is hovered.
     pub swatches: [RectF; 4],
 }
@@ -280,6 +291,13 @@ pub struct FrameSnapshot {
     /// so the invisible hotspot glides with the drawn corner while the row
     /// reflows.
     pub note_entry_x: Option<f32>,
+    /// Every card id in draw order, including the ones in flight (the scene
+    /// publishes all of them here, while `cards` skips the flight cards). The
+    /// UI reorders `line.items` from this after a pin drag.
+    pub order: Vec<CardId>,
+    /// True while a pin drag owns the pointer. The UI keeps the window
+    /// click-through off and must not start another gesture.
+    pub grabbing: bool,
 }
 
 impl HitCard {
@@ -324,6 +342,9 @@ impl FrameSnapshot {
                 // The tolerance is in DIP and stays so: it is applied to the
                 // box in the card's own frame, not to the rotated result.
                 let (x, y) = card.in_card_frame(x_dip, y_dip);
+                if card.pin_ready && card.pin_box.contains(x, y) {
+                    return true;
+                }
                 if card.frame.inflated(tolerance).contains(x, y) {
                     return true;
                 }
@@ -364,6 +385,23 @@ impl FrameSnapshot {
         None
     }
 
+    /// The clothespin grab box under the pointer, if any. Pin presses are
+    /// checked before the card body, the action pills and the band click: the
+    /// pin lies outside the card frame, above the rope, where the band click
+    /// would otherwise retract the line.
+    pub fn pin_at(&self, x_dip: f32, y_dip: f32) -> Option<CardId> {
+        self.cards
+            .iter()
+            .find(|card| {
+                if !card.pin_ready || card.dragged {
+                    return false;
+                }
+                let (x, y) = card.in_card_frame(x_dip, y_dip);
+                card.pin_box.contains(x, y)
+            })
+            .map(|card| card.id)
+    }
+
     /// The note colour dot under the pointer, if any.
     pub fn swatch_at(&self, x_dip: f32, y_dip: f32) -> Option<(CardId, usize)> {
         for card in &self.cards {
@@ -394,6 +432,9 @@ mod tests {
             angle: 0.0,
             // The clothespin sits PIN_ABOVE the frame's top, on the centre.
             pin: (200.0, 36.0),
+            pin_box: RectF::new(190.0, 32.0, 210.0, 66.0),
+            pin_ready: true,
+            dragged: false,
             swatches: [RectF::default(); 4],
         }
     }
@@ -405,6 +446,8 @@ mod tests {
             width_dip: 3008.0,
             cards: vec![card(7)],
             note_entry_x: Some(3008.0 * 0.5 + 87.0),
+            order: vec![7],
+            grabbing: false,
         }
     }
 
@@ -487,5 +530,23 @@ mod tests {
         // to the left of the upright row is still a press on that pill.
         let (x, y) = drawn(card, 150.0, 219.0);
         assert_eq!(tilted.action_at(x, y), Some((7, ActionKind::Annotate)));
+    }
+
+    #[test]
+    fn the_pin_box_turns_with_the_card_and_ignores_unready_pins() {
+        let mut snapshot = snapshot();
+        assert_eq!(snapshot.pin_at(200.0, 36.0), Some(7));
+        assert_eq!(snapshot.pin_at(200.0, 70.0), None);
+
+        // The pin is the rotation origin, so its centre stays hit while the
+        // card swings; the box itself turns with the card.
+        snapshot.cards[0].angle = 30.0;
+        assert_eq!(snapshot.pin_at(200.0, 36.0), Some(7));
+
+        snapshot.cards[0].pin_ready = false;
+        assert_eq!(snapshot.pin_at(200.0, 36.0), None);
+        snapshot.cards[0].pin_ready = true;
+        snapshot.cards[0].dragged = true;
+        assert_eq!(snapshot.pin_at(200.0, 36.0), None);
     }
 }

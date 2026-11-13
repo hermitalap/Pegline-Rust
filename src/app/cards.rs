@@ -226,6 +226,46 @@ impl super::App {
         settings::write_pegged(&paths);
     }
 
+    /// Applies the order the render thread published when a clothespin drag
+    /// ended. The scene swaps cards in place so the animation stays live; the
+    /// UI's `line.items` and `pegged.txt` catch up on the next tick, once the
+    /// grab has actually ended and the snapshot is final. Only a changed
+    /// order writes the file and plays the tink.
+    pub(super) fn sync_pin_order(&mut self) {
+        if !self.state.pending_order {
+            return;
+        }
+        let Some(overlay) = self.windows.overlay.as_ref() else {
+            return;
+        };
+        let snapshot = overlay.snapshot();
+        let Ok(snapshot) = snapshot.lock() else {
+            return;
+        };
+        if snapshot.grabbing || snapshot.order.len() != self.line.items.len() {
+            return;
+        }
+        let order = snapshot.order.clone();
+        drop(snapshot);
+        let before: Vec<CardId> = self.line.items.iter().map(|item| item.id).collect();
+        if before == order {
+            self.state.pending_order = false;
+            return;
+        }
+        self.line.items.sort_by_key(|item| {
+            order
+                .iter()
+                .position(|id| *id == item.id)
+                .unwrap_or(usize::MAX)
+        });
+        let after: Vec<CardId> = self.line.items.iter().map(|item| item.id).collect();
+        if after != before {
+            self.save_pegged();
+            self.sound(crate::sound::Cue::Tink);
+        }
+        self.state.pending_order = false;
+    }
+
     pub(super) fn hit_test(&self, x: i32, y: i32) -> Option<(CardId, crate::types::RectF)> {
         self.hit_test_impl(x, y, false)
     }

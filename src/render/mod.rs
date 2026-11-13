@@ -302,6 +302,9 @@ struct Palette {
     note_paper: ID2D1SolidColorBrush,
     note_ink: ID2D1SolidColorBrush,
     metal: ID2D1LinearGradientBrush,
+    /// The same steel, 18 levels brighter on every stop: the clothespin's
+    /// hover/press cross-fade.
+    metal_hot: ID2D1LinearGradientBrush,
     metal_edge: ID2D1LinearGradientBrush,
     /// Vertical gradient from (0,0) to (0,1); scaled per card.
     border: ID2D1LinearGradientBrush,
@@ -320,6 +323,13 @@ impl Palette {
             stop(1.0, [158, 158, 158], 1.0),
         ];
         let metal = gradient(context, &metal_stops, (0.0, 0.0), (9.0, 0.0))?;
+        let hot_stops = [
+            stop(0.0, [197, 197, 197], 1.0),
+            stop(0.35, [255, 255, 255], 1.0),
+            stop(0.65, [227, 227, 227], 1.0),
+            stop(1.0, [176, 176, 176], 1.0),
+        ];
+        let metal_hot = gradient(context, &hot_stops, (0.0, 0.0), (9.0, 0.0))?;
         let edge_stops = [
             stop(0.0, [255, 255, 255], 0xE6 as f32 / 255.0),
             stop(1.0, [0, 0, 0], 0x2E as f32 / 255.0),
@@ -342,6 +352,7 @@ impl Palette {
             note_paper: solid(context, split(crate::notes::PALETTE[0].paper), 1.0)?,
             note_ink: solid(context, split(crate::notes::PALETTE[0].ink), 1.0)?,
             metal,
+            metal_hot,
             metal_edge,
             border,
             swatches: [
@@ -382,6 +393,10 @@ pub struct Renderer {
     shadow: Shadow,
     /// The clothespin's soft shadow, baked at the same DPI.
     pin_shadow: ID2D1Bitmap1,
+    /// The clothespin's warm bloom, baked once per DPI with the same blurred
+    /// rounded-rectangle routine as the shadow. Drawn with the pin's glow
+    /// opacity; never blurred per frame.
+    pin_glow: ID2D1Bitmap1,
     rope: Option<Rope>,
     texts: Texts,
     masks: HashMap<(u32, u32, u32), ID2D1Geometry>,
@@ -464,6 +479,19 @@ impl Renderer {
             1.6,
             8.0,
             0.3,
+            [0, 0, 0],
+        )?;
+        let pin_glow = create_blurred_rect(
+            &context,
+            dpi_f,
+            dpi_f,
+            crate::layout::PIN_WIDTH,
+            crate::layout::PIN_HEIGHT,
+            4.5,
+            3.0,
+            12.0,
+            1.0,
+            [255, 244, 214],
         )?;
 
         let mut renderer = Self {
@@ -477,6 +505,7 @@ impl Renderer {
             border_scale: 1.0,
             shadow,
             pin_shadow,
+            pin_glow,
             rope: None,
             texts,
             masks: HashMap::new(),
@@ -596,6 +625,19 @@ impl Renderer {
                 1.6,
                 8.0,
                 0.3,
+                [0, 0, 0],
+            )?;
+            self.pin_glow = create_blurred_rect(
+                &self.context,
+                self.dpi,
+                self.dpi,
+                crate::layout::PIN_WIDTH,
+                crate::layout::PIN_HEIGHT,
+                4.5,
+                3.0,
+                12.0,
+                1.0,
+                [255, 244, 214],
             )?;
         }
         self.rope = None;
@@ -845,15 +887,42 @@ impl Renderer {
         draw_shadow(&self.context, shadow, rect, opacity);
     }
 
-    /// Draws the clothespin at `top` in the current transform's coordinates.
-    pub fn draw_pin(&mut self, left: f32, top: f32) {
+    /// Draws the clothespin in the current transform's coordinates.
+    ///
+    /// The body is scaled about its centre by `scale` (1.0 at rest), the warm
+    /// bloom is drawn behind it at `glow` opacity, and `hot` cross-fades the
+    /// steel to the brighter gradient. All three come from springs; none of
+    /// them allocates or blurs a pixel here.
+    pub fn draw_pin(&mut self, left: f32, top: f32, scale: f32, glow: f32, hot: f32) {
+        let s = scale.max(0.01);
+        let cx = left + 4.5;
+        let cy = top + 13.0;
+        let body = RectF::from_xywh(cx - 4.5 * s, cy - 13.0 * s, 9.0 * s, 26.0 * s);
+        if glow > 0.01 {
+            // The bake is 9×26 DIP plus 12 DIP of bloom on each side.
+            let gw = (9.0 + 24.0) * s;
+            let gh = (26.0 + 24.0) * s;
+            let dst = d2d_rect(RectF::from_xywh(cx - gw * 0.5, cy - gh * 0.5, gw, gh));
+            // SAFETY: the baked bitmap and context are alive; the glow bitmap
+            // is premultiplied warm white.
+            unsafe {
+                self.context.DrawBitmap(
+                    &self.pin_glow,
+                    Some(&dst),
+                    glow,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None,
+                    None,
+                );
+            }
+        }
         // The baked pin shadow: 8 DIP of blur pad, 1.5 DIP down, alpha 0.3.
-        let pad = 8.0;
+        let pad = 8.0 * s;
         let shadow_dst = RectF::from_xywh(
-            left - pad,
-            top - pad + 1.5,
-            9.0 + pad * 2.0,
-            26.0 + pad * 2.0,
+            body.left - pad,
+            body.top - pad + 1.5 * s,
+            (9.0 + 16.0) * s,
+            (26.0 + 16.0) * s,
         );
         let dst = d2d_rect(shadow_dst);
         // SAFETY: the baked bitmap is alive and owned by this renderer.
@@ -867,17 +936,31 @@ impl Renderer {
                 None,
             );
         }
-        let body = RectF::from_xywh(left, top, 9.0, 26.0);
-        let rounded = rounded(body, 3.5);
+        let rounded = rounded(body, 3.5 * s);
         // SAFETY: brushes and context are alive.
         unsafe {
             self.context
                 .FillRoundedRectangle(&rounded, &self.palette.metal);
-            self.context
-                .DrawRoundedRectangle(&rounded, &self.palette.metal_edge, 0.6, None);
         }
-        let slot = RectF::from_xywh(left + 2.0, top + 8.5, 5.0, 1.4);
-        self.fill_round(slot, 0.7, Brush::CrossInk);
+        if hot > 0.01 {
+            let bounds = body.inflated(1.0);
+            let pushed = self.push_opacity(bounds, hot);
+            // SAFETY: same rounded body and a second gradient brush.
+            unsafe {
+                self.context
+                    .FillRoundedRectangle(&rounded, &self.palette.metal_hot);
+            }
+            if pushed {
+                self.pop_opacity();
+            }
+        }
+        // SAFETY: brushes and context are alive.
+        unsafe {
+            self.context
+                .DrawRoundedRectangle(&rounded, &self.palette.metal_edge, 0.6 * s, None);
+        }
+        let slot = RectF::from_xywh(body.left + 2.0 * s, body.top + 8.5 * s, 5.0 * s, 1.4 * s);
+        self.fill_round(slot, 0.7 * s, Brush::CrossInk);
     }
 
     /// Draws the discard cross in the current transform's coordinates.
@@ -1225,7 +1308,8 @@ impl Renderer {
 /// `width_dip`/`height_dip` describe the unblurred shape; `sigma_dip` is the
 /// Gaussian sigma (0.4 × a WPF `BlurRadius`); `pad_dip` is the transparent
 /// margin baked around it. `alpha` scales the shadow's opacity into the bitmap.
-/// The result is a premultiplied black bitmap, drawn once per frame.
+/// The result is a premultiplied bitmap of `tint` (black for shadows, warm
+/// white for the pin's glow), drawn once per frame.
 #[allow(clippy::too_many_arguments)]
 fn create_blurred_rect(
     context: &ID2D1DeviceContext,
@@ -1237,6 +1321,7 @@ fn create_blurred_rect(
     sigma_dip: f32,
     pad_dip: f32,
     alpha: f32,
+    tint: [u8; 3],
 ) -> Result<ID2D1Bitmap1, String> {
     let scale = dpi_x / 96.0;
     let width_px = (width_dip * scale).round().max(2.0);
@@ -1267,10 +1352,13 @@ fn create_blurred_rect(
                 (-0.5 * (distance / sigma_px).powi(2)).exp()
             };
             let value = (coverage * alpha * 255.0).clamp(0.0, 255.0) as u8;
+            let tint_alpha = coverage * alpha;
             let i = ((y * total_w + x) * 4) as usize;
-            pixels[i] = 0;
-            pixels[i + 1] = 0;
-            pixels[i + 2] = 0;
+            // BGRA, premultiplied: every tint channel is scaled by the same
+            // coverage as alpha, so the bitmap composites correctly.
+            pixels[i] = (f32::from(tint[2]) * tint_alpha).clamp(0.0, 255.0) as u8;
+            pixels[i + 1] = (f32::from(tint[1]) * tint_alpha).clamp(0.0, 255.0) as u8;
+            pixels[i + 2] = (f32::from(tint[0]) * tint_alpha).clamp(0.0, 255.0) as u8;
             pixels[i + 3] = value;
         }
     }
@@ -1323,6 +1411,7 @@ pub(crate) fn bake_card_shadow(
             sigma,
             pad,
             1.0,
+            [0, 0, 0],
         )?,
         total_dip: SHADOW_CARD_DIP + pad * 2.0,
         pad_dip: pad,

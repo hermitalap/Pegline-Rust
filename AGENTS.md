@@ -93,7 +93,45 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
-**2.5.1 is the current version (2026-11-12)**: it changes only the geometry of
+**2.6.1 (2026-11-13)**: it fixes the last preview leak in the pin gesture — while
+ the clothespin is held, the UI no longer reports the card as hovered, hides and
+ resets any preview state, and drops a preview decode that finishes mid-drag, so
+ the bottom 0.35 s preview cannot appear under the dragged card. Hover preview
+ returns on release. No geometry, physics or persistence change; 255 lib + 1 main
+ tests still pass. See `docs/BEHAVIOR.md` §5.5 and `docs/RELEASE-2.6.1.md`.
+
+**2.6.0 (2026-11-13)**: it adds pin dragging to the line. Hovering a card's
+clothespin highlights it (1.12, warm glow, hot metal); dragging the pin moves
+the card with the 0.075 s follow spring, a downward-only Y rubber band (18 DIP
+linear, then 0.22x, cap 26 DIP) and an inertial release. The neighbour ahead is
+squeezed by the pre-collision penetration (34 DIP, second card 10) and rotates
+up to 3 degrees; at 28 DIP for 60 ms the two cards swap slots, the neighbour
+springs left at 260 DIP/s with a 6 DIP hop, and the dragged card recoils at
+160 DIP/s while still following the pointer, so it floats over its neighbour
+until release. Both cards swing like paper, not a rigid iron block: each card
+gets `L_eff=(w²/12+h²/3)/(h/2)` (60–220 DIP), a hand-written pendulum integrates
+linear damping 1.116 plus quadratic drag 0.279 (1.550/0.589 for tall cards), horizontal
+acceleration drives
+`atan(a_x/g_eff)` (±6°), the Y drop changes `g_eff`, and a ±1.2° shear adds the
+slight bend. A relative-wind torque at `r=h/2` tips the card back while it
+moves, so uniform motion is no longer perfectly vertical. A normal stop gives
+one visible overshoot and settles within about half a second (the CSV trace counts small-angle
+ring separately); the velocity lean is gone, and the hop is only 6 DIP. A 180 ms cooldown and a 43 DIP re-arm stop chattering. The order
+is written to `pegged.txt` on release only when it changed, with one `Tink`.
+The gesture is hand-written (`Scene.grab`, render-thread `GetCursorPos`
+sampling), not OLE: `Command::Dragging` would put the render thread to sleep and
+`DoDragDrop` would steal the gesture. Pin hit box is 20×34 DIP and is checked
+before the band click, pills and card press; a <4 DIP click is a no-op. See
+`docs/BEHAVIOR.md` §5.5, `docs/DECISIONS.md` D14/D16/D17, `PLAN.md` §14 and
+`PLAN-2.6.0-20261112-233804.md`. Air drag is per-card (aspect-ratio damping and
+a relative-wind torque at `r=h/2`); `PEGLINE_PAPER_TRACE` + `tools/paper-trace.ps1`
+and `tools/paper-plot.py` produce the tuning CSV/plot described in
+`docs/PAPER-TUNING.md`. Measured at 200% DPI: 59.88–60.16 fps, draw p50
+0.585–0.701 ms, private 96.9–98.9 MB against the HEAD 97.1–97.4 MB; pin hover draw p50
+~1.2 ms; the air-drag re-run measured 60.16 fps / 0.585 ms / 98.4 MB; 255 lib + 1 main tests. 120 Hz, a second monitor, sleep/wake and a 100% DPI screenshot are
+still unmeasured; do not mark them as passed.
+
+**2.5.1 (2026-11-12)** was the last release before pin dragging; it changes only the geometry of
 the resize drag — see the 2.5.0 paragraph below for the feature itself. The paper
 now resizes **around its centre**: the dragged edge tracks the pointer 1:1, the
 opposite edge mirrors it, so the size changes by twice the pointer's travel and
