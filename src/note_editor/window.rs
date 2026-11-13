@@ -1937,19 +1937,19 @@ mod tests {
             hit_test(480, 380, paper, 96),
             Hit::Resize(ResizeZone::Corner)
         );
-        // The corner anchor is a 19 DIP square (24 before 2.6.2), not the
+        // The corner anchor is a 16 DIP square (24 before 2.6.2), not the
         // 2 DIP band intersection: it reaches into the paper and over the
         // shadow margin.
         assert_eq!(
-            hit_test(461, 361, paper, 96),
+            hit_test(464, 364, paper, 96),
             Hit::Resize(ResizeZone::Corner)
         );
         assert_eq!(
             hit_test(499, 399, paper, 96),
             Hit::Resize(ResizeZone::Corner)
         );
-        assert_eq!(hit_test(460, 361, paper, 96), Hit::Paper);
-        assert_eq!(hit_test(461, 360, paper, 96), Hit::Paper);
+        assert_eq!(hit_test(463, 364, paper, 96), Hit::Paper);
+        assert_eq!(hit_test(464, 363, paper, 96), Hit::Paper);
         // The far corner of the shadow is still part of the anchor.
         assert_eq!(
             hit_test(495, 395, paper, 96),
@@ -1960,13 +1960,13 @@ mod tests {
         assert_eq!(hit_test(10, 390, paper, 96), Hit::Margin);
         assert_eq!(hit_test(250, 410, paper, 96), Hit::Outside);
         assert_eq!(hit_test(-1, 200, paper, 96), Hit::Outside);
-        // 200 %: the client point, bands and the 19 DIP anchor double.
+        // 200 %: the client point, bands and the 16 DIP anchor double.
         assert_eq!(hit_test(500, 400, paper, 192), Hit::Paper);
         assert_eq!(
-            hit_test(922, 722, paper, 192),
+            hit_test(928, 728, paper, 192),
             Hit::Resize(ResizeZone::Corner)
         );
-        assert_eq!(hit_test(920, 722, paper, 192), Hit::Paper);
+        assert_eq!(hit_test(926, 728, paper, 192), Hit::Paper);
         assert_eq!(hit_test(30, 400, paper, 192), Hit::Margin);
         assert_eq!(
             hit_test(970, 400, paper, 192),

@@ -17,10 +17,14 @@
   speed keeps the weight cue; release inherits the pointer velocity (capped at
   600 DIP/s) and settles without overshoot; `pegged.txt` and `Tink` still fire
   once, only when the order actually changed.
-- **The note editor's bottom-right resize anchor is 19×19 DIP.** 24² = 576 DIP²
-  becomes 19² = 361 DIP², a 37 % area cut (19 is the nearest whole DIP to
-  24·√0.6). The edge bands stay 2 DIP and the diagonal resize cursor still
-  appears as soon as the pointer enters the anchor.
+- **The note editor's bottom-right resize anchor is 16×16 DIP.** 24² = 576 DIP²
+  becomes 16² = 256 DIP², a 56 % area cut. The edge bands stay 2 DIP and the
+  diagonal resize cursor still appears as soon as the pointer enters the anchor.
+- **A pin drag no longer drops the "new note" entry.** While the clothespin is
+  held, the entry ignores the pointer even when the drag crosses its hotspot,
+  and the peeking corner retracts on the existing 0.22 s reveal spring. The next
+  tick after release brings the corner back the same way (or drops the full note
+  if the pointer is still over the hotspot).
 
 ### Verification
 
@@ -29,8 +33,11 @@
 - Real mouse at 200 % DPI (`--demo`, 3 cards): 1:1 tracking, one reorder at the
   midpoint, the neighbour glides a full slot with no overshoot, the row settles
   on the three slots after release (`docs/visual/pin-2.6.2-*.png`).
+- Real mouse: dragging a card across the note-entry hotspot leaves the entry
+  alone and retracts the peeking corner (`note peek false`, no hover lines); it
+  reappears with the same spring after the release (`pin-2.6.2-entry-*.png`).
 - `probe --mode=line`: 60.06 fps, draw p50 0.677 / p95 1.027 ms, private
-  97.0 MB; `pegline.exe` 1,903,616 B (2.6.1: 1,920,512 B).
+  97.0 MB; `pegline.exe` 1,903,104 B (2.6.1: 1,920,512 B).
 
 ## 2.6.1 — 2026-11-13
 

@@ -105,9 +105,12 @@ is deleted with its tooling: `src/scene/pendulum.rs`, `src/scene/trace.rs`,
 `tools/paper-sim.html` and every `PEGLINE_PAPER_*` variable; the gesture is now
 three springs and two thresholds (`docs/DECISIONS.md` D18, supersedes D16/D17).
 It also shrinks the note editor's bottom-right resize anchor from 24×24 to
-19×19 DIP (576 → 361 DIP², −37 %). 248 lib + 1 main tests pass, clippy/fmt
+16×16 DIP (576 → 256 DIP², −56 %), and keeps the “new note” entry out of the way
+while a pin is held: the peeking corner retracts on the existing reveal spring and
+reappears after release, so dragging across the entry hotspot never drops the full
+note. 248 lib + 1 main tests pass, clippy/fmt
 clean, probe 60.06 fps / draw p50 0.677 ms / 97.0 MB private (2.6.1: 97.5 MB),
-exe 1,903,616 B. Real-mouse check and screenshots in `docs/PARITY.md`.
+exe 1,903,104 B. Real-mouse check and screenshots in `docs/PARITY.md`.
 
 **2.6.1 (2026-11-13)**: it fixes the last preview leak in the pin gesture — while
  the clothespin is held, the UI no longer reports the card as hovered, hides and

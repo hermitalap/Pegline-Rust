@@ -1525,6 +1525,16 @@ impl App {
             self.cancel_note_hover();
             return;
         }
+        // While the clothespin is held the entry keeps out of the way: the full
+        // note never drops even if the drag crosses the hotspot, and the
+        // peeking corner retracts on the same 0.22 s spring as any other retract
+        // (BEHAVIOR §5.5/§4.3). Releasing the gesture lets the next tick bring
+        // the corner back with the usual spring.
+        if self.state.pin_press.is_some() {
+            self.set_note_peek(false);
+            self.cancel_note_hover();
+            return;
+        }
         let Some(pointer) = self.note_entry_pointer() else {
             return;
         };

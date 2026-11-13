@@ -781,8 +781,10 @@ x=600 起）；PowerShell 的屏幕坐标被 DPI 虚拟化为 3008×1692，而�
 | 松手 | `pin release 3 at 3300,85`，160 ms 后整排落在 2660/3008/3356 三个槽位、顺序 `[1,2,3]`，无 hop、无回弹，悬停药丸与叉恢复（`pin-2.6.2-release-200.png`） |
 | 倾斜 | 移动中倾斜、指针停住约 150 ms 后回正；4° 上限由单元测试 `the_lean_follows_the_pointer_speed_and_is_capped` 覆盖 |
 | 单击 | 4 DIP 内的夹子点击不换位、不复制、不收起线带（单元测试 `a_plain_pin_click_does_not_reorder`） |
-| 帧率/内存 | `probe --mode=line` 60.06 fps、draw p50 0.677 / p95 1.027 ms、private 97.0 MB（2.6.1 基线 97.5 MB）；`pegline.exe` 1,903,616 B |
-| 未测 | 120 Hz、第二显示器、睡眠/唤醒、100% DPI；便签右下角 19×19 DIP 锚点只做了 96/192 DPI 单元测试，没有再用真实鼠标复测边界 |
+| 入口让路 | 按住第三张卡的夹子（物理 3356,85）拖到线带右端的入口热区内 (3750,85) 并停 15 s：`trace.log` 只有 `pin press 3 at 3356,85` → `note peek false`，没有任何 hover 行，截图里露出的一角已收回、被拖卡贴在指针下（`pin-2.6.2-entry-retracted-200.png`） |
+| 入口恢复 | 松手在热区外 (3960,85)：`trace.log` 记录 `pin release 3 at 3960,85` → `note peek true`，黄色一角用同一 0.22 s 弹簧重新冒出（`pin-2.6.2-entry-back-200.png`） |
+| 帧率/内存 | `probe --mode=line` 60.06 fps、draw p50 0.677 / p95 1.027 ms、private 97.0 MB（2.6.1 基线 97.5 MB）；`pegline.exe` 1,903,104 B |
+| 未测 | 120 Hz、第二显示器、睡眠/唤醒、100% DPI；便签右下角 16×16 DIP 锚点只做了 96/192 DPI 单元测试，没有再用真实鼠标复测边界 |
 
 截图由一次性 DPI-aware PowerShell 生成（`SetProcessDPIAware` + `SetCursorPos` +
 `mouse_event` + `CopyFromScreen` 到 6016×420，再从物理 x=2350..3650 裁切），脚本未入库；

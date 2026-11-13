@@ -2,9 +2,9 @@
 
 发布日期：2026-11-13
 产物：`dist/Pegline-2.6.2-win-x64.zip`（单文件 exe + README + LICENSE + CHANGELOG）。
-`target\release\pegline.exe` 为 **1,903,616 B（1.90 MB）**，ProductVersion
-`2.6.2.0`；`Pegline-2.6.2-win-x64.zip` 为 **835,475 B（0.84 MB）**，SHA-256
-`e4d75b7fefa242d37340c83e82753731116ac9653722cc3efc63b09ddb282b0e`。
+`target\release\pegline.exe` 为 **1,903,104 B（1.90 MB）**，ProductVersion
+`2.6.2.0`；`Pegline-2.6.2-win-x64.zip` 为 **835,605 B（0.84 MB）**，SHA-256
+`9be2a5c82352b24ab21c3254e058f923fa07b83caf7309fb17c61fede1af087e`。
 
 ## 2.6.2 变更
 
@@ -25,6 +25,10 @@
 - **唯一的“物理”是倾斜**：卡片按指针水平速度最多倾斜 4°，指针停住就自己回正。
 - 抬起只做三件事：放大 1.04、阴影加深、画在最上层；不透明度保持 1，不加音效、
   不加弹跳。顺序真的变化时，松手后仍只写一次 `pegged.txt` 并播一次 `Tink`。
+- **拖拽时“新建便签”入口让路**：夹子按住/拖动期间，指针拖过线带右端的入口热区
+  也不会掉下整张便签；原本露出的一角沿既有 0.22 s 弹簧**收回**。松手后的下一次
+  tick 恢复——指针仍在入口上就照常掉下整张便签，否则一角用同一弹簧重新**冒出**。
+  这里的“拖拽”指夹子按住（`state.pin_press`），与 OLE 拖出的 `state.dragging` 独立。
 
 随旧模型一起删除的：`src/scene/pendulum.rs`、`src/scene/trace.rs`、
 `docs/PAPER-TUNING.md`、`tools/paper-trace.ps1`、`tools/paper-plot.py`、
@@ -35,24 +39,29 @@
 设计和取舍见 `docs/DECISIONS.md` D18（取代 D16/D17），行为规格见
 `docs/BEHAVIOR.md` §5.5。
 
-**便签编辑界面的矩形拖拽热区缩小约 40 %。**
+**便签编辑界面的矩形拖拽热区从 24×24 缩到 16×16 DIP（面积 −56 %）。**
 
-便签右下角用于缩放纸面的矩形锚点从 **24×24 DIP** 缩到 **19×19 DIP**：面积从
-576 DIP² 降到 361 DIP²（−37 %），仍然从纸面右下角向纸内和阴影边距各延伸同样距离，
-光标一进入就显示斜向双向箭头。右边缘和下边缘本身仍是 2 DIP 热区，左边缘、上边缘
-和左下角仍然不可拖。
+便签右下角用于缩放纸面的矩形锚点从 **24×24 DIP** 缩到 **16×16 DIP**：面积从
+576 DIP² 降到 256 DIP²（−56 %，比要求的 40 % 缩得更多），仍然从纸面右下角向纸内和
+阴影边距各延伸同样距离，光标一进入就显示斜向双向箭头。右边缘和下边缘本身仍是
+2 DIP 热区，左边缘、上边缘和左下角仍然不可拖。
 
 ## 验证
 
 - `cargo test`：248 个 lib 测试 + 1 个 main 测试通过（1 ignored）。
 - `cargo clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 通过。
-- `cargo build --release` 通过；`pegline.exe` 1,903,616 B（2.6.1 为 1,920,512 B），
+- `cargo build --release` 通过；`pegline.exe` 1,903,104 B（2.6.1 为 1,920,512 B），
   ProductVersion `2.6.2.0`。
 - 真实鼠标、200% DPI、`--demo` 三卡：夹子按下后拖 +40 DIP，卡片中心正好在
   `slot + 40`（1:1）；拖到 +146 DIP 时越过中点换位，右邻卡临界阻尼滑到旧槽位，
   无过冲；松手后整排落在三个槽位、顺序正确，无 hop、无回弹。截图见
   `docs/visual/pin-2.6.2-{drag,swap,release}-200.png`，细节见
   `docs/VISUAL-TESTS.md` §3.23。
+- 真实鼠标复测入口让路：按住夹子把卡片拖进入口热区（物理 x=3750，入口中心
+  3694）停留 15 s，`trace.log` 只有 `pin press 3 at 3356,85` → `note peek false`，
+  全程没有 hover 行，截图里露出的一角已经收回；松手在热区外 (3960,85) 后立刻
+  `note peek true`，一角用同一弹簧重新冒出
+  （`docs/visual/pin-2.6.2-entry-{retracted,back}-200.png`）。
 - 200% DPI、6016×420 probe：`--mode=line` 60.06 fps，draw p50 0.677 ms / p95
   1.027 ms，private 97.0 MB（2.6.1 基线 97.5 MB）；`--mode=note` 打开 56.5 MB，
   draw p50 0.236 / p95 0.300 ms。
@@ -61,7 +70,7 @@
 
 - 拖拽过程中，被拖卡会短暂压过邻卡，直到邻卡在 0.24 s 内让开；这是直接操纵的
   正常表现，松手后归位。
-- 便签右下角的 19×19 DIP 锚点由 96/192 DPI 单元测试覆盖，本次没有再用真实鼠标
+- 便签右下角的 16×16 DIP 锚点由 96/192 DPI 单元测试覆盖，本次没有再用真实鼠标
   逐像素复测边界。
 - 120 Hz、第二显示器、睡眠/唤醒和 100% DPI 的夹子截图仍未在真实硬件上实测，
   不得提前标为通过。
@@ -70,8 +79,8 @@
 
 ## 安装
 
-1. 下载 `Pegline-2.6.2-win-x64.zip`（**835,475 B（0.84 MB）**，SHA-256
-   `e4d75b7fefa242d37340c83e82753731116ac9653722cc3efc63b09ddb282b0e`），解压到任意目录。
+1. 下载 `Pegline-2.6.2-win-x64.zip`（**835,605 B（0.84 MB）**，SHA-256
+   `9be2a5c82352b24ab21c3254e058f923fa07b83caf7309fb17c61fede1af087e`），解压到任意目录。
 2. 运行 `pegline.exe`；程序从托盘启动。
 3. 按 **Ctrl+Alt+K** 截图，截图会挂到屏幕顶部的晾衣绳上。
 

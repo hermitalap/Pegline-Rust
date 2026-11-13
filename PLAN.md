@@ -816,8 +816,12 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   `PEGLINE_PAPER_TRACE/DAMPING/DRAG/WIND/ASPECT`，以及 `Scene` 里的挤压/交换/摆锤/
   风/柔性/小跳状态。`src/scene/mod.rs` 从 2487 行降到 2057 行。
 
-**便签热区**：`RESIZE_CORNER_DIP` 由 24.0 改为 19.0（576 → 361 DIP²，面积 −37 %；
-19 是 24·√0.6 = 18.6 的整数 DIP 近似），96/192 DPI 单元测试同步更新。
+**便签热区**：`RESIZE_CORNER_DIP` 由 24.0 改为 16.0（576 → 256 DIP²，面积 −56 %），
+96/192 DPI 单元测试同步更新。
+
+**拖拽时的入口让路**：`update_note_entry` 在夹子按住（`state.pin_press`）时提前返回，
+用既有的 `set_note_peek(false)` 弹簧收回露出的一角并取消悬停，所以拖拽中指针扫过
+“新建便签”入口不会掉下整张便签；松手后的下一次 tick 走正常路径，同一弹簧把一角冒出。
 
 **测量**（200% DPI、6016×1692 DIP 桌面，release）：
 
@@ -828,7 +832,7 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 | private | 96.9–98.9 MB | 97.0 MB（ws 114.3 MB） |
 | `--mode=flight` | 76.7 MB（旧测量） | 81.4 MB，60.06 fps |
 | `--mode=note` | 56.5–57.1 MB 打开 | 56.5 MB 打开，70.7 MB 跑完 20 次缩放，draw p50 0.236 / p95 0.300 ms |
-| `pegline.exe` | 1,920,512 B | 1,903,616 B（−16,896 B） |
+| `pegline.exe` | 1,920,512 B | 1,903,104 B（−17,408 B） |
 | 测试 | 255 lib + 1 main | 248 lib + 1 main（−7 个物理测试，+6 个拖拽测试） |
 
 帧率、draw 与内存在运行噪声内；删掉摆锤子步与逐帧风计算后没有可测的下降，但每卡

@@ -33,11 +33,10 @@ pub const RESIZE_GRIP_DIP: f32 = 2.0;
 /// margin (BEHAVIOR §10.1). The right and bottom edge bands stay thin; only
 /// the corner is enlarged, so it is easy to hit without stealing the edges.
 ///
-/// 2.6.2 shrank it from 24 to 19 DIP: 24² = 576 DIP² of corner area becomes
-/// 19² = 361 DIP², a 37 % reduction. 19 is the nearest whole DIP to the
-/// 24·√0.6 = 18.6 side that a 40 % cut asks for, and a whole DIP keeps the
-/// 100 % and 200 % device-pixel boxes aligned with the pointer grid.
-pub const RESIZE_CORNER_DIP: f32 = 19.0;
+/// 2.6.2 shrank it from 24 to 16 DIP: 24² = 576 DIP² of corner area becomes
+/// 16² = 256 DIP², a 56 % reduction. A whole DIP keeps the 100 % and 200 %
+/// device-pixel boxes aligned with the pointer grid.
+pub const RESIZE_CORNER_DIP: f32 = 16.0;
 
 /// A paper size, DIP. The window is always `MARGIN_DIP` larger on every side
 /// (BEHAVIOR §10.1).
@@ -193,7 +192,7 @@ pub enum Hit {
 ///
 /// The resize bands cover the right and bottom shadow margins and reach
 /// `RESIZE_GRIP_DIP` into the paper. The bottom-right corner is a
-/// `RESIZE_CORNER_DIP` square (19 DIP since 2.6.2), larger than the band
+/// `RESIZE_CORNER_DIP` square (16 DIP since 2.6.2), larger than the band
 /// intersection, so the resize anchor is easy to hit. The left and top
 /// margins, including the top-right and bottom-left shadow corners, stay
 /// commit areas.
