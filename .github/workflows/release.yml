@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.1
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $match = Select-String -LiteralPath Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw 'cannot read the version from Cargo.toml' }
+          $version = $match.Matches[0].Groups[1].Value
+          $tag = '${{ github.ref_name }}'
+          if ($tag -ne "v$version") { throw "tag $tag does not match Cargo.toml version $version" }
+          Write-Host "release Pegline $version"
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Verify executable version
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $info = (Get-Item -LiteralPath target/release/pegline.exe).VersionInfo
+          if ($info.ProductVersion -ne "$version.0") {
+            throw "embedded version $($info.ProductVersion) does not match tag $version"
+          }
+
+      - name: Extract release notes
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw
+          $pattern = "(?ms)^##\s+$([regex]::Escape($version))\b.*?(?=^##\s+|\z)"
+          $section = [regex]::Match($changelog, $pattern).Value.Trim()
+          if (-not $section) { $section = "Pegline $version" }
+          $body = Join-Path $env:RUNNER_TEMP 'RELEASE_BODY.md'
+          $section | Set-Content -LiteralPath $body -Encoding utf8
+          Write-Host $section
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          gh release create '${{ github.ref_name }}' `
+            target/release/pegline.exe `
+            --title "Pegline $version" `
+            --notes-file (Join-Path $env:RUNNER_TEMP 'RELEASE_BODY.md') `
+            --verify-tag
