@@ -35,11 +35,16 @@ jobs:
       - name: Verify tag matches Cargo.toml
         shell: pwsh
         run: |
-          $match = Select-String -LiteralPath Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $match = Select-String `
+            -LiteralPath Cargo.toml `
+            -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
           if (-not $match) { throw 'cannot read the version from Cargo.toml' }
           $version = $match.Matches[0].Groups[1].Value
           $tag = '${{ github.ref_name }}'
-          if ($tag -ne "v$version") { throw "tag $tag does not match Cargo.toml version $version" }
+          if ($tag -ne "v$version") {
+            throw "tag $tag does not match Cargo.toml version $version"
+          }
           Write-Host "release Pegline $version"
 
       - name: Test
@@ -54,17 +59,24 @@ jobs:
           $version = '${{ github.ref_name }}'.TrimStart('v')
           $info = (Get-Item -LiteralPath target/release/pegline.exe).VersionInfo
           if ($info.ProductVersion -ne "$version.0") {
-            throw "embedded version $($info.ProductVersion) does not match tag $version"
+            $actual = $info.ProductVersion
+            throw "embedded version $actual does not match tag $version"
           }
 
       - name: Extract release notes
         shell: pwsh
         run: |
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw
-          $pattern = "(?ms)^##\s+$([regex]::Escape($version))\b.*?(?=^##\s+|\z)"
-          $section = [regex]::Match($changelog, $pattern).Value.Trim()
-          if (-not $section) { $section = "Pegline $version" }
+          $notes = Join-Path $PWD "docs/RELEASE-$version.md"
+          if (Test-Path -LiteralPath $notes) {
+            $section = Get-Content -LiteralPath $notes -Raw
+          } else {
+            $changelog = Get-Content -LiteralPath CHANGELOG.md -Raw
+            $heading = "(?ms)^##\s+$([regex]::Escape($version))\b"
+            $pattern = $heading + ".*?(?=^##\s+|\z)"
+            $section = [regex]::Match($changelog, $pattern).Value.Trim()
+            if (-not $section) { $section = "Pegline $version" }
+          }
           $body = Join-Path $env:RUNNER_TEMP 'RELEASE_BODY.md'
           $section | Set-Content -LiteralPath $body -Encoding utf8
           Write-Host $section
