@@ -8,6 +8,11 @@
   0.35 s preview starts again only after the button is released. This also
   removes the stale preview that could stay visible underneath the dragged
   card. The pin gesture itself is unchanged.
+- **The note editor's bottom-right resize anchor is easier to hit.** The corner
+  was the 2 DIP intersection of the right and bottom bands; it is now a
+  24×24 DIP rectangle reaching into the paper and over the shadow margin. The
+  edge bands stay 2 DIP, and the diagonal resize cursor appears anywhere in
+  the anchor, so it is visible well before the old 2 DIP strip.
 
 ## 2.6.0 — 2026-11-13
 

@@ -791,4 +791,6 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 2.6.1（2026-11-13）只修一个交互泄漏：夹子按住/拖拽时，`update_pointer` 不再在
 `pin_held` 时计算卡片 hover，`update_preview` 在 `pin_press` 期间隐藏并重置预览，
 `on_preview_ready` 丢弃拖拽中才完成的解码；于是底部的 0.35 s 大预览不会在拖动时
-弹出，松手后恢复。没有几何、物理或持久化改动，测试数与像素输出不变。
+弹出，松手后恢复。同一版还把便签编辑器右下角的缩放锚点从 2 DIP 边带交点
+扩大为 24×24 DIP 矩形（向纸内、阴影边距各 24 DIP），右/下边带仍为 2 DIP；
+没有几何、物理或持久化改动，测试数与像素输出不变。

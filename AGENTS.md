@@ -97,8 +97,11 @@ until the next reveal. `src/app/reveal.rs` owns the rule.
  the clothespin is held, the UI no longer reports the card as hovered, hides and
  resets any preview state, and drops a preview decode that finishes mid-drag, so
  the bottom 0.35 s preview cannot appear under the dragged card. Hover preview
- returns on release. No geometry, physics or persistence change; 255 lib + 1 main
- tests still pass. See `docs/BEHAVIOR.md` §5.5 and `docs/RELEASE-2.6.1.md`.
+ returns on release. It also enlarges the note editor's bottom-right resize
+ anchor from the 2 DIP band intersection to a 24×24 DIP rectangle (edge bands
+ stay 2 DIP), so the diagonal resize cursor appears much earlier. No geometry,
+ physics or persistence change; 255 lib + 1 main tests still pass. See
+ `docs/BEHAVIOR.md` §5.5/§10.1 and `docs/RELEASE-2.6.1.md`.
 
 **2.6.0 (2026-11-13)**: it adds pin dragging to the line. Hovering a card's
 clothespin highlights it (1.12, warm glow, hot metal); dragging the pin moves
