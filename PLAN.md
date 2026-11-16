@@ -755,7 +755,7 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   设计见 `docs/archive/plans/PLAN-2.6.0-PENDULUM-20261113-011909.md` 与 `docs/DECISIONS.md` D16。
 - 纸片空气阻力：每卡按 `aspect=h/w`、`tall=clamp((aspect−1)/1.2,0,1)` 推导线性阻尼 `1.116+0.434·tall`、二次阻力 `0.279+0.31·tall`、风增益 `4.34e-5·(0.7+0.6·tall)`；压心 `r=h/2` 的相对风扭矩
   `Q=wind_gain·|v_p|·(v_p·(cosθ,sinθ))·r`（限 ±6000）直接加进摆角加速度，所以匀速运动也会略微向后倒。旧的“匀速竖直”结论已修正。
-- 调参追踪：`PEGLINE_PAPER_TRACE` 逐帧写 `t,id,grabbed,hop,release,x,vx,drop,vy,angle,omega,target,ax,ay,g_eff,wind,flex,swap_dir`；`tools/paper-trace.ps1` 驱动一次 200% DPI 的夹子拖拽，`tools/paper-plot.py` 生成角度/角速度/线速度图和峰值/过零/停稳指标；`PEGLINE_PAPER_DAMPING/DRAG/WIND/ASPECT` 覆盖系数。流程见 `docs/PAPER-TUNING.md`。
+- 调参追踪（2.6.2 已删除纸张模型，以下开关与脚本已移除，仅留作记录）：`PEGLINE_PAPER_TRACE` 逐帧写 `t,id,grabbed,hop,release,x,vx,drop,vy,angle,omega,target,ax,ay,g_eff,wind,flex,swap_dir`；`tools/paper-trace.ps1` 驱动一次 200% DPI 的夹子拖拽，`tools/paper-plot.py` 生成角度/角速度/线速度图和峰值/过零/停稳指标；`PEGLINE_PAPER_DAMPING/DRAG/WIND/ASPECT` 覆盖系数。流程见 `docs/PAPER-TUNING.md`。
 - 松手 0.46/0.80 回槽位，速度上限 600 DIP/s，Y 回 0、摆角保留并继续衰减；UI tick 在
   `snapshot.grabbing == false` 后按 `snapshot.order` 重排 `line.items`，顺序变化才写
   `pegged.txt` 并播一次 `Tink`。
@@ -780,7 +780,7 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   draw p50 0.640 ms，差异为运行噪声，仍在 8.3 ms 预算和 60 MB 目标之外的历史区间内。
 - 旧 0.45/0.05 模型的 `--demo` CSV 基线：峰值 5.50°、7 次过零（含小角度抖动）、817 ms 停稳，
   max |ω| 97.5°/s，max |vx|/|vy| 3444/311 DIP/s（仅历史参考；当前“更强空气”预设待手测）；
-  `tools/paper-plot.py` 生成 `target/paper-trace.html`。
+  `tools/paper-plot.py` 生成 `target/paper-trace.html`（脚本已在 2.6.2 删除）。
 - 真实 6 卡：夹子 (2138,87) 按下、拖 +200 px、释放后 `pegged.txt` 第一行从便签变为
   `屏幕截图 2026-11-10 201140.png`，便签第二行，其余不变（测试后已恢复原文件）。
 - `--demo` 三卡：夹子 (1614,87)，拖动 +200 px，顺序 `[7,8,9] → [8,7,9]`，卡片移动
