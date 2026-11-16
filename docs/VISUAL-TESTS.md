@@ -586,6 +586,10 @@
 
 复现与定位（都同一台机器、同一个进程状态）：
 
+> 说明（2026-11-16）：下表里的 `--mode=menu` 与 `PEGLINE_SKIP` 是 2.3.1 当时的临时
+> 模式/开关，现均已移除，二进制会报 `unknown mode`/忽略该变量；要复核同一结论请换用
+> 现有的 `--mode=line`。
+
 | 步骤 | 结果 |
 |:--|:--|
 | 绕开鼠标，直接向 `PeglineMessage` 投递 `WM_TRAY_CALLBACK` 打开托盘菜单，截屏 | 圆角菜单框、两条分隔线、悬停高亮都在，**没有任何文字**；`GetWindowRect` 380×394 |
@@ -789,3 +793,42 @@ x=600 起）；PowerShell 的屏幕坐标被 DPI 虚拟化为 3008×1692，而�
 截图由一次性 DPI-aware PowerShell 生成（`SetProcessDPIAware` + `SetCursorPos` +
 `mouse_event` + `CopyFromScreen` 到 6016×420，再从物理 x=2350..3650 裁切），脚本未入库；
 PowerShell 的屏幕坐标被 DPI 虚拟化为 3008×1692，而应用看到 6016×3384、scale 2.00。
+
+## 6. 开发开关总表（2026-11-16）
+
+发布版 exe 里保留全部开关：视觉验收脚本直接跑 release 构建，所以 `dev.rs` 的解析和
+`Dev::enabled()` 不能放进 `cfg(debug_assertions)`（审计 X3-12 的结论）。`--*-demo` 之
+外，`PEGLINE_*` 只调节对应 demo 的行为；只有 `PEGLINE_LANG`、`PEGLINE_TRACE`、
+`PEGLINE_ALLOW_SECOND_INSTANCE` 是独立的产品/调试开关。
+
+### 6.1 CLI 开关（12 个，`src/app/dev.rs`）
+
+| 开关 | 用途 | 配合的 `PEGLINE_*` |
+|:--|:--|:--|
+| `--demo` | 装 6 张空卡片 | |
+| `--panic-test` | 走一遍 panic 恢复路径 | |
+| `--editor-demo` | 打开标注编辑器 | |
+| `--editor-hold` | 编辑器保持不关闭 | |
+| `--annotate-demo` | 照片 → 编辑器 → 卡片往返 | |
+| `--note-editor-demo` | 打开便签编辑器 | |
+| `--note-hover-demo` | 便签悬停预览 | `PEGLINE_NOTE_DEMO_POINTER` |
+| `--note-flow-demo` | hover → centre → editor 飞行 | |
+| `--note-discard-demo` | 空便签丢弃的 tumble | |
+| `--note-storage-demo` | 便签写入/归档往返 | `PEGLINE_NOTE_STORAGE_PAPER` |
+| `--note-preview-demo` | 便签预览窗口 | |
+| `--note-resize-demo` | 便签缩放窗口拖拽 | `PEGLINE_NOTE_RESIZE_PAPER`、`PEGLINE_NOTE_RESIZE_HOVER` |
+
+### 6.2 环境变量（10 个）
+
+| 变量 | 读取位置 | 用途 |
+|:--|:--|:--|
+| `PEGLINE_LANG` | `src/i18n.rs` | UI 语言（产品功能） |
+| `PEGLINE_TRACE` | `src/logging.rs` | 打开 trace 日志（`trace.on` 文件） |
+| `PEGLINE_ALLOW_SECOND_INSTANCE` | `src/main.rs` | 允许脚本开第二实例 |
+| `PEGLINE_NOTE_DEMO_POINTER` | `src/app/dev.rs` | 悬停 demo 的指针位置 |
+| `PEGLINE_NOTE_PEEK_POINTER` | `src/app/dev.rs` | peek 指针的屏幕坐标 |
+| `PEGLINE_NOTE_SLOW` | `src/app/dev.rs` | 慢速倍率，夹在 1–10 |
+| `PEGLINE_NOTE_RESIZE_PAPER` | `src/app/dev.rs` | 缩放 demo 的初始纸面尺寸 |
+| `PEGLINE_NOTE_RESIZE_HOVER` | `src/app/dev.rs` | 缩放 demo 的悬停带 |
+| `PEGLINE_NOTE_STORAGE_PAPER` | `src/app/dev.rs` | storage demo 的纸面尺寸 |
+| `PEGLINE_PROBE_TRACE` | `src/bin/probe.rs` | probe 每帧/每轮的细节行 |

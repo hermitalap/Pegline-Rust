@@ -140,8 +140,9 @@ struct Shared {
     moves_posted: AtomicU64,
     /// Instrumentation: post time (monotonic microseconds) of each recent
     /// `PointerMove`, in post order; the slot is the sequence number masked
-    /// with `MOVE_RING - 1`.
-    move_ring: Box<[AtomicI64]>,
+    /// with `MOVE_RING - 1`. Allocated only while tracing is on, so a normal
+    /// run never pays for the ring.
+    move_ring: Option<Box<[AtomicI64]>>,
 }
 
 /// Locks `mutex`, taking the guard even if a panic poisoned it: the state is
@@ -160,10 +161,10 @@ impl Shared {
     /// the apply-lag trace is measured; nothing is recorded when tracing is
     /// off, and nothing allocates either way.
     fn send_move(&self, x: i32, y: i32) {
-        if self.trace_on {
+        if let Some(ring) = self.move_ring.as_ref() {
             let index = self.moves_posted.fetch_add(1, Ordering::Relaxed);
             let slot = (index as usize) & (MOVE_RING - 1);
-            self.move_ring[slot].store(now_micros(), Ordering::Relaxed);
+            ring[slot].store(now_micros(), Ordering::Relaxed);
         }
         self.send(Command::PointerMove { x, y });
     }
@@ -281,6 +282,7 @@ impl NoteEditor {
         let hwnd = create_window(frame.rect)?;
 
         let (tx, rx) = mpsc::channel();
+        let trace_on = logging::trace_enabled();
         let shared = Arc::new(Shared {
             tx: Mutex::new(tx),
             events: Mutex::new(VecDeque::new()),
@@ -305,12 +307,14 @@ impl NoteEditor {
                 drag: None,
             }),
             cursor_kind: AtomicU8::new(0),
-            trace_on: logging::trace_enabled(),
+            trace_on,
             moves_posted: AtomicU64::new(0),
-            move_ring: (0..MOVE_RING)
-                .map(|_| AtomicI64::new(0))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            move_ring: trace_on.then(|| {
+                (0..MOVE_RING)
+                    .map(|_| AtomicI64::new(0))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice()
+            }),
         });
         // SAFETY: the pointer stays valid while the window exists: `NoteEditor`
         // holds the Arc and destroys the window before dropping it.
@@ -828,11 +832,11 @@ fn render_thread(
             .iter()
             .filter(|command| matches!(command, Command::PointerMove { .. }))
             .count() as u32;
-        let last_move_stamp = if trace_on && moves_in_batch > 0 {
-            shared.move_ring[move_slot(applied_moves + u64::from(moves_in_batch) - 1)]
-                .load(Ordering::Relaxed)
-        } else {
-            0
+        let last_move_stamp = match shared.move_ring.as_ref() {
+            Some(ring) if moves_in_batch > 0 => ring
+                [move_slot(applied_moves + u64::from(moves_in_batch) - 1)]
+            .load(Ordering::Relaxed),
+            _ => 0,
         };
         let queue_depth = if trace_on {
             let posted = shared.moves_posted.load(Ordering::Relaxed);

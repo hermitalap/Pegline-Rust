@@ -404,8 +404,9 @@ hotspot.height   = slot_height(card_height, note)
 
 - 编辑窗口先隐藏，但**等到飞行层的第一帧呈现**（`FlightEvent::Started`）才隐藏，
   纸面在两扇窗之间不会闪空。
-- 纸面位图用 `notes::render_paper(460, 360, color)` 按编辑纸面尺寸重新渲染（2×），
-  不拉伸卡片位图，折角仍是 13 DIP。
+- 纸面位图复用渲染线程提交时按编辑纸面实时尺寸画好的那张
+  （`sessions.note_return_image`），不在 UI 线程重新光栅化，也不拉伸卡片位图；
+  折角仍是 13 DIP。
 - 起点 = 编辑纸面矩形，飞行卡片比纸面四周各多 4 DIP（`PHOTO_INSET`），交接时
   纸面大小不变、只多出一圈玻璃外框。
 - 前 0.3 s 缩到 **45 %**（ease-out），同时获得随机方向的自转（**140–260 °/s**，

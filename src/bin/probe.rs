@@ -1,22 +1,43 @@
 //! `probe`: the measurement binary.
 //!
 //! It drives the real renderer and the real scene on a real window, so the
-//! numbers are the app's numbers:
+//! numbers are the app's numbers. This is developer tooling: it is not packaged
+//! and has no UI.
+//!
+//! Modes (`--mode=NAME`):
 //!
 //! ```text
-//! probe --mode=line   --seconds=10   # 6 cards, continuous wind
-//! probe --mode=idle   --seconds=10   # 6 cards, settled, no frame loop
-//! probe --mode=flight --seconds=5    # the real flight window
-//! probe --mode=static --seconds=10   # one frame, then no presents
-//! probe --mode=note   --seconds=2    # the note editor at its largest paper
-//! probe --mode=note --big=0          # ... at the default (smallest) paper
-//! probe --mode=timer                 # frame-cap wait precision, no window
+//! line     6 cards, continuous wind: the shipping frame loop
+//! idle     6 cards, settled, then the loop stops
+//! static   one frame, then no presents
+//! flight   the real flight window
+//! clear    an empty line strip
+//! prim     one primitive (`--prim=`, for the memory bisection)
+//! atlas    the baked nine-patch shadow atlas, tiled
+//! duo      two renderers in one process, to price a second device
+//! note     the note editor: memory, resize repaint time and resize drift
+//! timer    frame-cap wait precision; no window, no device
+//! ```
+//!
+//! Switches (`--key=value`; boolean switches take `1` or `0`):
+//!
+//! ```text
+//! --mode=NAME     one of the modes above, default line
+//! --seconds=N     run time in seconds, default 10
+//! --cards=N       cards on the line, default 6
+//! --repeat=N      repeat the run N times, default 1
+//! --prim=NAME     primitive for prim mode: nothing, rope, shadow, fill,
+//!                 panel, text, card, card6, fill6; default card
+//! --once=1        prim mode: draw once instead of animating
+//! --big=1         note mode: largest paper instead of the smallest
+//! --noimg=1       line mode: skip the card thumbnails
+//! --smallimg=1    line mode: use the small card images
+//! --cycles=N      note mode: resize round trips, default 20
 //! ```
 //!
 //! Output is one `PROBE ...` line per run: fps, p50/p95/max frame interval,
-//! draw time, private memory and working set.
-//!
-//! This is developer tooling: it is not packaged and has no UI.
+//! draw time, private memory and working set. `PEGLINE_PROBE_TRACE=1` adds a
+//! line per frame or resize cycle.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -82,12 +103,19 @@ fn main() {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
+    /// The shipping frame loop: a full line, continuous wind.
     Line,
+    /// A settled line: draw, then wait without a frame loop.
     Idle,
+    /// One frame, then no presents.
     Static,
+    /// The flight window, its real animation and landing fade.
     Flight,
+    /// An empty line strip, for the idle floor.
     Clear,
+    /// One primitive, for the memory/draw-cost bisection.
     Primitive,
+    /// The baked shadow atlas, tiled across the window.
     Atlas,
     /// Waits out a frame period and reports the achieved precision. No window,
     /// no device: this measures the frame-cap timer on its own.

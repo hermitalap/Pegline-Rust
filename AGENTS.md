@@ -145,7 +145,7 @@ sampling), not OLE: `Command::Dragging` would put the render thread to sleep and
 `DoDragDrop` would steal the gesture. Pin hit box is 20×34 DIP and is checked
 before the band click, pills and card press; a <4 DIP click is a no-op. See
 `docs/BEHAVIOR.md` §5.5, `docs/DECISIONS.md` D14/D16/D17, `PLAN.md` §14 and
-`PLAN-2.6.0-20261112-233804.md`. Air drag is per-card (aspect-ratio damping and
+`docs/archive/plans/PLAN-2.6.0-20261112-233804.md`. Air drag is per-card (aspect-ratio damping and
 a relative-wind torque at `r=h/2`); `PEGLINE_PAPER_TRACE` + `tools/paper-trace.ps1`
 and `tools/paper-plot.py` produce the tuning CSV/plot described in
 `docs/PAPER-TUNING.md`. Measured at 200% DPI: 59.88–60.16 fps, draw p50

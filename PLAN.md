@@ -687,7 +687,7 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
 
 ## 13. 便签编辑器可缩放与尺寸记忆（2026-11-12，2.5.0）
 
-设计文档：`PLAN-2.5.0-20261112-155004.md`。用户可见行为已写进 `docs/BEHAVIOR.md` §10.1，
+设计文档：`docs/archive/plans/PLAN-2.5.0-20261112-155004.md`。用户可见行为已写进 `docs/BEHAVIOR.md` §10.1，
 取舍见 `docs/DECISIONS.md` D13。
 
 - 纸面 460×360（默认/最小）～ 820×640 DIP，窗口 = 纸面 + 2×20 DIP 阴影边距
@@ -752,7 +752,7 @@ PROBE mode=duo one_renderer=47.0MB two_renderers=65.9MB second_window=18.9MB car
   `atan(a_x/g_eff)`（±6°），Y 加速度改变有效重力 `g_eff=clamp(35500-a_y, 0.25g, 1.75g)`；
   另叠加 ±1.2° 的柔性剪切（0.006×角速度，0.12/0.55）。旧的“按水平速度倾斜 ±5°”
   和线性 0.30/0.30 摆已删除。只看到一次过冲，约半秒停住（D17 更强空气预设）；6 DIP 小跳不变。
-  设计见 `PLAN-2.6.0-PENDULUM-20261113-011909.md` 与 `docs/DECISIONS.md` D16。
+  设计见 `docs/archive/plans/PLAN-2.6.0-PENDULUM-20261113-011909.md` 与 `docs/DECISIONS.md` D16。
 - 纸片空气阻力：每卡按 `aspect=h/w`、`tall=clamp((aspect−1)/1.2,0,1)` 推导线性阻尼 `1.116+0.434·tall`、二次阻力 `0.279+0.31·tall`、风增益 `4.34e-5·(0.7+0.6·tall)`；压心 `r=h/2` 的相对风扭矩
   `Q=wind_gain·|v_p|·(v_p·(cosθ,sinθ))·r`（限 ±6000）直接加进摆角加速度，所以匀速运动也会略微向后倒。旧的“匀速竖直”结论已修正。
 - 调参追踪：`PEGLINE_PAPER_TRACE` 逐帧写 `t,id,grabbed,hop,release,x,vx,drop,vy,angle,omega,target,ax,ay,g_eff,wind,flex,swap_dir`；`tools/paper-trace.ps1` 驱动一次 200% DPI 的夹子拖拽，`tools/paper-plot.py` 生成角度/角速度/线速度图和峰值/过零/停稳指标；`PEGLINE_PAPER_DAMPING/DRAG/WIND/ASPECT` 覆盖系数。流程见 `docs/PAPER-TUNING.md`。
