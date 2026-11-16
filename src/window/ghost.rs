@@ -88,6 +88,7 @@ impl Ghost {
                 | WS_EX_TRANSPARENT,
             RectI::new(0, 0, 2, 2),
             Some(ghost_wndproc),
+            "ghost",
         )?;
         // SAFETY: our own window.
         unsafe {
@@ -100,7 +101,7 @@ impl Ghost {
             window::spawn_render_thread("pegline-ghost", "ghost", move |ready| {
                 ghost_thread(send_hwnd, rx, ready);
             })?;
-        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd, "ghost")?;
 
         Ok(Self {
             hwnd,
@@ -150,10 +151,14 @@ impl Ghost {
         window::stop_render_thread(self.join.take(), || {
             let _ = self.tx.send(GhostCommand::Stop);
         });
+        if self.hwnd.0.is_null() {
+            return;
+        }
+        let hwnd = std::mem::replace(&mut self.hwnd, HWND(std::ptr::null_mut()));
         // SAFETY: the render thread has been joined and the window was created
         // by `create` on this thread.
         unsafe {
-            let _ = DestroyWindow(self.hwnd);
+            let _ = DestroyWindow(hwnd);
         }
     }
 }
@@ -347,6 +352,10 @@ unsafe extern "system" fn ghost_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the drag ghost window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("ghost_wndproc", || unsafe {
         ghost_wndproc_inner(hwnd, message, wparam, lparam)
     })

@@ -546,6 +546,10 @@ unsafe extern "system" fn dialog_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the shortcut dialog;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("dialog_wndproc", || unsafe {
         dialog_wndproc_inner(hwnd, message, wparam, lparam)
     })

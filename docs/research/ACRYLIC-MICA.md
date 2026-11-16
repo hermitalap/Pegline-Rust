@@ -150,7 +150,7 @@ DesktopWindowTarget
 ### 6.1 代码改造面
 
 - `src/gfx/device.rs`：`create_composition`（90–126 行）目前建 `IDCompositionDevice` + `CreateTargetForHwnd` + root visual；`create_swap_chain`（133–166 行）建 flip-sequential swapchain。需要增加 WUC 版本：`CreateDispatcherQueueController` → `Compositor` → `ICompositorDesktopInterop::CreateDesktopWindowTarget` → `DesktopWindowTarget.SetRoot`，并用 `CreateCompositionSurfaceForSwapChain` 挂 swapchain。
-- `src/render/mod.rs`：`Renderer::new`（408 行）持有 `_dcomp/_visual/_target`；`attach_content`（498 行）调用 `_visual.SetContent(&content)` + `_dcomp.Commit()`。这里要抽象成两种 backend，或整体替换为 WUC surface brush。
+- `src/render/mod.rs`：`Renderer::new`（408 行）持有 `_dcomp/_visual/_target`；`attach_content` 已移到 `src/gfx/device.rs`（350 行）并由 `Renderer::new` 调用，内部 `_visual.SetContent(&content)` + `_dcomp.Commit()`。这里要抽象成两种 backend，或整体替换为 WUC surface brush。
 - 所有窗口（line、flight、preview、ghost、annotation editor、note editor）都走这套；迁移是“全窗口”的，不能只改一个表面，除非做双栈。
 - 标注编辑器的五个胶囊在同一个窗口/swapchain 里（`src/editor/window/mod.rs:210–229`），所以一个 WUC target 就够，不需要每胶囊一个窗口。
 

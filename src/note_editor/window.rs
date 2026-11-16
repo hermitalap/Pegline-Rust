@@ -263,7 +263,6 @@ impl NoteEditor {
         visible: bool,
         notify: Box<dyn Fn(NoteEditorEvent) + Send>,
     ) -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(note_wndproc))?;
         let frame = frame_for(monitor.work, paper, dpi);
         if frame.paper != paper {
             logging::trace(format!(
@@ -488,8 +487,7 @@ impl Drop for NoteEditor {
     }
 }
 
-/// Creates the editor window at `frame`, still hidden. The window class must
-/// already be registered.
+/// Creates the editor window at `frame`, still hidden.
 fn create_window(frame: crate::types::RectI) -> Result<HWND, String> {
     window::create_window(
         CLASS_NAME,
@@ -498,6 +496,7 @@ fn create_window(frame: crate::types::RectI) -> Result<HWND, String> {
         WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
         frame,
         Some(note_wndproc),
+        "note editor",
     )
 }
 
@@ -543,6 +542,7 @@ fn start_render_thread(
         join,
         || shared.stopping.store(true, Ordering::Release),
         hwnd,
+        "note editor",
     )?;
     let flight_image = flight.lock().ok().and_then(|mut slot| slot.take());
     Ok((join, flight_image))
@@ -922,6 +922,10 @@ unsafe extern "system" fn note_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the note editor window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("note_wndproc", || unsafe {
         note_wndproc_inner(hwnd, message, wparam, lparam)
     })

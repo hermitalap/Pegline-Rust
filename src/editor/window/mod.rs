@@ -203,6 +203,7 @@ impl Editor {
             WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             RectI::new(left, top, left + width, top + height),
             Some(editor_wndproc),
+            "editor",
         )?;
 
         let (tx, rx) = mpsc::channel();
@@ -289,6 +290,7 @@ impl Editor {
             join,
             || shared.stopping.store(true, Ordering::Release),
             hwnd,
+            "editor",
         )?;
 
         logging::trace(format!(
@@ -530,6 +532,10 @@ unsafe extern "system" fn editor_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the editor window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("editor_wndproc", || unsafe {
         editor_wndproc_inner(hwnd, message, wparam, lparam)
     })

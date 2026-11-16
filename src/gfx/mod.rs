@@ -3,10 +3,10 @@
 //! ([`crate::editor::window`]) and the note editor
 //! ([`crate::note_editor::render`]).
 //!
-//! Only the creation constructors live here. Each window still keeps its own
-//! `D3D11`/`D2D` stack and its own keep-alive fields: a lost device on one
-//! window must not take the others down, so nothing is cached or shared at run
-//! time.
+//! The creation constructors and the swap-chain frame plumbing live here. Each
+//! window still keeps its own `D3D11`/`D2D` stack and its own keep-alive fields:
+//! a lost device on one window must not take the others down, so no device is
+//! cached or shared at run time.
 
 pub(crate) mod device;
 

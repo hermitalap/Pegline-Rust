@@ -129,6 +129,7 @@ impl Preview {
                 | WS_EX_TRANSPARENT,
             RectI::new(0, 0, 2, 2),
             Some(preview_wndproc),
+            "preview",
         )?;
         // SAFETY: our own window.
         unsafe {
@@ -145,7 +146,7 @@ impl Preview {
             window::spawn_render_thread("pegline-preview", "preview", move |ready| {
                 preview_thread(send_hwnd, rx, ready, thread_tilt, thread_pending);
             })?;
-        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd, "preview")?;
 
         Ok(Self {
             hwnd,
@@ -598,6 +599,10 @@ unsafe extern "system" fn preview_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the preview window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("preview_wndproc", || unsafe {
         preview_wndproc_inner(hwnd, message, wparam, lparam)
     })

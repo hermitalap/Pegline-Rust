@@ -245,6 +245,7 @@ impl Flight {
                 | WS_EX_TRANSPARENT,
             RectI::new(0, 0, 2, 2),
             Some(flight_wndproc),
+            "flight",
         )?;
         // SAFETY: our own window.
         unsafe {
@@ -259,7 +260,7 @@ impl Flight {
             window::spawn_render_thread("pegline-flight", "flight", move |ready| {
                 flight_thread(send_hwnd, rx, ready, on_event, thread_interrupt);
             })?;
-        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd, "flight")?;
 
         Ok(Self {
             hwnd,
@@ -1351,6 +1352,10 @@ unsafe extern "system" fn flight_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the flight window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("flight_wndproc", || unsafe {
         flight_wndproc_inner(hwnd, message, wparam, lparam)
     })

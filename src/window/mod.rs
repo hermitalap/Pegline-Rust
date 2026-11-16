@@ -131,7 +131,7 @@ pub fn register_class(
 }
 
 /// Creates a window of `class`, registered here with `wndproc`, with the given
-/// style, extended style and bounds.
+/// style, extended style and bounds. `label` names the window in error messages.
 ///
 /// The caller owns `GWLP_USERDATA`; this only brings the window into existence.
 pub fn create_window(
@@ -141,6 +141,7 @@ pub fn create_window(
     ex_style: WINDOW_EX_STYLE,
     bounds: RectI,
     wndproc: WNDPROC,
+    label: &'static str,
 ) -> Result<HWND, String> {
     register_class(class, wndproc)?;
     let instance =
@@ -163,7 +164,7 @@ pub fn create_window(
             None,
         )
     }
-    .map_err(|e| format!("CreateWindowExW({class:?}): {e}"))
+    .map_err(|e| format!("CreateWindowExW({label}): {e}"))
 }
 
 /// Creates a hidden message-only window owned by `owner`.
@@ -185,6 +186,7 @@ pub fn create_message_window(
         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         RectI::new(0, 0, 0, 0),
         wndproc,
+        "message",
     )?;
     // SAFETY: the window was just created and belongs to this thread.
     unsafe {
@@ -372,17 +374,19 @@ pub(crate) fn spawn_render_thread(
 ///
 /// On failure the thread is joined and `hwnd` destroyed, so a caller that gets
 /// an error can return without further cleanup. `before_join` lets an editor
-/// raise its stopping flag before the join.
+/// raise its stopping flag before the join, and `label` names the window in
+/// error messages.
 pub(crate) fn await_render_ready(
     ready_rx: &Receiver<Result<(), String>>,
     join: JoinHandle<()>,
     before_join: impl FnOnce(),
     hwnd: HWND,
+    label: &'static str,
 ) -> Result<JoinHandle<()>, String> {
     let error = match ready_rx.recv() {
         Ok(Ok(())) => return Ok(join),
         Ok(Err(error)) => error,
-        Err(_) => "render thread died during setup".to_string(),
+        Err(_) => format!("{label} render thread died during setup"),
     };
     before_join();
     let _ = join.join();

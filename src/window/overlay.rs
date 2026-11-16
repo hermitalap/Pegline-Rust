@@ -82,6 +82,7 @@ impl Overlay {
                 work.top + height_px as i32,
             ),
             Some(overlay_wndproc),
+            "overlay",
         )?;
         // The window starts hidden; the app shows it on the first reveal.
         // SAFETY: our own window.
@@ -115,7 +116,7 @@ impl Overlay {
                     ready,
                 );
             })?;
-        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd, "overlay")?;
 
         Ok(Self {
             hwnd,
@@ -512,6 +513,10 @@ unsafe extern "system" fn overlay_wndproc(
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // whole process. Contain it so one bad message cannot take the tray icon
     // down with it.
+    // SAFETY: USER32 passes `hwnd` and the message parameters for the line window;
+    // the body treats them as valid for this call (it writes through the
+    // `WM_GETMINMAXINFO`/`WM_DPICHANGED` pointers USER32 supplied) and keeps
+    // none of them past its return.
     crate::window::guard("overlay_wndproc", || unsafe {
         overlay_wndproc_inner(hwnd, message, wparam, lparam)
     })
