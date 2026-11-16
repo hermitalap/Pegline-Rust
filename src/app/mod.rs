@@ -41,12 +41,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, IDYES, KillTimer,
-    MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING,
-    MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
-    SetTimer, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, IDYES, KillTimer, MB_ICONQUESTION,
+    MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING, MSLLHOOKSTRUCT, MessageBoxW,
+    PostMessageW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowsHookExW,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, UnhookWindowsHookEx, WH_MOUSE_LL,
+    WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{PCWSTR, w};
 
@@ -454,8 +454,9 @@ pub fn run() -> i32 {
 
     let code = window::message_loop();
 
-    // SAFETY: the loop has ended; no window procedure can run after the windows
-    // are destroyed inside shutdown().
+    // SAFETY: the loop has ended and this thread runs no window procedure any
+    // more. `shutdown` releases the tray icon, the hooks and the render threads;
+    // the hidden window itself is left to the process exit.
     unsafe {
         (*raw).shutdown();
         drop(Box::from_raw(raw));
@@ -494,7 +495,6 @@ struct App {
     /// Set while a quit is waiting for an in-flight note commit; the deadline
     /// after which the editor is dropped even if the write never reported back.
     quit_at: Option<f64>,
-    destroyed: bool,
 }
 
 impl App {
@@ -518,7 +518,6 @@ impl App {
             start_time: start,
             quit: false,
             quit_at: None,
-            destroyed: false,
         };
         // Three values are not `Default`: the first card id is 1, not 0, and the
         // two throttle clocks start at launch rather than at the epoch.
@@ -821,7 +820,7 @@ impl App {
     /// Handles one window message. `None` means "let DefWindowProc do it".
     fn on_message(
         &mut self,
-        hwnd: HWND,
+        _hwnd: HWND,
         message: u32,
         wparam: WPARAM,
         lparam: LPARAM,
@@ -860,14 +859,16 @@ impl App {
                 Some(LRESULT(0))
             }
             WM_CLOSE => {
-                // SAFETY: our own window.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
+                // The close request ends the message loop; the process exits
+                // through `run` and the system reclaims the window. Destroying
+                // it here would dispatch `WM_DESTROY` synchronously, and the
+                // frame holding `&mut App` would re-enter the window procedure
+                // with a second mutable reference (see the modal-loop rule
+                // below).
+                self.request_quit();
                 Some(LRESULT(0))
             }
             WM_DESTROY => {
-                self.destroyed = true;
                 window::quit();
                 Some(LRESULT(0))
             }
@@ -3750,21 +3751,20 @@ impl App {
         self.finish_quit();
     }
 
-    /// Closes every window and ends the message loop.
+    /// Closes the note editor and ends the message loop.
+    ///
+    /// The hidden window is not destroyed here: `DestroyWindow` dispatches
+    /// `WM_DESTROY` synchronously, and this frame holds `&mut App`, so the
+    /// window procedure would create a second mutable reference to it. The loop
+    /// ends with `window::quit()` and `run` exits the process, which releases
+    /// the window.
     fn finish_quit(&mut self) {
         self.quit = true;
         self.state.keep_open = false;
         if let Some(mut editor) = self.windows.note_editor.take() {
             editor.shutdown();
         }
-        if !self.destroyed {
-            // SAFETY: our own window.
-            unsafe {
-                let _ = DestroyWindow(self.hwnd);
-            }
-        } else {
-            window::quit();
-        }
+        window::quit();
     }
 
     fn shutdown(&mut self) {
@@ -3799,13 +3799,6 @@ impl App {
         }
         if let Some(watcher) = self.capture.watcher.as_mut() {
             watcher.stop();
-        }
-        if !self.destroyed && !self.hwnd.is_invalid() {
-            // SAFETY: our own window and timer.
-            unsafe {
-                let _ = KillTimer(Some(self.hwnd), TIMER_TICK);
-                let _ = DestroyWindow(self.hwnd);
-            }
         }
         let _ = self.settings.save();
     }
