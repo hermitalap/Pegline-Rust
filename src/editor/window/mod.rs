@@ -14,7 +14,6 @@
 mod paint;
 
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -47,11 +46,8 @@ use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory2, IWICImagingFactory};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
 use windows::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, GCS_COMPSTR,
-    GCS_CURSORPOS, GCS_RESULTSTR, HIMC, IME_COMPOSITION_STRING, ISC_SHOWUICOMPOSITIONWINDOW,
-    ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
-    ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
-    ImmSetOpenStatus, NI_COMPOSITIONSTR,
+    CPS_CANCEL, GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, ISC_SHOWUICOMPOSITIONWINDOW,
+    ImmGetCompositionStringW, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -240,20 +236,11 @@ impl Editor {
         // A plain Win32 window does not get an IME context on Windows 11 TSF
         // unless it asks for one. Without this Chinese/Japanese input never
         // starts composing in the text tool.
-        // SAFETY: our window and a fresh context owned by this thread.
-        let ime = unsafe { ImmCreateContext() };
-        if !ime.0.is_null() {
-            // SAFETY: the HWND is ours; the returned previous context is not
-            // owned by us and is ignored.
-            unsafe {
-                let _ = ImmAssociateContext(hwnd, ime);
-                // A fresh context starts closed; open it so the active input
-                // method actually composes instead of passing Latin keys.
-                let _ = ImmSetOpenStatus(ime, true);
+        match win32::ime_attach(hwnd) {
+            Some(ime) => {
+                shared.ime.store(ime, Ordering::Release);
             }
-            shared.ime.store(ime.0 as isize, Ordering::Release);
-        } else {
-            logging::error("editor: ImmCreateContext failed");
+            None => logging::error("editor: ImmCreateContext failed"),
         }
 
         let (client_width, client_height) = client_size(hwnd).unwrap_or((1, 1));
@@ -674,15 +661,7 @@ fn handle_deliver(_hwnd: HWND, shared: &Shared) -> LRESULT {
 /// `Shared` outlives the window, so the app can still read the flag.
 fn handle_destroy(hwnd: HWND, shared: &Shared) -> LRESULT {
     let ime = shared.ime.swap(0, Ordering::AcqRel);
-    if ime != 0 {
-        let context = HIMC(ime as *mut c_void);
-        // SAFETY: the HWND is still valid during WM_DESTROY and the
-        // context was created by us in `open`.
-        unsafe {
-            let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
-            let _ = ImmDestroyContext(context);
-        }
-    }
+    win32::ime_detach(hwnd, ime);
     shared.closed.store(true, Ordering::Release);
     LRESULT(0)
 }
@@ -900,7 +879,7 @@ fn handle_ime(
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
             if flags & GCS_RESULTSTR.0 != 0 {
-                if let Some(text) = ime_string(hwnd, GCS_RESULTSTR) {
+                if let Some(text) = win32::ime_string(hwnd, GCS_RESULTSTR) {
                     shared.send(Command::CommitComposition(text));
                 }
                 // The pinyin is done; an IME that skips ENDCOMPOSITION must not
@@ -908,7 +887,7 @@ fn handle_ime(
                 shared.composing.store(false, Ordering::Release);
             }
             if flags & GCS_COMPSTR.0 != 0 {
-                let text = ime_string(hwnd, GCS_COMPSTR).unwrap_or_default();
+                let text = win32::ime_string(hwnd, GCS_COMPSTR).unwrap_or_default();
                 let cursor = ime_cursor(hwnd, &text);
                 if !text.is_empty() {
                     shared.composing.store(true, Ordering::Release);
@@ -978,35 +957,6 @@ fn cancel_composition(hwnd: HWND, shared: &Shared) {
         }
         let _ = ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
         let _ = ImmReleaseContext(hwnd, context);
-    }
-}
-
-/// Reads one composition string from the window's input context.
-fn ime_string(hwnd: HWND, flag: IME_COMPOSITION_STRING) -> Option<String> {
-    // SAFETY: the context belongs to our window and is released below.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.0.is_null() {
-            return None;
-        }
-        let length = ImmGetCompositionStringW(context, flag, None, 0);
-        if length <= 0 {
-            let _ = ImmReleaseContext(hwnd, context);
-            return Some(String::new());
-        }
-        let mut buffer = vec![0u16; length as usize / 2];
-        let read = ImmGetCompositionStringW(
-            context,
-            flag,
-            Some(buffer.as_mut_ptr() as *mut c_void),
-            length as u32,
-        );
-        let _ = ImmReleaseContext(hwnd, context);
-        if read <= 0 {
-            return Some(String::new());
-        }
-        buffer.truncate(read as usize / 2);
-        Some(String::from_utf16_lossy(&buffer))
     }
 }
 
@@ -1108,35 +1058,7 @@ fn position_ime(hwnd: HWND, shared: &Shared) {
     logging::trace(format!(
         "IME position {x},{y} candidate {candidate_x},{candidate_y}"
     ));
-    if x < 0 || y < 0 {
-        return;
-    }
-    // SAFETY: our own window; the returned HIMC is released below.
-    let context = unsafe { ImmGetContext(hwnd) };
-    if context.0.is_null() {
-        return;
-    }
-    let composition = COMPOSITIONFORM {
-        dwStyle: CFS_POINT,
-        ptCurrentPos: POINT { x, y },
-        rcArea: RECT::default(),
-    };
-    let candidate = CANDIDATEFORM {
-        dwIndex: 0,
-        dwStyle: CFS_CANDIDATEPOS,
-        ptCurrentPos: POINT {
-            x: if candidate_x < 0 { x } else { candidate_x },
-            y: if candidate_y < 0 { y } else { candidate_y },
-        },
-        rcArea: RECT::default(),
-    };
-    // SAFETY: both forms are live for the calls; the HIMC came from
-    // ImmGetContext and is released with the matching HWND.
-    unsafe {
-        let _ = ImmSetCompositionWindow(context, &composition);
-        let _ = ImmSetCandidateWindow(context, &candidate);
-        let _ = ImmReleaseContext(hwnd, context);
-    }
+    win32::ime_position(hwnd, (x, y), Some((candidate_x, candidate_y)));
 }
 
 /// Turns one `WM_CHAR` into text input, combining surrogate pairs.

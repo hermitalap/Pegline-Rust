@@ -8,7 +8,6 @@
 //! only after the file is safely on disk.
 
 use std::collections::VecDeque;
-use std::ffi::c_void;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, Ordering,
 };
@@ -19,12 +18,7 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
-use windows::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR, GCS_RESULTSTR, HIMC,
-    ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
-    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
-    ImmSetOpenStatus,
-};
+use windows::Win32::UI::Input::Ime::{GCS_COMPSTR, GCS_RESULTSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VK_A, VK_B, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_I,
@@ -510,17 +504,11 @@ fn create_window(frame: crate::types::RectI) -> Result<HWND, String> {
 /// A plain Win32 window needs an IME context on Windows 11 TSF before
 /// Chinese/Japanese will compose in it.
 fn attach_ime(hwnd: HWND, shared: &Shared) {
-    // SAFETY: our window and a fresh context owned by this thread.
-    let ime = unsafe { ImmCreateContext() };
-    if !ime.0.is_null() {
-        // SAFETY: the HWND is ours; the previous context is not owned here.
-        unsafe {
-            let _ = ImmAssociateContext(hwnd, ime);
-            let _ = ImmSetOpenStatus(ime, true);
+    match win32::ime_attach(hwnd) {
+        Some(ime) => {
+            shared.ime.store(ime, Ordering::Release);
         }
-        shared.ime.store(ime.0 as isize, Ordering::Release);
-    } else {
-        logging::error("note editor: ImmCreateContext failed");
+        None => logging::error("note editor: ImmCreateContext failed"),
     }
 }
 
@@ -1554,12 +1542,12 @@ fn handle_ime(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LRES
         WM_IME_COMPOSITION => {
             let flags = lparam.0 as u32;
             if flags & GCS_RESULTSTR.0 != 0 {
-                if let Some(text) = ime_string(hwnd, GCS_RESULTSTR) {
+                if let Some(text) = win32::ime_string(hwnd, GCS_RESULTSTR) {
                     shared.send(Command::CommitComposition(text));
                 }
             }
             if flags & GCS_COMPSTR.0 != 0 {
-                let text = ime_string(hwnd, GCS_COMPSTR).unwrap_or_default();
+                let text = win32::ime_string(hwnd, GCS_COMPSTR).unwrap_or_default();
                 shared.send(Command::Composition(text));
             }
             position_ime(hwnd, shared);
@@ -1579,15 +1567,7 @@ fn handle_close(hwnd: HWND, message: u32, shared: &Shared) -> LRESULT {
         }
         WM_DESTROY => {
             let ime = shared.ime.swap(0, Ordering::AcqRel);
-            if ime != 0 {
-                let context = HIMC(ime as *mut c_void);
-                // SAFETY: the HWND is still valid during WM_DESTROY and the
-                // context was created by us in `open`.
-                unsafe {
-                    let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
-                    let _ = ImmDestroyContext(context);
-                }
-            }
+            win32::ime_detach(hwnd, ime);
             shared.closed.store(true, Ordering::Release);
         }
         _ => {}
@@ -1622,65 +1602,10 @@ fn deliver_pending(shared: &Shared) {
     *lock(&shared.notify) = Some(notify);
 }
 
-fn ime_string(
-    hwnd: HWND,
-    flag: windows::Win32::UI::Input::Ime::IME_COMPOSITION_STRING,
-) -> Option<String> {
-    // SAFETY: the context belongs to our window and is released below.
-    unsafe {
-        let context = ImmGetContext(hwnd);
-        if context.0.is_null() {
-            return None;
-        }
-        let length = ImmGetCompositionStringW(context, flag, None, 0);
-        if length <= 0 {
-            let _ = ImmReleaseContext(hwnd, context);
-            return Some(String::new());
-        }
-        let mut buffer = vec![0u16; length as usize / 2];
-        let read = ImmGetCompositionStringW(
-            context,
-            flag,
-            Some(buffer.as_mut_ptr() as *mut c_void),
-            length as u32,
-        );
-        let _ = ImmReleaseContext(hwnd, context);
-        if read <= 0 {
-            return Some(String::new());
-        }
-        buffer.truncate(read as usize / 2);
-        Some(String::from_utf16_lossy(&buffer))
-    }
-}
-
 fn position_ime(hwnd: HWND, shared: &Shared) {
     let x = shared.caret_x.load(Ordering::Relaxed) as i32;
     let y = shared.caret_y.load(Ordering::Relaxed) as i32;
-    if x < 0 || y < 0 {
-        return;
-    }
-    // SAFETY: our own window; the returned HIMC is released below.
-    let context = unsafe { ImmGetContext(hwnd) };
-    if context.0.is_null() {
-        return;
-    }
-    let composition = COMPOSITIONFORM {
-        dwStyle: CFS_POINT,
-        ptCurrentPos: POINT { x, y },
-        rcArea: RECT::default(),
-    };
-    let candidate = CANDIDATEFORM {
-        dwIndex: 0,
-        dwStyle: CFS_CANDIDATEPOS,
-        ptCurrentPos: POINT { x, y },
-        rcArea: RECT::default(),
-    };
-    // SAFETY: both forms are live; the context came from `ImmGetContext`.
-    unsafe {
-        let _ = ImmSetCompositionWindow(context, &composition);
-        let _ = ImmSetCandidateWindow(context, &candidate);
-        let _ = ImmReleaseContext(hwnd, context);
-    }
+    win32::ime_position(hwnd, (x, y), None);
 }
 
 fn forward_char(shared: &Shared, wparam: WPARAM) {

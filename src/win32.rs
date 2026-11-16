@@ -20,6 +20,12 @@ use windows::Win32::System::Registry::{
     RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::Ime::{
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, HIMC, IME_COMPOSITION_STRING,
+    ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+    ImmSetOpenStatus,
+};
 use windows::Win32::UI::Shell::{
     DROPFILES, FO_DELETE, FOLDERID_Desktop, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW,
     SHFileOperationW, SHGetKnownFolderPath,
@@ -634,6 +640,110 @@ pub(crate) fn dropfiles_payload(file: &Path) -> Vec<u8> {
     }
     // The tail (the path's NUL plus the list's second NUL) is already zero.
     bytes
+}
+
+// ---- input method ----------------------------------------------------------
+
+/// Reads one composition string from the window's input context.
+pub fn ime_string(hwnd: HWND, flag: IME_COMPOSITION_STRING) -> Option<String> {
+    // SAFETY: the context belongs to our window and is released below.
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.0.is_null() {
+            return None;
+        }
+        let length = ImmGetCompositionStringW(context, flag, None, 0);
+        if length <= 0 {
+            let _ = ImmReleaseContext(hwnd, context);
+            return Some(String::new());
+        }
+        let mut buffer = vec![0u16; length as usize / 2];
+        let read = ImmGetCompositionStringW(
+            context,
+            flag,
+            Some(buffer.as_mut_ptr() as *mut c_void),
+            length as u32,
+        );
+        let _ = ImmReleaseContext(hwnd, context);
+        if read <= 0 {
+            return Some(String::new());
+        }
+        buffer.truncate(read as usize / 2);
+        Some(String::from_utf16_lossy(&buffer))
+    }
+}
+
+/// Creates and associates an IME context for `hwnd`, opening it so the active
+/// input method composes instead of passing Latin keys. Returns the raw `HIMC`.
+pub fn ime_attach(hwnd: HWND) -> Option<isize> {
+    // SAFETY: our window and a fresh context owned by this thread.
+    let ime = unsafe { ImmCreateContext() };
+    if ime.0.is_null() {
+        return None;
+    }
+    // SAFETY: the HWND is ours; the returned previous context is not owned by
+    // us and is ignored.
+    unsafe {
+        let _ = ImmAssociateContext(hwnd, ime);
+        let _ = ImmSetOpenStatus(ime, true);
+    }
+    Some(ime.0 as isize)
+}
+
+/// Disassociates and destroys a context created by `ime_attach`.
+pub fn ime_detach(hwnd: HWND, raw: isize) {
+    if raw == 0 {
+        return;
+    }
+    let context = HIMC(raw as *mut c_void);
+    // SAFETY: the HWND is still valid during WM_DESTROY and the context was
+    // created by us in `open`.
+    unsafe {
+        let _ = ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut()));
+        let _ = ImmDestroyContext(context);
+    }
+}
+
+/// Points the input method at `caret` (client pixels) and, when given, at the
+/// candidate anchor.
+///
+/// `COMPOSITIONFORM` gets the insertion point, so input methods that still draw
+/// their own composition window put it at the caret instead of at a box corner.
+/// `CANDIDATEFORM` gets the bottom of the text box, so the candidate list opens
+/// under the line instead of on top of the glyphs. A negative coordinate means
+/// "no anchor" and falls back to the caret.
+pub fn ime_position(hwnd: HWND, caret: (i32, i32), candidate: Option<(i32, i32)>) {
+    let (x, y) = caret;
+    if x < 0 || y < 0 {
+        return;
+    }
+    // SAFETY: our own window; the returned HIMC is released below.
+    let context = unsafe { ImmGetContext(hwnd) };
+    if context.0.is_null() {
+        return;
+    }
+    let (candidate_x, candidate_y) = candidate.unwrap_or(caret);
+    let composition = COMPOSITIONFORM {
+        dwStyle: CFS_POINT,
+        ptCurrentPos: POINT { x, y },
+        rcArea: RECT::default(),
+    };
+    let candidate = CANDIDATEFORM {
+        dwIndex: 0,
+        dwStyle: CFS_CANDIDATEPOS,
+        ptCurrentPos: POINT {
+            x: if candidate_x < 0 { x } else { candidate_x },
+            y: if candidate_y < 0 { y } else { candidate_y },
+        },
+        rcArea: RECT::default(),
+    };
+    // SAFETY: both forms are live for the calls; the HIMC came from
+    // ImmGetContext and is released with the matching HWND.
+    unsafe {
+        let _ = ImmSetCompositionWindow(context, &composition);
+        let _ = ImmSetCandidateWindow(context, &candidate);
+        let _ = ImmReleaseContext(hwnd, context);
+    }
 }
 
 #[cfg(test)]
