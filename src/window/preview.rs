@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -136,42 +136,16 @@ impl Preview {
         }
 
         let (tx, rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
         let send_hwnd = SendHwnd(hwnd);
         let tilt = Arc::new(Mutex::new(0.0f32));
         let tilt_pending = Arc::new(AtomicBool::new(false));
         let thread_tilt = Arc::clone(&tilt);
         let thread_pending = Arc::clone(&tilt_pending);
-        let join = thread::Builder::new()
-            .name("pegline-preview".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    preview_thread(send_hwnd, rx, ready_tx, thread_tilt, thread_pending)
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the preview render thread");
-                }
-            })
-            .map_err(|e| format!("spawn preview thread: {e}"))?;
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = join.join();
-                // SAFETY: the thread is gone and the window is ours.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = join.join();
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err("preview render thread died during setup".to_string());
-            }
-        }
+        let (join, ready_rx) =
+            window::spawn_render_thread("pegline-preview", "preview", move |ready| {
+                preview_thread(send_hwnd, rx, ready, thread_tilt, thread_pending);
+            })?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
 
         Ok(Self {
             hwnd,
@@ -288,10 +262,9 @@ impl Preview {
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(join) = self.join.take() {
+        window::stop_render_thread(self.join.take(), || {
             let _ = self.tx.send(PreviewCommand::Stop);
-            let _ = join.join();
-        }
+        });
         // SAFETY: the render thread has been joined.
         unsafe {
             let _ = DestroyWindow(self.hwnd);

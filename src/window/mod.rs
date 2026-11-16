@@ -7,6 +7,8 @@
 //! down with it.
 
 use std::cell::{Cell, RefCell};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{
@@ -14,9 +16,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DispatchMessageW, GetMessageW, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
-    WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_QUIT, WNDCLASSW, WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -339,4 +341,67 @@ pub fn wake() {
 pub fn quit() {
     // SAFETY: thread-local message queue operation.
     unsafe { PostQuitMessage(0) };
+}
+
+/// A live render thread: its join handle and the channel it reports through.
+pub(crate) type RenderThread = (JoinHandle<()>, Receiver<Result<(), String>>);
+
+/// Spawns a window's render thread.
+///
+/// `body` runs on the new thread and reports through the sender it receives:
+/// `Ok(())` once the render objects are up, `Err` when setup failed. A panic is
+/// caught here so the thread ends like any other setup failure.
+pub(crate) fn spawn_render_thread(
+    thread_name: &'static str,
+    label: &'static str,
+    body: impl FnOnce(Sender<Result<(), String>>) + Send + 'static,
+) -> Result<RenderThread, String> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let join = thread::Builder::new()
+        .name(thread_name.to_string())
+        .spawn(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(ready_tx))).is_err() {
+                logging::error(format!("panic in the {label} render thread"));
+            }
+        })
+        .map_err(|error| format!("spawn {label} thread: {error}"))?;
+    Ok((join, ready_rx))
+}
+
+/// Waits for the render thread to report readiness.
+///
+/// On failure the thread is joined and `hwnd` destroyed, so a caller that gets
+/// an error can return without further cleanup. `before_join` lets an editor
+/// raise its stopping flag before the join.
+pub(crate) fn await_render_ready(
+    ready_rx: &Receiver<Result<(), String>>,
+    join: JoinHandle<()>,
+    before_join: impl FnOnce(),
+    hwnd: HWND,
+) -> Result<JoinHandle<()>, String> {
+    let error = match ready_rx.recv() {
+        Ok(Ok(())) => return Ok(join),
+        Ok(Err(error)) => error,
+        Err(_) => "render thread died during setup".to_string(),
+    };
+    before_join();
+    let _ = join.join();
+    // SAFETY: the render thread has been joined, so nothing else uses the window.
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+    Err(error)
+}
+
+/// Sends the render thread's stop command and joins it.
+///
+/// Returns false when the thread ended by panicking, so the owner can log it.
+pub(crate) fn stop_render_thread(join: Option<JoinHandle<()>>, send_stop: impl FnOnce()) -> bool {
+    match join {
+        Some(join) => {
+            send_stop();
+            join.join().is_ok()
+        }
+        None => true,
+    }
 }

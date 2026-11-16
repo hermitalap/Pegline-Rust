@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
@@ -101,47 +101,21 @@ impl Overlay {
         if let Ok(mut slot) = cursor.commands.lock() {
             *slot = Some(tx.clone());
         }
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let thread_snapshot = Arc::clone(&snapshot);
         let send_hwnd = SendHwnd(hwnd);
-        let join = thread::Builder::new()
-            .name("pegline-render".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_thread(
-                        send_hwnd,
-                        width_px,
-                        height_px,
-                        dpi,
-                        rx,
-                        thread_snapshot,
-                        ready_tx,
-                    )
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the overlay render thread");
-                }
-            })
-            .map_err(|e| format!("spawn render thread: {e}"))?;
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = join.join();
-                // SAFETY: the window exists and no other thread uses it now.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = join.join();
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err("render thread died during setup".to_string());
-            }
-        }
+        let thread_snapshot = Arc::clone(&snapshot);
+        let (join, ready_rx) =
+            window::spawn_render_thread("pegline-render", "overlay", move |ready| {
+                render_thread(
+                    send_hwnd,
+                    width_px,
+                    height_px,
+                    dpi,
+                    rx,
+                    thread_snapshot,
+                    ready,
+                );
+            })?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
 
         Ok(Self {
             hwnd,
@@ -250,10 +224,9 @@ impl Overlay {
 
     /// Stops the render thread and destroys the window. Idempotent.
     pub fn shutdown(&mut self) {
-        if let Some(join) = self.join.take() {
+        window::stop_render_thread(self.join.take(), || {
             let _ = self.tx.send(Command::Stop);
-            let _ = join.join();
-        }
+        });
         // SAFETY: the render thread has been joined, so nothing else uses the
         // window; destroying it releases the DirectComposition target.
         unsafe {

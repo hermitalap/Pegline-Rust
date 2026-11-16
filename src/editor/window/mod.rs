@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -266,64 +266,43 @@ impl Editor {
             dpi: render_dpi,
             source_size,
         };
-        let (ready_tx, ready_rx) = mpsc::channel();
         let thread_shared = Arc::clone(&shared);
-        // The fallback `report` runs after the render thread ends; it needs a
-        // `Send` handle, not the raw `HWND` captured directly (which would make
-        // the closure non-`Send`).
         let fallback_hwnd = SendHwnd(hwnd);
-        let join = match thread::Builder::new()
-            .name("pegline-editor".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    render_thread(start, rx, Arc::clone(&thread_shared), ready_tx);
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the editor render thread");
-                }
-                // A thread that ends without a result (a panic, a WIC failure)
-                // must still close the window instead of leaving it stuck.
-                if !thread_shared.stopping.load(Ordering::Acquire)
-                    && !thread_shared.reported.load(Ordering::Acquire)
-                {
-                    report(
-                        &thread_shared,
-                        fallback_hwnd.handle(),
-                        EditorEvent::Cancelled { flight: None },
-                    );
-                }
-            }) {
-            Ok(join) => join,
+        let spawn = window::spawn_render_thread("pegline-editor", "editor", move |ready| {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render_thread(start, rx, Arc::clone(&thread_shared), ready);
+            }));
+            if outcome.is_err() {
+                logging::error("panic in the editor render thread");
+            }
+            // A thread that ends without a result (a panic, a WIC failure) must
+            // still close the window instead of leaving it stuck.
+            if !thread_shared.stopping.load(Ordering::Acquire)
+                && !thread_shared.reported.load(Ordering::Acquire)
+            {
+                report(
+                    &thread_shared,
+                    fallback_hwnd.handle(),
+                    EditorEvent::Cancelled { flight: None },
+                );
+            }
+        });
+        let (join, ready_rx) = match spawn {
+            Ok(pair) => pair,
             Err(error) => {
                 // SAFETY: the window exists and no other thread uses it.
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
-                return Err(format!("spawn editor thread: {error}"));
-            }
-        };
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                shared.stopping.store(true, Ordering::Release);
-                let _ = join.join();
-                // SAFETY: the render thread has stopped using the window.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
                 return Err(error);
             }
-            Err(_) => {
-                shared.stopping.store(true, Ordering::Release);
-                let _ = join.join();
-                // SAFETY: the render thread has stopped using the window.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err("editor render thread died during setup".to_string());
-            }
-        }
+        };
+        let join = window::await_render_ready(
+            &ready_rx,
+            join,
+            || shared.stopping.store(true, Ordering::Release),
+            hwnd,
+        )?;
 
         logging::trace(format!(
             "editor open: {} {}x{} px dpi {} source {}x{}",
@@ -399,12 +378,12 @@ impl Editor {
 
     /// Stops the render thread and destroys the window. Idempotent.
     pub fn shutdown(&mut self) {
-        self.shared.stopping.store(true, Ordering::Release);
-        let _ = self.shared.send(Command::Stop);
-        if let Some(join) = self.join.take() {
-            if join.join().is_err() {
-                logging::error("editor render thread panicked");
-            }
+        let clean = window::stop_render_thread(self.join.take(), || {
+            self.shared.stopping.store(true, Ordering::Release);
+            let _ = self.shared.send(Command::Stop);
+        });
+        if !clean {
+            logging::error("editor render thread panicked");
         }
         if !self.shared.closed.load(Ordering::Acquire) {
             // SAFETY: the render thread has been joined, so nothing else uses

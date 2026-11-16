@@ -14,7 +14,7 @@ use std::sync::atomic::{
 };
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -472,12 +472,12 @@ impl NoteEditor {
 
     /// Stops the render thread and destroys the window. Idempotent.
     pub fn shutdown(&mut self) {
-        self.shared.stopping.store(true, Ordering::Release);
-        self.shared.send(Command::Stop);
-        if let Some(join) = self.join.take() {
-            if join.join().is_err() {
-                logging::error("note editor render thread panicked");
-            }
+        let clean = window::stop_render_thread(self.join.take(), || {
+            self.shared.stopping.store(true, Ordering::Release);
+            self.shared.send(Command::Stop);
+        });
+        if !clean {
+            logging::error("note editor render thread panicked");
         }
         if !self.shared.closed.load(Ordering::Acquire) {
             // SAFETY: the render thread has been joined; nothing else uses it.
@@ -533,48 +533,31 @@ fn start_render_thread(
     rx: Receiver<Command>,
     shared: &Arc<Shared>,
 ) -> Result<(JoinHandle<()>, Option<ImageData>), String> {
-    let (ready_tx, ready_rx) = mpsc::channel();
     let thread_shared = Arc::clone(shared);
     let thread_hwnd = SendHwnd(hwnd);
-    let join = match thread::Builder::new()
-        .name("pegline-note-editor".to_string())
-        .spawn(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                render_thread(start, rx, thread_shared, thread_hwnd, ready_tx);
-            }));
-            if outcome.is_err() {
-                logging::error("panic in the note editor render thread");
-            }
-        }) {
-        Ok(join) => join,
+    let flight = Arc::new(Mutex::new(None));
+    let thread_flight = Arc::clone(&flight);
+    let spawn = window::spawn_render_thread("pegline-note-editor", "note editor", move |ready| {
+        render_thread(start, rx, thread_shared, thread_hwnd, ready, thread_flight);
+    });
+    let (join, ready_rx) = match spawn {
+        Ok(pair) => pair,
         Err(error) => {
             // SAFETY: the window exists and no other thread uses it.
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
-            return Err(format!("spawn note editor thread: {error}"));
+            return Err(error);
         }
     };
-    match ready_rx.recv() {
-        Ok(Ok(flight_image)) => Ok((join, flight_image)),
-        Ok(Err(error)) => {
-            shared.stopping.store(true, Ordering::Release);
-            let _ = join.join();
-            // SAFETY: the render thread has stopped.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            Err(error)
-        }
-        Err(_) => {
-            shared.stopping.store(true, Ordering::Release);
-            let _ = join.join();
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            Err("note editor render thread died during setup".to_string())
-        }
-    }
+    let join = window::await_render_ready(
+        &ready_rx,
+        join,
+        || shared.stopping.store(true, Ordering::Release),
+        hwnd,
+    )?;
+    let flight_image = flight.lock().ok().and_then(|mut slot| slot.take());
+    Ok((join, flight_image))
 }
 
 /// Monotonic microseconds from the same clock as `win32::now_seconds`. Only the
@@ -724,7 +707,8 @@ fn render_thread(
     rx: Receiver<Command>,
     shared: Arc<Shared>,
     hwnd: SendHwnd,
-    ready: Sender<Result<Option<ImageData>, String>>,
+    ready: Sender<Result<(), String>>,
+    flight: Arc<Mutex<Option<ImageData>>>,
 ) {
     let _com = match ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED) {
         Ok(guard) => guard,
@@ -757,7 +741,10 @@ fn render_thread(
             None
         }
     };
-    if ready.send(Ok(flight_image)).is_err() {
+    if let Ok(mut slot) = flight.lock() {
+        *slot = flight_image;
+    }
+    if ready.send(Ok(())).is_err() {
         return;
     }
     let mut commit_reported = false;

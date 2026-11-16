@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
@@ -252,40 +252,14 @@ impl Flight {
         }
 
         let (tx, rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
         let send_hwnd = SendHwnd(hwnd);
         let interrupt = Arc::new(AtomicU64::new(0));
         let thread_interrupt = Arc::clone(&interrupt);
-        let join = thread::Builder::new()
-            .name("pegline-flight".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    flight_thread(send_hwnd, rx, ready_tx, on_event, thread_interrupt)
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the flight render thread");
-                }
-            })
-            .map_err(|e| format!("spawn flight thread: {e}"))?;
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = join.join();
-                // SAFETY: the thread is gone and the window is ours.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = join.join();
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err("flight render thread died during setup".to_string());
-            }
-        }
+        let (join, ready_rx) =
+            window::spawn_render_thread("pegline-flight", "flight", move |ready| {
+                flight_thread(send_hwnd, rx, ready, on_event, thread_interrupt);
+            })?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
 
         Ok(Self {
             hwnd,
@@ -561,10 +535,9 @@ impl Flight {
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(join) = self.join.take() {
+        window::stop_render_thread(self.join.take(), || {
             let _ = self.tx.send(FlightCommand::Stop);
-            let _ = join.join();
-        }
+        });
         // SAFETY: the render thread has been joined.
         unsafe {
             let _ = DestroyWindow(self.hwnd);

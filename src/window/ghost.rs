@@ -10,7 +10,7 @@
 //! placed, resized and drawn while still hidden, and only then shown.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -95,39 +95,12 @@ impl Ghost {
         }
 
         let (tx, rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
         let send_hwnd = SendHwnd(hwnd);
-        let join = thread::Builder::new()
-            .name("pegline-ghost".to_string())
-            .spawn(move || {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    ghost_thread(send_hwnd, rx, ready_tx)
-                }));
-                if outcome.is_err() {
-                    logging::error("panic in the ghost render thread");
-                }
-            })
-            .map_err(|e| format!("spawn ghost thread: {e}"))?;
-
-        match ready_rx.recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                let _ = join.join();
-                // SAFETY: the thread is gone and the window is ours.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = join.join();
-                // SAFETY: the thread is gone and the window is ours.
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
-                return Err("ghost render thread died during setup".to_string());
-            }
-        }
+        let (join, ready_rx) =
+            window::spawn_render_thread("pegline-ghost", "ghost", move |ready| {
+                ghost_thread(send_hwnd, rx, ready);
+            })?;
+        let join = window::await_render_ready(&ready_rx, join, || {}, hwnd)?;
 
         Ok(Self {
             hwnd,
@@ -174,14 +147,13 @@ impl Ghost {
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(join) = self.join.take() {
+        window::stop_render_thread(self.join.take(), || {
             let _ = self.tx.send(GhostCommand::Stop);
-            let _ = join.join();
-            // SAFETY: the render thread has been joined and the window was
-            // created by `create` on this thread.
-            unsafe {
-                let _ = DestroyWindow(self.hwnd);
-            }
+        });
+        // SAFETY: the render thread has been joined and the window was created
+        // by `create` on this thread.
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 }
