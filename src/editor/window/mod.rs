@@ -24,28 +24,25 @@ use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE, D2D1_ALPHA_MODE_IGNORE,
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
+    D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES, D2D1_BITMAP_PROPERTIES1,
-    D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID,
-    D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1Bitmap, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory, ID2D1Factory1, ID2D1Geometry, ID2D1Image, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE,
+    D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
+    D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1Bitmap,
+    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry,
+    ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 use windows::Win32::Graphics::DirectComposition::{
     IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
-    DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_TEXT_RANGE, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
@@ -93,6 +90,11 @@ use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
 use paint::Chrome;
+
+// The paint module draws with the shared D2D helpers through `super::`.
+pub(crate) use crate::gfx::{
+    create_text_format, create_text_layout, d2d_rect, pixel_format, rounded, solid, text_metrics,
+};
 
 /// The result of one edit, delivered on the UI thread.
 #[derive(Clone, Debug)]
@@ -1389,7 +1391,7 @@ struct Labels {
 
 impl Labels {
     fn build(dwrite: &IDWriteFactory, strings: &crate::i18n::Strings) -> Result<Self, String> {
-        let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        let ui = create_text_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         Ok(Self {
             undo: label(dwrite, &ui, strings.undo)?,
             redo: label(dwrite, &ui, strings.redo)?,
@@ -1485,7 +1487,7 @@ impl EditorState {
         shared: Arc<Shared>,
     ) -> Result<Self, String> {
         let labels = Labels::build(&surface.dwrite, i18n::s())?;
-        let text_format = create_format(
+        let text_format = create_text_format(
             &surface.dwrite,
             font::UI_FAMILY,
             TEXT_SIZE,
@@ -1635,7 +1637,7 @@ impl EditorState {
             self.dpi as u32,
         )?;
         let labels = Labels::build(&surface.dwrite, i18n::s())?;
-        let text_format = create_format(
+        let text_format = create_text_format(
             &surface.dwrite,
             font::UI_FAMILY,
             TEXT_SIZE,
@@ -2472,6 +2474,14 @@ struct Assets {
     source_size: (u32, u32),
 }
 
+/// Uploads `image` on the editor's render target.
+fn upload(rt: &ID2D1RenderTarget, image: &ImageData) -> Result<ID2D1Bitmap, String> {
+    let context: ID2D1DeviceContext = rt
+        .cast()
+        .map_err(|error| format!("ID2D1RenderTarget -> ID2D1DeviceContext: {error}"))?;
+    crate::gfx::upload_bitmap(&context, 96.0, image).map(Into::into)
+}
+
 impl Assets {
     fn new(rt: ID2D1RenderTarget) -> Result<Self, String> {
         let mut pens = Vec::with_capacity(COLORS.len());
@@ -2497,22 +2507,7 @@ impl Assets {
     }
 
     fn set_source(&mut self, image: &ImageData) -> Result<(), String> {
-        let properties = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        // SAFETY: `image.bgra` is alive for the call and D2D copies the pixels
-        // before returning; the pitch matches the BGRA layout.
-        let bitmap = unsafe {
-            self.rt.CreateBitmap(
-                size_u(image.width, image.height),
-                Some(image.bgra.as_ptr() as *const c_void),
-                image.width * 4,
-                &properties,
-            )
-        }
-        .map_err(|error| format!("CreateBitmap(source): {error}"))?;
+        let bitmap = upload(&self.rt, image)?;
         self.source = Some(bitmap);
         self.source_size = (image.width, image.height);
         Ok(())
@@ -2533,21 +2528,7 @@ impl Assets {
         if self.mosaics.len() >= MOSAIC_CACHE {
             self.mosaics.clear();
         }
-        let properties = D2D1_BITMAP_PROPERTIES {
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX: 96.0,
-            dpiY: 96.0,
-        };
-        // SAFETY: `image.bgra` is alive for the call and D2D copies the pixels.
-        let bitmap = unsafe {
-            self.rt.CreateBitmap(
-                size_u(image.width, image.height),
-                Some(image.bgra.as_ptr() as *const c_void),
-                image.width * 4,
-                &properties,
-            )
-        }
-        .map_err(|error| format!("CreateBitmap(mosaic): {error}"))?;
+        let bitmap = upload(&self.rt, image)?;
         self.mosaics.push((key, bitmap));
         Ok(())
     }
@@ -2948,38 +2929,6 @@ fn wic_factory() -> Result<IWICImagingFactory, String> {
     .map_err(|error| format!("CoCreateInstance(WIC): {error}"))
 }
 
-fn create_format(
-    dwrite: &IDWriteFactory,
-    family: PCWSTR,
-    size: f32,
-    weight: DWRITE_FONT_WEIGHT,
-) -> Result<IDWriteTextFormat, String> {
-    // SAFETY: the factory is alive; the family and locale are static strings.
-    unsafe {
-        dwrite.CreateTextFormat(
-            family,
-            None,
-            weight,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            size,
-            w!("en-us"),
-        )
-    }
-    .map_err(|error| format!("CreateTextFormat: {error}"))
-}
-
-fn create_text_layout(
-    dwrite: &IDWriteFactory,
-    format: &IDWriteTextFormat,
-    text: &str,
-) -> Result<IDWriteTextLayout, String> {
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    // SAFETY: `wide` is alive for the call and the factory/format are borrowed.
-    unsafe { dwrite.CreateTextLayout(&wide, format, 4096.0, 4096.0) }
-        .map_err(|error| format!("CreateTextLayout: {error}"))
-}
-
 /// Lays out `text` with the range starting at `underline_from` underlined: the
 /// IME composition. The run keeps the mark's font and colour; only the
 /// underline marks it as not yet committed.
@@ -3008,15 +2957,6 @@ fn create_composed_layout(
     Ok(layout)
 }
 
-fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    // SAFETY: writes one struct owned by this stack frame.
-    unsafe {
-        let _ = layout.GetMetrics(&mut metrics);
-    }
-    metrics
-}
-
 fn label(dwrite: &IDWriteFactory, format: &IDWriteTextFormat, text: &str) -> Result<Label, String> {
     let layout = create_text_layout(dwrite, format, text)?;
     let metrics = text_metrics(&layout);
@@ -3025,46 +2965,6 @@ fn label(dwrite: &IDWriteFactory, format: &IDWriteTextFormat, text: &str) -> Res
         width: metrics.width,
         height: metrics.height,
     })
-}
-
-fn solid(rt: &ID2D1RenderTarget, rgb: u32, alpha: f32) -> Result<ID2D1SolidColorBrush, String> {
-    let color = D2D1_COLOR_F {
-        r: ((rgb >> 16) & 0xFF) as f32 / 255.0,
-        g: ((rgb >> 8) & 0xFF) as f32 / 255.0,
-        b: (rgb & 0xFF) as f32 / 255.0,
-        a: alpha,
-    };
-    // SAFETY: the render target is alive; the colour is by value.
-    unsafe { rt.CreateSolidColorBrush(&color, None) }
-        .map_err(|error| format!("CreateSolidColorBrush: {error}"))
-}
-
-fn pixel_format(alpha: D2D1_ALPHA_MODE) -> D2D1_PIXEL_FORMAT {
-    D2D1_PIXEL_FORMAT {
-        format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        alphaMode: alpha,
-    }
-}
-
-fn size_u(width: u32, height: u32) -> D2D_SIZE_U {
-    D2D_SIZE_U { width, height }
-}
-
-fn d2d_rect(rect: RectF) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-    }
-}
-
-fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: d2d_rect(rect),
-        radiusX: radius,
-        radiusY: radius,
-    }
 }
 
 #[cfg(test)]
@@ -3205,7 +3105,7 @@ mod tests {
         // DirectWrite lays text out without a window or a GPU device.
         let dwrite: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.expect("DWrite factory");
-        let format = create_format(
+        let format = create_text_format(
             &dwrite,
             font::UI_FAMILY,
             TEXT_SIZE,

@@ -12,14 +12,13 @@
 mod paint;
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::ops::Range;
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_GRADIENT_STOP,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
@@ -34,8 +33,7 @@ use windows::Win32::Graphics::DirectComposition::{
     IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_HIT_TEST_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE,
     DWRITE_WORD_WRAPPING_WRAP, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
@@ -55,6 +53,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::gfx::{
     create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
+    create_text_format, d2d_rect, pixel_format, solid,
 };
 use crate::logging;
 use crate::note_editor::display::{
@@ -370,17 +369,22 @@ impl Assets {
                 4 => 16.0,
                 _ => 15.0,
             };
-            headings.push(format(dwrite, BODY_FAMILY, size, DWRITE_FONT_WEIGHT_BOLD)?);
+            headings.push(create_text_format(
+                dwrite,
+                BODY_FAMILY,
+                size,
+                DWRITE_FONT_WEIGHT_BOLD,
+            )?);
         }
         Ok(Self {
-            body: format(
+            body: create_text_format(
                 dwrite,
                 BODY_FAMILY,
                 display::BODY_SIZE,
                 DWRITE_FONT_WEIGHT_NORMAL,
             )?,
             headings,
-            code: format(
+            code: create_text_format(
                 dwrite,
                 CODE_FAMILY,
                 display::CODE_SIZE,
@@ -1401,10 +1405,7 @@ impl EditorState {
         .map_err(|error| format!("CreateBitmap({width}x{height}): {error}"))?;
         let properties = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
+            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
             dpiX: 96.0,
             dpiY: 96.0,
             usage: D2D1_RENDER_TARGET_USAGE_NONE,
@@ -1605,45 +1606,14 @@ fn apply_style(
     }
 }
 
-fn format(
-    dwrite: &IDWriteFactory,
-    family: PCWSTR,
-    size: f32,
-    weight: DWRITE_FONT_WEIGHT,
-) -> Result<IDWriteTextFormat, String> {
-    // SAFETY: static family and locale; the factory is alive.
-    unsafe {
-        dwrite.CreateTextFormat(
-            family,
-            None,
-            weight,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            size,
-            w!("en-us"),
-        )
-    }
-    .map_err(|error| format!("CreateTextFormat: {error}"))
-}
-
 fn number_format(dwrite: &IDWriteFactory) -> Result<IDWriteTextFormat, String> {
-    let format = format(dwrite, BODY_FAMILY, 12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
+    let format = create_text_format(dwrite, BODY_FAMILY, 12.0, DWRITE_FONT_WEIGHT_NORMAL)?;
     // SAFETY: the format is alive and not shared yet.
     unsafe {
         let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
     Ok(format)
-}
-
-fn solid(
-    context: &ID2D1RenderTarget,
-    rgb: u32,
-    alpha: f32,
-) -> Result<ID2D1SolidColorBrush, String> {
-    // SAFETY: the context is alive; the colour is by value.
-    unsafe { context.CreateSolidColorBrush(&color_of(rgb, alpha), None) }
-        .map_err(|error| format!("CreateSolidColorBrush: {error}"))
 }
 
 /// The system highlight colour as `0xRRGGBB` — `COLORREF` is `0xBBGGRR`.
@@ -1699,15 +1669,6 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
         (from + (to - from) * t).round() as u32
     };
     (channel(16) << 16) | (channel(8) << 8) | channel(0)
-}
-
-fn d2d_rect(rect: RectF) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-    }
 }
 
 /// The paper rectangle inside the window, DIP.
@@ -2124,20 +2085,14 @@ impl Surface {
             .cast()
             .map_err(|error| format!("ID2D1DeviceContext -> ID2D1RenderTarget: {error}"))?;
         let target_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
+            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
             dpiX: dpi_f,
             dpiY: dpi_f,
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             colorContext: ManuallyDrop::new(None),
         };
         let paper_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_IGNORE,
-            },
+            pixelFormat: pixel_format(D2D1_ALPHA_MODE_IGNORE),
             dpiX: dpi_f,
             dpiY: dpi_f,
             // A regular render target; only swap-chain buffers are CANNOT_DRAW.
@@ -2331,29 +2286,7 @@ impl Surface {
     }
 
     fn upload(&self, image: &ImageData) -> Result<ID2D1Bitmap1, String> {
-        let properties = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: self.dpi,
-            dpiY: self.dpi,
-            bitmapOptions: windows::Win32::Graphics::Direct2D::D2D1_BITMAP_OPTIONS_NONE,
-            colorContext: ManuallyDrop::new(None),
-        };
-        // SAFETY: `image` is a live, correctly sized BGRA buffer for the call.
-        unsafe {
-            self.context.CreateBitmap(
-                D2D_SIZE_U {
-                    width: image.width,
-                    height: image.height,
-                },
-                Some(image.bgra.as_ptr() as *const c_void),
-                image.width * 4,
-                &properties,
-            )
-        }
-        .map_err(|error| format!("CreateBitmap(upload): {error}"))
+        crate::gfx::upload_bitmap(&self.context, self.dpi, image)
     }
 }
 

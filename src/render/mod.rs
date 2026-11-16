@@ -38,21 +38,21 @@ use windows::Win32::Graphics::DirectComposition::{
     IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, IDWriteFactory,
-    IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, IDWriteFactory, IDWriteTextFormat,
+    IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
     IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
 };
-use windows::core::{Interface, PCWSTR, w};
+use windows::core::{Interface, PCWSTR};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::font;
 use crate::gfx::{
     create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
+    create_text_format, create_text_layout, d2d_rect, rounded, text_metrics,
 };
 use crate::i18n;
 use crate::types::{ImageData, RectF};
@@ -151,11 +151,11 @@ impl Texts {
         // One UI family for every language. The overlay is a premultiplied
         // surface, so Direct2D must use grayscale antialiasing here; ClearType
         // is reserved for the opaque editor and shortcut-dialog surfaces.
-        let ui = create_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
-        let hint = create_format(dwrite, font::UI_FAMILY, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        let ui = create_text_format(dwrite, font::UI_FAMILY, 13.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
+        let hint = create_text_format(dwrite, font::UI_FAMILY, 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?;
         // The blank note's label is deliberately the same size and weight as a
         // short note's body text, not a hint-sized caption.
-        let new_note = create_format(
+        let new_note = create_text_format(
             dwrite,
             font::UI_FAMILY,
             crate::notes::BRIEF_FONT_DIP,
@@ -167,7 +167,7 @@ impl Texts {
         {
             let mut add =
                 |id: TextId, text: &str, format: &IDWriteTextFormat| -> Result<(), String> {
-                    let layout = create_layout(dwrite, format, text)?;
+                    let layout = create_text_layout(dwrite, format, text)?;
                     let metrics = text_metrics(&layout);
                     items.insert(
                         id,
@@ -212,51 +212,6 @@ impl Texts {
             copied_height,
         })
     }
-}
-
-fn create_format(
-    dwrite: &IDWriteFactory,
-    family: PCWSTR,
-    size: f32,
-    weight: DWRITE_FONT_WEIGHT,
-) -> Result<IDWriteTextFormat, String> {
-    // SAFETY: the factory is alive; the family and locale are static strings.
-    unsafe {
-        dwrite.CreateTextFormat(
-            family,
-            None,
-            weight,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            size,
-            w!("en-us"),
-        )
-    }
-    .map_err(|e| format!("CreateTextFormat: {e}"))
-}
-
-fn create_layout(
-    dwrite: &IDWriteFactory,
-    format: &IDWriteTextFormat,
-    text: &str,
-) -> Result<IDWriteTextLayout, String> {
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    // A very wide layout box: the metrics report the natural text width, which
-    // is what the pills are sized from. No wrapping is wanted here.
-    // SAFETY: `wide` is alive for the call and the factory/format are borrowed.
-    unsafe { dwrite.CreateTextLayout(&wide, format, 4096.0, 4096.0) }
-        .map_err(|e| format!("CreateTextLayout: {e}"))
-}
-
-fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
-    let mut metrics = DWRITE_TEXT_METRICS::default();
-    // SAFETY: writes one struct owned by this stack frame.
-    let result = unsafe { layout.GetMetrics(&mut metrics) };
-    if let Err(error) = result {
-        // A zero-sized metric would draw an invisible pill; say why.
-        crate::logging::error(format!("text metrics: {error}"));
-    }
-    metrics
 }
 
 /// One baked nine-patch shadow.
@@ -1235,30 +1190,7 @@ impl Renderer {
         if !image.is_valid() {
             return Err("upload: invalid image buffer".to_string());
         }
-        let props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-            colorContext: ManuallyDrop::new(None),
-        };
-        // SAFETY: `bgra` is alive for the call; D2D copies the pixels before
-        // returning.
-        unsafe {
-            self.context.CreateBitmap(
-                windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
-                    width: image.width,
-                    height: image.height,
-                },
-                Some(image.bgra.as_ptr() as *const c_void),
-                image.width * 4,
-                &props,
-            )
-        }
-        .map_err(|e| format!("CreateBitmap: {e}"))
+        crate::gfx::upload_bitmap(&self.context, 96.0, image)
     }
 
     fn mask_geometry(&mut self, rect: RectF, radius: f32) -> Option<ID2D1Geometry> {
@@ -1542,23 +1474,6 @@ fn ribbon(
         .cast()
         .map_err(|e| format!("PathGeometry -> ID2D1Geometry: {e}"))
 }
-pub(crate) fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: d2d_rect(rect),
-        radiusX: radius,
-        radiusY: radius,
-    }
-}
-
-fn d2d_rect(rect: RectF) -> D2D_RECT_F {
-    D2D_RECT_F {
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-    }
-}
-
 /// `0xRRGGBB` to the `[r, g, b]` triples the brush helpers take.
 fn split(value: u32) -> [u8; 3] {
     [

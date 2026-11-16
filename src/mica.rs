@@ -197,7 +197,7 @@ impl Mica {
             M32: -screen.M32 / texture_px_to_dip,
         };
         let transform = current * inverse_screen;
-        let rounded = crate::render::rounded(rect, radius);
+        let rounded = crate::gfx::rounded(rect, radius);
         // SAFETY: the brush and context are live; the transform is a plain copy.
         unsafe {
             brush.SetTransform(&transform);

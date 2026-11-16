@@ -12,10 +12,15 @@
 //! (`create_d2d`); everything else is byte-for-byte the same sequence.
 
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_PIXEL_FORMAT,
+};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_TEXT_ANTIALIAS_MODE, D2D1CreateFactory, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext,
+    ID2D1Factory1, ID2D1RenderTarget, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -28,7 +33,9 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FACTORY_TYPE_SHARED, DWriteCreateFactory, IDWriteFactory,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -38,7 +45,9 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice, IDXGIFactory2, IDXGIOutput,
     IDXGISwapChain1, IDXGISwapChain3,
 };
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR, w};
+
+use crate::types::{ImageData, RectF};
 
 /// Creates the hardware D3D11 device and its immediate context.
 ///
@@ -200,6 +209,128 @@ pub(crate) fn create_d2d(
         context.SetDpi(dpi, dpi);
         Ok((factory, device, context))
     }
+}
+
+/// A D2D rectangle from the app's float rect.
+pub(crate) fn d2d_rect(rect: RectF) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }
+}
+
+/// A rounded D2D rectangle.
+pub(crate) fn rounded(rect: RectF, radius: f32) -> D2D1_ROUNDED_RECT {
+    D2D1_ROUNDED_RECT {
+        rect: d2d_rect(rect),
+        radiusX: radius,
+        radiusY: radius,
+    }
+}
+
+/// A D2D pixel size.
+pub(crate) fn size_u(width: u32, height: u32) -> D2D_SIZE_U {
+    D2D_SIZE_U { width, height }
+}
+
+/// The BGRA pixel format every bitmap here uses.
+pub(crate) fn pixel_format(alpha: D2D1_ALPHA_MODE) -> D2D1_PIXEL_FORMAT {
+    D2D1_PIXEL_FORMAT {
+        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        alphaMode: alpha,
+    }
+}
+
+/// A solid brush from `0xRRGGBB` and an alpha multiplier.
+pub(crate) fn solid(
+    rt: &ID2D1RenderTarget,
+    rgb: u32,
+    alpha: f32,
+) -> Result<ID2D1SolidColorBrush, String> {
+    let color = D2D1_COLOR_F {
+        r: ((rgb >> 16) & 0xFF) as f32 / 255.0,
+        g: ((rgb >> 8) & 0xFF) as f32 / 255.0,
+        b: (rgb & 0xFF) as f32 / 255.0,
+        a: alpha,
+    };
+    // SAFETY: the render target is alive; the colour is passed by value.
+    unsafe { rt.CreateSolidColorBrush(&color, None) }
+        .map_err(|error| format!("CreateSolidColorBrush: {error}"))
+}
+
+/// Creates a text format for `family` at `size`.
+pub(crate) fn create_text_format(
+    dwrite: &IDWriteFactory,
+    family: PCWSTR,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+) -> Result<IDWriteTextFormat, String> {
+    // SAFETY: the factory is alive; the family and locale are static strings.
+    unsafe {
+        dwrite.CreateTextFormat(
+            family,
+            None,
+            weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("en-us"),
+        )
+    }
+    .map_err(|error| format!("CreateTextFormat: {error}"))
+}
+
+/// Lays `text` out in a very wide box: the metrics report the natural width,
+/// which is what the pills are sized from. No wrapping is wanted here.
+pub(crate) fn create_text_layout(
+    dwrite: &IDWriteFactory,
+    format: &IDWriteTextFormat,
+    text: &str,
+) -> Result<IDWriteTextLayout, String> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    // SAFETY: `wide` is alive for the call and the factory/format are borrowed.
+    unsafe { dwrite.CreateTextLayout(&wide, format, 4096.0, 4096.0) }
+        .map_err(|error| format!("CreateTextLayout: {error}"))
+}
+
+/// The layout's metrics; a zero-sized result would draw nothing, so a failure
+/// is logged before it is returned.
+pub(crate) fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    // SAFETY: writes one struct owned by this stack frame.
+    let result = unsafe { layout.GetMetrics(&mut metrics) };
+    if let Err(error) = result {
+        crate::logging::error(format!("text metrics: {error}"));
+    }
+    metrics
+}
+
+/// Uploads decoded BGRA pixels as a premultiplied bitmap at `dpi`.
+pub(crate) fn upload_bitmap(
+    context: &ID2D1DeviceContext,
+    dpi: f32,
+    image: &ImageData,
+) -> Result<ID2D1Bitmap1, String> {
+    let props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
+        dpiX: dpi,
+        dpiY: dpi,
+        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+        colorContext: std::mem::ManuallyDrop::new(None),
+    };
+    // SAFETY: `image.bgra` is alive for the call; D2D copies the pixels before
+    // returning, and the pitch matches the BGRA layout.
+    unsafe {
+        context.CreateBitmap(
+            size_u(image.width, image.height),
+            Some(image.bgra.as_ptr() as *const std::ffi::c_void),
+            image.width * 4,
+            &props,
+        )
+    }
+    .map_err(|error| format!("CreateBitmap: {error}"))
 }
 
 /// Creates the shared DirectWrite factory.
