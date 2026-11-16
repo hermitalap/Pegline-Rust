@@ -97,7 +97,9 @@ fn image() -> Option<Arc<MicaImage>> {
     }
     let built = build().map(Arc::new);
     cache.generation = generation;
-    cache.image = built.clone();
+    if let Some(image) = built.as_ref() {
+        cache.image = Some(image.clone());
+    }
     built
 }
 
@@ -138,20 +140,25 @@ impl Mica {
         if self.generation == generation {
             return;
         }
-        self.generation = generation;
-        self.bitmap = None;
-        self.brush = None;
-        self.image = None;
+        // Replace the texture only once the new one is ready: a wallpaper that
+        // cannot be read or uploaded keeps the previous material instead of
+        // dropping it and falling back to the solid glass.
         let Some(image) = image() else {
+            crate::logging::error(format!("mica: rebuild failed for generation {generation}"));
+            self.generation = generation;
             return;
         };
         match upload(context, &image) {
             Ok((bitmap, brush)) => {
+                self.generation = generation;
                 self.bitmap = Some(bitmap);
                 self.brush = Some(brush);
                 self.image = Some(image);
             }
-            Err(error) => crate::logging::error(format!("mica: upload: {error}")),
+            Err(error) => {
+                crate::logging::error(format!("mica: upload: {error}"));
+                self.generation = generation;
+            }
         }
     }
 
