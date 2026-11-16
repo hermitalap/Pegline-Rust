@@ -133,7 +133,7 @@ impl FileDataObject {
 
 impl FileDataObject {
     /// One `FORMATETC` describing a format this object serves.
-    fn format(&self, cf_format: u16) -> FORMATETC {
+    fn format(cf_format: u16) -> FORMATETC {
         FORMATETC {
             cfFormat: cf_format,
             ptd: std::ptr::null_mut(),
@@ -292,7 +292,10 @@ impl IDataObject_Impl for FileDataObject_Impl {
             return Err(Error::from_hresult(E_NOTIMPL));
         }
         let enumerator = FormatEnumerator {
-            formats: [self.format(self.png_format), self.format(CF_HDROP.0)],
+            formats: [
+                FileDataObject::format(self.png_format),
+                FileDataObject::format(CF_HDROP.0),
+            ],
             position: Cell::new(0),
         };
         Ok(enumerator.into())

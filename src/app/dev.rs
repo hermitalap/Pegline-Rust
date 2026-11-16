@@ -407,11 +407,7 @@ impl super::App {
                 ));
             }
         }
-        let Some(image) = notes::render(&text, 0) else {
-            let _ = std::fs::remove_file(&path);
-            logging::error("storage demo render failed");
-            return;
-        };
+        let image = notes::render(&text, 0);
         let id = self.alloc_id();
         self.add_item(
             id,
@@ -447,10 +443,7 @@ impl super::App {
             logging::error(format!("note preview demo write: {error}"));
             return;
         }
-        let Some(image) = notes::render(&text, 0) else {
-            logging::error("note preview demo render failed");
-            return;
-        };
+        let image = notes::render(&text, 0);
         let id = self.alloc_id();
         self.dev.note_preview_demo_card = Some(id);
         self.add_item(
@@ -521,7 +514,7 @@ impl super::App {
         if self.windows.note_editor.is_some() {
             return;
         }
-        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
+        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
             return;
         };
         let text = "# Pegline\n\nA note that edits **in place**: the caret line shows its source and the rest is Markdown.\n\n## Lists\n- first item\n- [x] done\n- [ ] to do\n1. one\n2. two\n\n> A quote.\n\n`inline code` and [a link](https://example.com).\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n\n中文便签：光标所在行显示原文，其余行实时渲染。"

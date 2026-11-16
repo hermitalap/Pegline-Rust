@@ -92,7 +92,7 @@ impl super::App {
             if let Some((center, dpi)) = preview {
                 // A click in the shadow padding is not a note click, but it must
                 // not fall through to a card underneath either.
-                if self.note_preview_bounds(center, dpi).contains(x, y) {
+                if Self::note_preview_bounds(center, dpi).contains(x, y) {
                     self.cancel_note_hover();
                     return;
                 }
@@ -102,8 +102,8 @@ impl super::App {
         self.hide_preview();
         // The clothespin is the card's reorder handle and must win over the
         // band click, the swatches, the action pills and the OLE drag path.
-        if let Some(id) = self.pin_at(x, y) {
-            self.begin_pin_press(id, x, y, now);
+        if let Some((id, dip)) = self.pin_at(x, y) {
+            self.begin_pin_press(id, dip, now);
             return;
         }
         self.on_band_click(x, y);
@@ -126,14 +126,15 @@ impl super::App {
             return;
         };
         // The discard cross is the top-left 26 DIP square of the card.
-        let (dip_x, dip_y) = self.to_window_dip(x, y);
-        if dip_x >= frame.left
-            && dip_x < frame.left + layout::CROSS_HIT
-            && dip_y >= frame.top
-            && dip_y < frame.top + layout::CROSS_HIT
-        {
-            self.discard(id);
-            return;
+        if let Some((dip_x, dip_y)) = self.to_window_dip(x, y) {
+            let in_cross = dip_x >= frame.left
+                && dip_x < frame.left + layout::CROSS_HIT
+                && dip_y >= frame.top
+                && dip_y < frame.top + layout::CROSS_HIT;
+            if in_cross {
+                self.discard(id);
+                return;
+            }
         }
         logging::trace(format!("press card {id} at {x},{y}"));
         self.state.pressed = Some(Press {
@@ -402,7 +403,7 @@ impl super::App {
             && self.windows.note_editor.is_none()
             && self.windows.editor.is_none()
         {
-            self.pin_at(x, y)
+            self.pin_at(x, y).map(|(id, _)| id)
         } else {
             None
         };
@@ -497,25 +498,18 @@ impl super::App {
 
     /// The clothespin under the pointer, in window DIP. Only an arrived,
     /// published pin is draggable.
-    pub(super) fn pin_at(&self, x: i32, y: i32) -> Option<CardId> {
+    pub(super) fn pin_at(&self, x: i32, y: i32) -> Option<(CardId, (f32, f32))> {
         if !self.state.is_revealed {
             return None;
         }
-        let (dip_x, dip_y) = self.to_window_dip(x, y);
-        if !dip_x.is_finite() || !dip_y.is_finite() {
-            return None;
-        }
+        let dip = self.to_window_dip(x, y)?;
         let overlay = self.windows.overlay.as_ref()?;
         let snapshot = overlay.snapshot();
         let snapshot = snapshot.lock().ok()?;
-        snapshot.pin_at(dip_x, dip_y)
+        snapshot.pin_at(dip.0, dip.1).map(|id| (id, dip))
     }
 
-    fn begin_pin_press(&mut self, id: CardId, x: i32, y: i32, now: f64) {
-        let (dip_x, dip_y) = self.to_window_dip(x, y);
-        if !dip_x.is_finite() || !dip_y.is_finite() {
-            return;
-        }
+    fn begin_pin_press(&mut self, id: CardId, dip: (f32, f32), now: f64) {
         // A pin click must not pair with an earlier card click into a double
         // click, and must never arm the long press or the OLE drag.
         self.state.last_click = None;
@@ -534,16 +528,16 @@ impl super::App {
         // the card while it is being dragged.
         self.hide_preview();
         self.state.preview_state.reset();
-        self.send_scene(Command::Grab {
-            id,
-            pointer: (dip_x, dip_y),
-        });
+        self.send_scene(Command::Grab { id, pointer: dip });
         if let Some(overlay) = self.windows.overlay.as_mut() {
             overlay.set_click_through(false);
             overlay.set_hand_cursor(false);
             overlay.set_drag_cursor(true);
         }
-        logging::trace(format!("pin press {id} at {x},{y} ({now:.3})"));
+        logging::trace(format!(
+            "pin press {id} at {:.1},{:.1} ({now:.3})",
+            dip.0, dip.1
+        ));
     }
 
     fn finish_pin_press(&mut self) {

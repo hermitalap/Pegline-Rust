@@ -291,28 +291,15 @@ fn unique_path(folder: &Path, name: &str) -> PathBuf {
     folder.join(name)
 }
 
-/// Renders `text` as the note bitmap the card draws, or `None` when the text
-/// cannot be read.
-pub fn render(text: &str, color_index: usize) -> Option<ImageData> {
-    render_checked(text, color_index)
-}
-
 /// Renders the note as the large sheet the hover preview shows, at `scale`
 /// pixels per DIP (clamped to at least 2 so the sheet stays crisp).
 ///
 /// It is the same paper and the same summary as the card, only larger: the
 /// preview reads like a magnified note, not like a second editor (BEHAVIOR §7).
 pub fn render_preview(text: &str, color_index: usize, scale: f32) -> Option<ImageData> {
-    let scale = if scale.is_finite() {
-        scale.max(2.0)
-    } else {
-        2.0
-    };
+    let scale = scale.max(2.0);
     let width = (PREVIEW_WIDTH_DIP * scale).round() as u32;
     let height = (PREVIEW_HEIGHT_DIP * scale).round() as u32;
-    if width < 2 || height < 2 {
-        return None;
-    }
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     paint_paper(&mut pixels, width, height, color_index, scale);
     let summary = summary(text);
@@ -397,8 +384,8 @@ fn paint_paper(pixels: &mut [u8], width: u32, height: u32, color_index: usize, s
     }
 }
 
-/// The card bitmap: the paper plus its text.
-fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
+/// Renders `text` as the note bitmap the card draws.
+pub fn render(text: &str, color_index: usize) -> ImageData {
     let palette = color(color_index);
     let width = CARD_WIDTH as u32 * SCALE;
     let height = CARD_HEIGHT as u32 * SCALE;
@@ -408,7 +395,7 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
     // Text: the card shows the rendered Markdown, not its source markers, and
     // the layout rules are the C# ones. Short text sits large in the middle;
     // longer text wraps, and the last visible line ends in an ellipsis.
-    let summary = summary(raw);
+    let summary = summary(text);
     let text: String = summary.chars().take(600).collect();
     let text = text.trim().to_string();
     let brief = text.chars().count() <= 24 && !text.contains('\n');
@@ -443,7 +430,7 @@ fn render_checked(raw: &str, color_index: usize) -> Option<ImageData> {
     for pixel in pixels.chunks_exact_mut(4) {
         pixel[3] = 255;
     }
-    Some(ImageData::new(width, height, pixels))
+    ImageData::new(width, height, pixels)
 }
 
 /// Draws the note text into the DIB pixels using GDI.
@@ -607,13 +594,13 @@ mod tests {
 
     #[test]
     fn the_note_bitmap_is_three_times_the_card_and_stays_opaque() {
-        let image = render("hello", 0).expect("a note bitmap");
+        let image = render("hello", 0);
         assert_eq!((image.width, image.height), (408, 264));
         assert!(image.is_valid());
         // The paper is opaque everywhere.
         assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
         // The blank note the entry hovers over is the same sheet.
-        let blank = render("", 0).expect("a blank note bitmap");
+        let blank = render("", 0);
         assert_eq!((blank.width, blank.height), (408, 264));
         assert!(blank.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
@@ -643,7 +630,7 @@ mod tests {
     #[test]
     fn long_text_renders_and_stays_opaque() {
         let text = "这是一段很长的便签文字，用来检查自动换行和末尾省略号。\nSecond line.";
-        let image = render(text, 2).expect("a note bitmap");
+        let image = render(text, 2);
         assert_eq!((image.width, image.height), (408, 264));
         // Something was drawn: not every pixel is still the paper colour at the
         // ink's top-left area.

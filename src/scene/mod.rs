@@ -329,16 +329,11 @@ impl Card {
         self.swing.step(dt);
     }
 
-    /// Top of the card frame in slot-local DIP (before rotation).
-    fn frame_top(&self) -> f32 {
-        layout::CARD_OFFSET_BELOW_TOP
-    }
-
     fn frame_rect(&self, slot_left: f32) -> RectF {
         let (card_w, card_h) = self.card_size;
         RectF::from_xywh(
             slot_left + (layout::CARD_WIDTH - card_w) * 0.5,
-            self.frame_top(),
+            layout::CARD_OFFSET_BELOW_TOP,
             card_w,
             card_h,
         )
@@ -554,11 +549,10 @@ impl Scene {
         }
     }
 
-    pub fn set_layout(&mut self, width_px: u32, height_px: u32, dpi: u32) {
+    pub fn set_layout(&mut self, width_px: u32, dpi: u32) {
         let scale = dpi as f32 / 96.0;
         self.scale = scale;
         self.width_dip = width_px as f32 / scale;
-        let _ = height_px;
         // The slots depend on the line width, so they move with the window.
         self.relayout_cards();
         self.dirty = true;
@@ -581,11 +575,7 @@ impl Scene {
 
     pub fn apply(&mut self, command: Command, renderer: &Renderer, now: f64) {
         match command {
-            Command::Layout {
-                width_px,
-                height_px,
-                dpi,
-            } => self.set_layout(width_px, height_px, dpi),
+            Command::Layout { width_px, dpi, .. } => self.set_layout(width_px, dpi),
             Command::SetVisible(visible) => self.set_visible(visible),
             Command::Reveal(revealed) => {
                 if self.revealed != revealed {

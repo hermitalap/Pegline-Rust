@@ -7,10 +7,9 @@
 
 #![windows_subsystem = "windows"]
 
-use pegline::{app, logging, win32};
+use pegline::{app, logging};
 
 fn main() {
-    win32::ensure_dpi_awareness();
     logging::init();
     // Uncaught panics must land in error.log; window procedures also catch and
     // log them so one bad gesture cannot take the tray icon down.

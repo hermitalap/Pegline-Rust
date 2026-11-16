@@ -443,7 +443,7 @@ impl Flight {
         pin: PinMode,
         dpi: u32,
     ) -> bool {
-        let scale = dpi.max(96) as f32 / 96.0;
+        let scale = dpi as f32 / 96.0;
         // The landing card follows the real card's row glide during the fade;
         // the window must already cover the final slot as well.
         let slide_px = (slide_dip * scale).round() as i32;
@@ -488,7 +488,7 @@ impl Flight {
         tilt: f32,
         dpi: u32,
     ) -> bool {
-        let scale = dpi.max(96) as f32 / 96.0;
+        let scale = dpi as f32 / 96.0;
         let travel = (DROP_DISTANCE * scale) as i32;
         let bounds = clamp_to_desktop(
             RectI::new(rect.left, rect.top, rect.right, rect.bottom).inflate(travel + 64),
@@ -532,7 +532,7 @@ impl Flight {
         velocity: (f32, f32),
         dpi: u32,
     ) -> bool {
-        let scale = dpi.max(96) as f32 / 96.0;
+        let scale = dpi as f32 / 96.0;
         let pad = (PAD_DIP * scale) as i32;
         // The window has to hold the whole fall: the horizontal reach of the
         // throw on both sides, and the desktop bottom for the drop.
@@ -915,7 +915,7 @@ fn prepare(
         origin.height().max(1) as u32,
         request.dpi,
     )?;
-    let scale = request.dpi.max(96) as f32 / 96.0;
+    let scale = request.dpi as f32 / 96.0;
     let texture = renderer.upload(&request.image)?;
     let start_texture = request
         .start_image
@@ -1217,7 +1217,7 @@ fn run_drop(
     let width_px = origin.width().max(1) as u32;
     let height_px = origin.height().max(1) as u32;
     renderer.resize(width_px, height_px, dpi)?;
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let texture = renderer.upload(image)?;
 
     let width = rect.width() as f32 / scale;
@@ -1293,7 +1293,7 @@ fn run_tumble(
     let width_px = origin.width().max(1) as u32;
     let height_px = origin.height().max(1) as u32;
     renderer.resize(width_px, height_px, dpi)?;
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let texture = renderer.upload(image)?;
 
     let width = from.width() as f32 / scale;

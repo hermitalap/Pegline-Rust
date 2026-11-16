@@ -19,10 +19,7 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW,
     RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
-use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
-    MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
-};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{
     FO_DELETE, FOLDERID_Desktop, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW,
     SHFileOperationW, SHGetKnownFolderPath,
@@ -51,21 +48,13 @@ pub fn werr(call: &str, error: windows::core::Error) -> String {
     format!("{call}: {error}")
 }
 
-/// Declares the process DPI aware. The manifest already does this; the call is
-/// a belt-and-braces fallback for hosts that strip the manifest.
-pub fn ensure_dpi_awareness() {
-    // SAFETY: user32 reads no memory here; the context is a documented constant.
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
-}
-
 /// One monitor, with both the desktop bounds and the work area in device pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Monitor {
     pub handle: HMONITOR,
     pub bounds: RectI,
     pub work: RectI,
+    /// Effective DPI, never below 96, so consumers need no clamp.
     pub dpi: u32,
     pub primary: bool,
 }
@@ -539,6 +528,8 @@ pub fn window_rect(hwnd: HWND) -> Option<RectI> {
     Some(rect_from_win32(&rect))
 }
 
+/// The window's effective DPI, clamped to at least 96, so consumers need no
+/// further clamp.
 pub fn window_dpi(hwnd: HWND) -> u32 {
     // SAFETY: pure query; 0 is not possible for a valid window, but clamp anyway.
     (unsafe { GetDpiForWindow(hwnd) }).max(96)

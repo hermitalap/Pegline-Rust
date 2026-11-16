@@ -152,7 +152,7 @@ impl super::App {
             // "Open the line on purpose" (WPF `keepOpen`): an empty line stays
             // down with its hint instead of retracting after 0.7 s.
             self.state.keep_open = true;
-            let screen = self.pointer_screen();
+            let screen = Self::pointer_screen();
             if let Some(screen) = screen {
                 if self.screen.map(|current| current.handle) != Some(screen.handle) {
                     self.place_on_screen(screen);

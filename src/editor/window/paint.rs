@@ -214,11 +214,10 @@ impl super::EditorState {
                 radiusX: rect.width() * 0.5,
                 radiusY: rect.height() * 0.5,
             };
-            if let Some(brush) = self.assets.brush(rgb) {
-                // SAFETY: the brush and the render target are alive.
-                unsafe {
-                    self.assets.rt.FillEllipse(&disc, brush);
-                }
+            let brush = self.assets.brush(rgb);
+            // SAFETY: the brush and the render target are alive.
+            unsafe {
+                self.assets.rt.FillEllipse(&disc, brush);
             }
             let selected = rgb == self.color;
             let hovered = self.hover == Some(Hit::Colour(index));
@@ -283,7 +282,7 @@ impl super::EditorState {
                 radiusX: diameter * 0.5,
                 radiusY: diameter * 0.5,
             };
-            let brush = self.assets.brush(self.color).unwrap_or(&self.chrome.ink);
+            let brush = self.assets.brush(self.color);
             let outline = if selected {
                 &self.chrome.accent
             } else {
@@ -434,16 +433,14 @@ impl super::EditorState {
                     // SAFETY: the render target is in a draw; brushes are live.
                     unsafe {
                         rt.FillRoundedRectangle(&rounded_box, &self.chrome.text_box);
-                        if let Some(pen) = pen {
-                            rt.DrawRoundedRectangle(&rounded_box, pen, 1.0, None);
-                            let caret = d2d_rect(RectF::from_xywh(
-                                origin.0 + caret_x.max(0.0) + 1.0,
-                                origin.1,
-                                2.0,
-                                text_h.max(18.0),
-                            ));
-                            rt.FillRectangle(&caret, pen);
-                        }
+                        rt.DrawRoundedRectangle(&rounded_box, pen, 1.0, None);
+                        let caret = d2d_rect(RectF::from_xywh(
+                            origin.0 + caret_x.max(0.0) + 1.0,
+                            origin.1,
+                            2.0,
+                            text_h.max(18.0),
+                        ));
+                        rt.FillRectangle(&caret, pen);
                     }
                     // Publish the insertion point and the box bottom in client
                     // pixels: the composition window of input methods that draw
@@ -700,9 +697,7 @@ impl super::EditorState {
         let Some(doc) = self.doc.as_ref() else {
             return Err("there is no picture to save".to_string());
         };
-        let source = doc
-            .source()
-            .ok_or_else(|| "there is no picture to save".to_string())?;
+        let source = doc.source();
         let (source_width, source_height) = (source.width, source.height);
         let factory = wic_factory()?;
         // SAFETY: the factory is live, the size is at least one pixel and the
@@ -896,9 +891,7 @@ impl<'a> Painter<'a> {
     /// Draws an already laid-out run. The composing text uses the same call;
     /// only its layout carries the composition underline.
     fn text_layout(&self, origin: (f32, f32), layout: &IDWriteTextLayout, color: u32) {
-        let Some(brush) = self.assets.brush(color) else {
-            return;
-        };
+        let brush = self.assets.brush(color);
         // SAFETY: the layout, the brush and the target are alive.
         unsafe {
             self.rt.DrawTextLayout(
@@ -914,9 +907,7 @@ impl<'a> Painter<'a> {
     }
 
     fn arrow(&self, from: (f32, f32), to: (f32, f32), color: u32, width: f32) {
-        let Some(brush) = self.assets.brush(color) else {
-            return;
-        };
+        let brush = self.assets.brush(color);
         let Some((shaft, transform)) = arrow_head(from, to, width, self.base) else {
             return;
         };
@@ -943,12 +934,11 @@ impl<'a> Painter<'a> {
     }
 
     fn rectangle(&self, rect: (f32, f32, f32, f32), color: u32, width: f32) {
-        if let Some(brush) = self.assets.brush(color) {
-            let d = d2d_rect(rect_of(rect));
-            // SAFETY: the brush and the target are alive.
-            unsafe {
-                self.rt.DrawRectangle(&d, brush, width, Some(self.stroke));
-            }
+        let brush = self.assets.brush(color);
+        let d = d2d_rect(rect_of(rect));
+        // SAFETY: the brush and the target are alive.
+        unsafe {
+            self.rt.DrawRectangle(&d, brush, width, Some(self.stroke));
         }
     }
 
@@ -994,9 +984,7 @@ impl<'a> Painter<'a> {
             }
             Tool::Mosaic => {
                 // Dashed white outline: no pixels are hidden before the drop.
-                let Some(brush) = self.assets.brush(0xFF_FF_FF) else {
-                    return;
-                };
+                let brush = self.assets.brush(0xFF_FF_FF);
                 let outline = (1.5 / scale.max(0.0001)).max(1.0);
                 let d = d2d_rect(rect_of(drag_rect(drag.start, drag.current)));
                 // SAFETY: the brush and the target are alive.
@@ -1017,14 +1005,12 @@ impl<'a> Painter<'a> {
                     radiusY: radius,
                 };
                 let width = (1.5 / scale.max(0.0001)).max(0.8);
+                let dark = self.assets.brush(0x00_00_00);
+                let white = self.assets.brush(0xFF_FF_FF);
                 // SAFETY: the brushes and the target are alive.
                 unsafe {
-                    if let Some(dark) = self.assets.brush(0x00_00_00) {
-                        self.rt.DrawEllipse(&disc, dark, width * 2.0, None);
-                    }
-                    if let Some(white) = self.assets.brush(0xFF_FF_FF) {
-                        self.rt.DrawEllipse(&disc, white, width, Some(self.dash));
-                    }
+                    self.rt.DrawEllipse(&disc, dark, width * 2.0, None);
+                    self.rt.DrawEllipse(&disc, white, width, Some(self.dash));
                 }
             }
             Tool::Text => {}

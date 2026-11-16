@@ -536,8 +536,8 @@ impl EditorState {
         let mut doc = Doc::new(text);
         doc.set_caret(0, false);
         let display = DisplayDoc::parse(doc.text());
-        let scale = dpi.max(96) as f32 / 96.0;
-        let paper = paper_of_window(width_px.max(1), height_px.max(1), dpi.max(96));
+        let scale = dpi as f32 / 96.0;
+        let paper = paper_of_window(width_px.max(1), height_px.max(1), dpi);
         let mut state = Self {
             doc,
             display,
@@ -569,7 +569,7 @@ impl EditorState {
             fold_shade: None,
             shadow: None,
             paper,
-            dpi: dpi.max(96),
+            dpi,
             width_px: width_px.max(1),
             height_px: height_px.max(1),
             scale,
@@ -667,7 +667,6 @@ impl EditorState {
     pub fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        let dpi = dpi.max(96);
         let paper = paper_of_window(width_px, height_px, dpi);
         // A width change re-wraps every line; a height-only drag just shows more
         // or less of the same layout. A DPI change re-lays out for safety.
@@ -1545,7 +1544,7 @@ impl Assets {
                 startPosition: start,
                 length,
             };
-            apply_style(&layout, run, active, self, range)?;
+            apply_style(&layout, run, active, self, range);
             offset += run.text.len();
         }
         if let Some(composition) = &composition {
@@ -1571,16 +1570,16 @@ fn apply_style(
     active: bool,
     assets: &Assets,
     range: DWRITE_TEXT_RANGE,
-) -> Result<(), String> {
+) {
     // SAFETY: the layout is alive and the range was computed from its text.
     unsafe {
         if run.marker {
             let _ = layout.SetDrawingEffect(&assets.marker, range);
-            return Ok(());
+            return;
         }
         if active {
             // The active line keeps its block style; only the markers dim.
-            return Ok(());
+            return;
         }
         match run.style {
             Style::Bold => {
@@ -1603,7 +1602,6 @@ fn apply_style(
             Style::Body | Style::Marker => {}
         }
     }
-    Ok(())
 }
 
 fn format(
@@ -1738,7 +1736,7 @@ pub fn paper_rect(paper: PaperSize) -> RectF {
 /// The paper a client area holds: the client minus the two shadow margins.
 /// The units are pixels on one axis; the result is DIP.
 pub fn paper_of_window(width_px: u32, height_px: u32, dpi: u32) -> PaperSize {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     PaperSize::new(
         (width_px.max(1) as f32 / scale - MARGIN_DIP * 2.0).max(1.0),
         (height_px.max(1) as f32 / scale - MARGIN_DIP * 2.0).max(1.0),
@@ -2130,7 +2128,7 @@ impl Surface {
     fn new(hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self, String> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        let dpi_f = dpi.max(96) as f32;
+        let dpi_f = dpi as f32;
         let (device, immediate) = create_d3d_device()?;
         let dxgi_device: IDXGIDevice = device
             .cast()
@@ -2243,7 +2241,7 @@ impl Surface {
     fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        let dpi_f = dpi.max(96) as f32;
+        let dpi_f = dpi as f32;
         if width_px == self.width_px && height_px == self.height_px && dpi_f == self.dpi {
             return Ok(());
         }

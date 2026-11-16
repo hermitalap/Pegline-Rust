@@ -83,7 +83,7 @@ pub fn bounds(source: (u32, u32), anchor: RectI, work: RectI, scale: f32) -> Rec
 pub fn decode_max(bounds: RectI, scale: f32) -> u32 {
     let inset = (INSET_DIP as f64 * scale as f64).round();
     let longest = bounds.width().max(bounds.height()) as f64 - 2.0 * inset;
-    (longest.ceil() as i64).clamp(1, u32::MAX as i64) as u32
+    (longest.ceil() as u32).max(1)
 }
 
 /// Where a hover preview of a fixed DIP size goes, in device pixels: below the

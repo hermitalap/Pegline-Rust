@@ -56,7 +56,6 @@ use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory2, IWICImagingFactory};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, GCS_COMPSTR,
     GCS_CURSORPOS, GCS_RESULTSTR, HIMC, IME_COMPOSITION_STRING, ISC_SHOWUICOMPOSITIONWINDOW,
@@ -279,7 +278,7 @@ impl Editor {
         }
 
         let (client_width, client_height) = client_size(hwnd).unwrap_or((1, 1));
-        let render_dpi = win32::window_dpi(hwnd).max(96);
+        let render_dpi = win32::window_dpi(hwnd);
         let start = Start {
             hwnd: SendHwnd(hwnd),
             path: path.to_path_buf(),
@@ -395,7 +394,7 @@ impl Editor {
     pub fn card_px(&self) -> Option<RectI> {
         let rect = win32::window_rect(self.hwnd)?;
         let (width_px, height_px) = client_size(self.hwnd)?;
-        let dpi = win32::window_dpi(self.hwnd).max(96);
+        let dpi = win32::window_dpi(self.hwnd);
         let scale = dpi as f32 / 96.0;
         let layout = layout::fit(
             width_px as f32 / scale,
@@ -744,7 +743,7 @@ fn handle_resize(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> L
             let width = (lparam.0 as usize & 0xFFFF) as u32;
             let height = ((lparam.0 as usize >> 16) & 0xFFFF) as u32;
             // SAFETY: pure query on our own window.
-            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+            let dpi = win32::window_dpi(hwnd);
             shared.send(Command::Resize {
                 width_px: width.max(1),
                 height_px: height.max(1),
@@ -851,7 +850,7 @@ fn handle_cursor(
             let _ = GetCursorPos(&mut point);
             let _ = ScreenToClient(hwnd, &mut point);
         }
-        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32;
+        let dpi = win32::window_dpi(hwnd) as f32;
         let x = point.x as f32 / (dpi / 96.0);
         let y = point.y as f32 / (dpi / 96.0);
         let layout = shared.layout.lock().map(|layout| *layout).ok();
@@ -1494,9 +1493,7 @@ impl EditorState {
         )?;
         let chrome = Chrome::new(&surface.rt)?;
         let assets = Assets::new(surface.rt.clone())?;
-        let width_px = width_px.max(1);
-        let height_px = height_px.max(1);
-        let dpi = dpi.max(96) as f32;
+        let dpi = dpi as f32;
         let width_dip = width_px as f32 * 96.0 / dpi;
         let height_dip = height_px as f32 * 96.0 / dpi;
         let layout = layout::fit(width_dip, height_dip, source_size);
@@ -1616,9 +1613,6 @@ impl EditorState {
     }
 
     fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
-        let width_px = width_px.max(1);
-        let height_px = height_px.max(1);
-        let dpi = dpi.max(96);
         if width_px == self.width_px && height_px == self.height_px && dpi as f32 == self.dpi {
             return Ok(());
         }
@@ -1649,8 +1643,8 @@ impl EditorState {
         )?;
         let chrome = Chrome::new(&surface.rt)?;
         let mut assets = Assets::new(surface.rt.clone())?;
-        if let Some(source) = self.doc.as_ref().and_then(|doc| doc.source()) {
-            assets.set_source(source)?;
+        if let Some(doc) = self.doc.as_ref() {
+            assets.set_source(doc.source())?;
         }
         self.surface = surface;
         self.labels = labels;
@@ -2242,9 +2236,7 @@ impl EditorState {
         let Some(doc) = self.doc.as_ref() else {
             return;
         };
-        let Some(source) = doc.source() else {
-            return;
-        };
+        let source = doc.source();
         let marks = doc.marks();
         for mark in marks {
             let Mark::Mosaic { rect, block } = mark else {
@@ -2523,12 +2515,13 @@ impl Assets {
         })
     }
 
-    fn brush(&self, color: u32) -> Option<&ID2D1SolidColorBrush> {
+    /// The pen for `color`; an unknown colour uses the first pen.
+    fn brush(&self, color: u32) -> &ID2D1SolidColorBrush {
         self.pens
             .iter()
             .find(|(rgb, _)| *rgb == color)
             .map(|(_, brush)| brush)
-            .or_else(|| self.pens.first().map(|(_, brush)| brush))
+            .unwrap_or(&self.pens[0].1)
     }
 
     fn set_source(&mut self, image: &ImageData) -> Result<(), String> {
@@ -2627,9 +2620,7 @@ struct Surface {
 
 impl Surface {
     fn new(hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self, String> {
-        let width_px = width_px.max(1);
-        let height_px = height_px.max(1);
-        let dpi_f = dpi.max(96) as f32;
+        let dpi_f = dpi as f32;
         let (device, immediate) = create_d3d_device()?;
         let dxgi_device: IDXGIDevice = device
             .cast()
@@ -2723,9 +2714,7 @@ impl Surface {
     }
 
     fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
-        let width_px = width_px.max(1);
-        let height_px = height_px.max(1);
-        let dpi_f = dpi.max(96) as f32;
+        let dpi_f = dpi as f32;
         if width_px == self.width_px && height_px == self.height_px && dpi_f == self.dpi {
             return Ok(());
         }
@@ -2768,7 +2757,7 @@ impl Surface {
 
     /// Binds the opaque card bitmap for `photo` and starts painting on it.
     fn begin_card(&mut self, photo: RectF, dpi: f32) -> Result<(), String> {
-        let scale = dpi.max(96.0) / 96.0;
+        let scale = dpi / 96.0;
         let width = ((photo.width() * scale).round() as u32).max(1);
         let height = ((photo.height() * scale).round() as u32).max(1);
         let card = match self.card.take() {

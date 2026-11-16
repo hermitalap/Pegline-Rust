@@ -474,7 +474,7 @@ fn render_thread(
             let (width_px, height_px, dpi) = (
                 renderer.width_px,
                 renderer.height_px,
-                renderer.dpi.round().max(96.0) as u32,
+                renderer.dpi.round() as u32,
             );
             match crate::render::Renderer::new(hwnd.0, width_px, height_px, dpi) {
                 Ok(rebuilt) => {
@@ -525,7 +525,7 @@ fn handle(
                 // rebuild path recreates the swap chain at the current size.
                 logging::error(format!("overlay resize: {error}"));
             }
-            scene.set_layout(width_px, height_px, dpi);
+            scene.set_layout(width_px, dpi);
             true
         }
         Command::SetVisible(on) => {

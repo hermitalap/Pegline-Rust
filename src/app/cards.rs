@@ -324,18 +324,15 @@ impl super::App {
         )
     }
 
-    pub(super) fn to_window_dip(&self, x: i32, y: i32) -> (f32, f32) {
-        let Some(overlay) = self.windows.overlay.as_ref() else {
-            return (f32::NAN, f32::NAN);
-        };
-        let Some(rect) = win32::window_rect(overlay.hwnd()) else {
-            return (f32::NAN, f32::NAN);
-        };
+    /// A screen point in window DIP, when the strip exists and has a frame.
+    pub(super) fn to_window_dip(&self, x: i32, y: i32) -> Option<(f32, f32)> {
+        let overlay = self.windows.overlay.as_ref()?;
+        let rect = win32::window_rect(overlay.hwnd())?;
         let scale = overlay.scale().max(0.1);
-        (
+        Some((
             (x - rect.left) as f32 / scale,
             (y - rect.top) as f32 / scale,
-        )
+        ))
     }
 
     /// The note editor's paper rectangle in screen pixels; clicks outside it
@@ -343,7 +340,7 @@ impl super::App {
     pub(super) fn note_editor_paper_px(&self) -> Option<RectI> {
         let editor = self.windows.note_editor.as_ref()?;
         let rect = win32::window_rect(editor.hwnd())?;
-        let dpi = win32::window_dpi(editor.hwnd()).max(96);
+        let dpi = win32::window_dpi(editor.hwnd());
         let scale = dpi as f32 / 96.0;
         let margin = crate::note_editor::render::MARGIN_DIP * scale;
         let paper = editor.paper();
@@ -363,7 +360,7 @@ impl super::App {
     pub(super) fn note_editor_card_px(&self) -> Option<RectI> {
         let paper = self.note_editor_paper_px()?;
         let editor = self.windows.note_editor.as_ref()?;
-        let dpi = win32::window_dpi(editor.hwnd()).max(96);
+        let dpi = win32::window_dpi(editor.hwnd());
         let inset = (layout::PHOTO_INSET * dpi as f32 / 96.0).round() as i32;
         Some(paper.inflate(inset))
     }

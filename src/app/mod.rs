@@ -790,9 +790,7 @@ impl App {
     }
 
     fn open_overlay(&mut self) {
-        let screen = self
-            .pointer_screen()
-            .or_else(|| win32::monitors().into_iter().next());
+        let screen = Self::pointer_screen().or_else(|| win32::monitors().into_iter().next());
         let Some(screen) = screen else {
             logging::error("no monitors found");
             return;
@@ -812,7 +810,7 @@ impl App {
         }
     }
 
-    fn pointer_screen(&self) -> Option<Monitor> {
+    fn pointer_screen() -> Option<Monitor> {
         let (x, y) = win32::cursor_pos()?;
         win32::monitor_at(x, y)
     }
@@ -978,9 +976,7 @@ impl App {
             .as_ref()
             .is_some_and(|editor| editor.is_closed())
         {
-            if let Some(mut editor) = self.windows.editor.take() {
-                editor.shutdown();
-            }
+            self.windows.editor = None;
         }
         if self
             .windows
@@ -988,9 +984,7 @@ impl App {
             .as_ref()
             .is_some_and(|editor| editor.is_closed())
         {
-            if let Some(mut editor) = self.windows.note_editor.take() {
-                editor.shutdown();
-            }
+            self.windows.note_editor = None;
             self.sessions.note_editing = None;
             self.sessions.note_committing = false;
             self.book.note_show_at = None;
@@ -1062,20 +1056,13 @@ impl App {
                             let Some(text) = notes::read(&thread_path) else {
                                 return;
                             };
-                            match notes::render(&text, color) {
-                                Some(image) => {
-                                    let _ = tx.send(Event::NoteReady {
-                                        path: thread_path,
-                                        text,
-                                        image,
-                                    });
-                                    window::wake();
-                                }
-                                None => logging::error(format!(
-                                    "note render: {}",
-                                    thread_path.display()
-                                )),
-                            }
+                            let image = notes::render(&text, color);
+                            let _ = tx.send(Event::NoteReady {
+                                path: thread_path,
+                                text,
+                                image,
+                            });
+                            window::wake();
                         });
                 }
                 Event::NoteImage { id, image } => self.on_thumbnail(id, image),
@@ -1451,7 +1438,7 @@ impl App {
     /// the same size means only the thin frame goes away.
     fn note_hover_paper_px(&self) -> Option<RectI> {
         let hover = self.state.note_hover.as_ref()?;
-        let scale = hover.dpi.max(96) as f32 / 96.0;
+        let scale = hover.dpi as f32 / 96.0;
         let width = notes::CARD_WIDTH * scale;
         let height = notes::CARD_HEIGHT * scale;
         Some(RectI::new(
@@ -1465,7 +1452,7 @@ impl App {
     /// Where the hovering blank note's whole glass card is, in screen pixels.
     fn note_hover_card_px(&self) -> Option<RectI> {
         let paper = self.note_hover_paper_px()?;
-        let scale = self.state.note_hover.as_ref()?.dpi.max(96) as f32 / 96.0;
+        let scale = self.state.note_hover.as_ref()?.dpi as f32 / 96.0;
         let inset = (layout::PHOTO_INSET * scale).round() as i32;
         Some(paper.inflate(inset))
     }
@@ -1479,7 +1466,7 @@ impl App {
         let Some(hover) = self.state.note_hover.as_ref() else {
             return false;
         };
-        let scale = hover.dpi.max(96) as f32 / 96.0;
+        let scale = hover.dpi as f32 / 96.0;
         let (card_w, card_h) = layout::note_card_size();
         tilted_card_hits(
             hover.center,
@@ -1491,8 +1478,8 @@ impl App {
         )
     }
 
-    fn note_preview_bounds(&self, center: (f32, f32), dpi: u32) -> RectI {
-        let scale = dpi.max(96) as f32 / 96.0;
+    fn note_preview_bounds(center: (f32, f32), dpi: u32) -> RectI {
+        let scale = dpi as f32 / 96.0;
         let (card_w, card_h) = layout::note_card_size();
         let width = (card_w + NOTE_PADDING_DIP * 2.0) * scale;
         let height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
@@ -1649,7 +1636,7 @@ impl App {
                 }
             }
             if !finished {
-                let hover_scale = hover.dpi.max(96) as f32 / 96.0;
+                let hover_scale = hover.dpi as f32 / 96.0;
                 let width = (card_w + NOTE_PADDING_DIP * 2.0) * hover_scale;
                 let height = (card_h + NOTE_PADDING_DIP * 2.0) * hover_scale;
                 bounds = Some(RectI::new(
@@ -1724,16 +1711,16 @@ impl App {
         pointer_x: i32,
         pointer_y: i32,
     ) -> (Option<RectF>, bool, bool, bool) {
-        let (dip_x, dip_y) = self.to_window_dip(pointer_x, pointer_y);
+        let dip = self.to_window_dip(pointer_x, pointer_y);
         let hotspot = self.note_entry_hotspot();
         let entry_hit =
             hotspot.map(|rect| RectF::from_xywh(rect.left, 0.0, rect.width(), rect.bottom));
         let in_hotspot = entry_hit
             .as_ref()
-            .is_some_and(|rect| rect.contains(dip_x, dip_y));
-        let keep_near = entry_hit
-            .as_ref()
-            .is_some_and(|rect| rect.inflated(24.0).contains(dip_x, dip_y));
+            .is_some_and(|rect| dip.is_some_and(|(dip_x, dip_y)| rect.contains(dip_x, dip_y)));
+        let keep_near = entry_hit.as_ref().is_some_and(|rect| {
+            dip.is_some_and(|(dip_x, dip_y)| rect.inflated(24.0).contains(dip_x, dip_y))
+        });
         // The whole strip, plus a little air, is the tool's range: as soon as the
         // pointer is there the entry advertises itself with a peeking corner.
         // Only stepping onto the hotspot completes it.
@@ -1780,7 +1767,7 @@ impl App {
         };
         let color = 0;
         let dpi = screen.dpi;
-        let bounds = self.note_preview_bounds(from, dpi);
+        let bounds = Self::note_preview_bounds(from, dpi);
         if let Some(preview) = self.windows.preview.as_mut() {
             preview.show_note(color, bounds, dpi, layout::NOTE_PEEK_ANGLE_DEG);
         }
@@ -1890,7 +1877,7 @@ impl App {
             return;
         }
         logging::trace("new note editor requested");
-        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
+        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
             return;
         };
         let from = self.note_hover_card_px();
@@ -1903,7 +1890,7 @@ impl App {
         // The card's own blank paper dissolves into the editor view before the
         // flight starts; the editor image itself is rendered by its render
         // thread and taken below.
-        let start_image = notes::render("", 0);
+        let start_image = Some(notes::render("", 0));
         self.cancel_note_hover();
         // The flight window is about to be taken over for the trip to the
         // editor; any card it was carrying must become visible in the scene.
@@ -1936,7 +1923,7 @@ impl App {
                     .note_editor
                     .as_mut()
                     .and_then(NoteEditor::take_flight_image)
-                    .or_else(|| notes::render("", 0));
+                    .or_else(|| Some(notes::render("", 0)));
                 let to = self.note_editor_card_px();
                 let dpi = monitor.dpi;
                 let launched = match (from, to, image) {
@@ -1990,24 +1977,20 @@ impl App {
             self.state.preview_state.reset();
             return;
         }
-        let wanted = self.state.hover.filter(|id| {
+        let wanted = self.state.hover.filter(|_| {
             self.state.is_present
                 && self.state.is_revealed
                 && self.state.pressed.is_none()
                 && self.state.pin_press.is_none()
                 && !self.windows.menu_open
-                && self.line.items.iter().any(|item| item.id == *id)
         });
-        let Some(id) = wanted else {
+        let Some(item) = wanted.and_then(|id| self.line.items.iter().find(|item| item.id == id))
+        else {
             self.hide_preview();
             self.state.preview_state.reset();
             return;
         };
-        let Some(item) = self.line.items.iter().find(|item| item.id == id) else {
-            self.hide_preview();
-            self.state.preview_state.reset();
-            return;
-        };
+        let id = item.id;
         let stamp = item_stamp(item);
         let revision = item.revision;
         if !self
@@ -2204,13 +2187,7 @@ impl App {
                         return;
                     }
                 };
-                let image = match notes::render(&text, 0) {
-                    Some(image) => image,
-                    None => {
-                        logging::error(format!("note render: {}", path.display()));
-                        return;
-                    }
-                };
+                let image = notes::render(&text, 0);
                 let _ = tx.send(Event::NoteReady { path, text, image });
                 window::wake();
             });
@@ -2276,10 +2253,9 @@ impl App {
         let _ = std::thread::Builder::new()
             .name("pegline-note".to_string())
             .spawn(move || {
-                if let Some(image) = notes::render(&text, color) {
-                    let _ = tx.send(Event::NoteImage { id, image });
-                    window::wake();
-                }
+                let image = notes::render(&text, color);
+                let _ = tx.send(Event::NoteImage { id, image });
+                window::wake();
             });
     }
 
@@ -2323,7 +2299,7 @@ impl App {
         let card_image = item.thumb.clone();
         let from = self.current_card_px(id);
         let angle = self.current_card_angle(id).unwrap_or(item.tilt);
-        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
+        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
             return;
         };
         let tx = self.events_tx.clone();
@@ -2482,10 +2458,7 @@ impl App {
                 };
                 match result {
                     Ok(saved) => {
-                        let image = notes::render(&text, color);
-                        if image.is_none() {
-                            logging::error(format!("note render: {}", saved.display()));
-                        }
+                        let image = Some(notes::render(&text, color));
                         let _ = tx.send(Event::NoteSaved {
                             card,
                             path: saved,
@@ -2814,9 +2787,7 @@ impl App {
             }
         }
         self.sessions.note_editing = None;
-        if let Some(mut editor) = self.windows.note_editor.take() {
-            editor.shutdown();
-        }
+        self.windows.note_editor = None;
         self.state.pinned = false;
     }
 
@@ -2833,7 +2804,7 @@ impl App {
             self.close_note_editor();
             return;
         };
-        let dpi = win32::window_dpi(editor.hwnd()).max(96);
+        let dpi = win32::window_dpi(editor.hwnd());
         // The render thread already produced the paper at the editor's live
         // size for the commit; the discard tumble reuses it instead of
         // rasterising 460x360 on the UI thread (BEHAVIOR §10.1).
@@ -2927,7 +2898,7 @@ impl App {
                 .spawn(move || {
                     let (image, text) = if note {
                         match notes::read(&path) {
-                            Some(text) => (notes::render(&text, color), Some(text)),
+                            Some(text) => (Some(notes::render(&text, color)), Some(text)),
                             None => (None, None),
                         }
                     } else {
@@ -2994,7 +2965,7 @@ impl App {
         if self.windows.editor.is_some() {
             return;
         }
-        let Some(monitor) = self.screen.or_else(|| self.pointer_screen()) else {
+        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
             return;
         };
         let from = card.and_then(|id| self.current_card_px(id));
@@ -3245,9 +3216,7 @@ impl App {
         self.book.annotate_show_at = None;
         self.book.annotate_close_at = None;
         self.sessions.editing = None;
-        if let Some(mut editor) = self.windows.editor.take() {
-            editor.shutdown();
-        }
+        self.windows.editor = None;
         // A return flight that is still running owns the card; any other path
         // must make it visible again. A capture flight started by a saved
         // demo picture is not ours: leave its bookkeeping alone.
@@ -3707,7 +3676,7 @@ impl App {
             });
     }
 
-    fn guess_area(&self, path: &std::path::Path, fresh: bool) -> Option<RectI> {
+    fn guess_area(path: &std::path::Path, fresh: bool) -> Option<RectI> {
         let size = wic::pixel_size(path).ok()?;
         let screens: Vec<RectI> = win32::monitors().into_iter().map(|m| m.bounds).collect();
         let pointer = win32::cursor_pos().unwrap_or((0, 0));
@@ -3770,9 +3739,7 @@ impl App {
     fn finish_quit(&mut self) {
         self.quit = true;
         self.state.keep_open = false;
-        if let Some(mut editor) = self.windows.note_editor.take() {
-            editor.shutdown();
-        }
+        self.windows.note_editor = None;
         window::quit();
     }
 
@@ -3803,9 +3770,7 @@ impl App {
         if let Some(ghost) = self.windows.ghost.as_mut() {
             ghost.shutdown();
         }
-        if let Some(mut editor) = self.windows.editor.take() {
-            editor.shutdown();
-        }
+        self.windows.editor = None;
         if let Some(watcher) = self.capture.watcher.as_mut() {
             watcher.stop();
         }

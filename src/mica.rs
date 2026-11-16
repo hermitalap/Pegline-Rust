@@ -317,7 +317,7 @@ fn build() -> Option<MicaImage> {
     }
     let width = ((virtual_rect.width() as f32 * TEXTURE_SCALE).round() as u32).max(2);
     let height = ((virtual_rect.height() as f32 * TEXTURE_SCALE).round() as u32).max(2);
-    let resized = cover_resize(&source, width, height)?;
+    let resized = cover_resize(&source, width, height);
     let blurred = blur(&resized, width as usize, height as usize, 8);
     let bgra = tint(&blurred);
     Some(MicaImage {
@@ -328,7 +328,7 @@ fn build() -> Option<MicaImage> {
     })
 }
 
-fn cover_resize(source: &ImageData, width: u32, height: u32) -> Option<ImageData> {
+fn cover_resize(source: &ImageData, width: u32, height: u32) -> ImageData {
     let source_width = source.width as f32;
     let source_height = source.height as f32;
     let destination_width = width as f32;
@@ -348,18 +348,14 @@ fn cover_resize(source: &ImageData, width: u32, height: u32) -> Option<ImageData
             bgra[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 255]);
         }
     }
-    Some(ImageData {
+    ImageData {
         width,
         height,
         bgra,
-    })
+    }
 }
 
 fn sample(source: &ImageData, x: f32, y: f32) -> [u8; 3] {
-    let max_x = source.width.saturating_sub(1) as f32;
-    let max_y = source.height.saturating_sub(1) as f32;
-    let x = x.clamp(0.0, max_x);
-    let y = y.clamp(0.0, max_y);
     let x0 = x.floor() as u32;
     let y0 = y.floor() as u32;
     let x1 = (x0 + 1).min(source.width.saturating_sub(1));
@@ -509,7 +505,7 @@ mod tests {
             height: 2,
             bgra: vec![200u8; 4 * 2 * 4],
         };
-        let resized = cover_resize(&source, 2, 2).expect("resize");
+        let resized = cover_resize(&source, 2, 2);
         assert_eq!((resized.width, resized.height), (2, 2));
         assert_eq!(resized.bgra.len(), 16);
     }

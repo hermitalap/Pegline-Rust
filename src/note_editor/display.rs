@@ -184,7 +184,7 @@ pub enum Hit {
 /// margins, including the top-right and bottom-left shadow corners, stay
 /// commit areas.
 pub fn hit_test(x_px: i32, y_px: i32, paper: PaperSize, dpi: u32) -> Hit {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let x = x_px as f32 / scale;
     let y = y_px as f32 / scale;
     let (window_width, window_height) = paper.window_size();

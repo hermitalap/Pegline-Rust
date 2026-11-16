@@ -166,7 +166,6 @@ impl Ghost {
     /// still hidden, so a stale or blank frame is never shown and the UI thread
     /// never waits for the GPU.
     pub fn show(&mut self, image: &ImageData, card_dip: (f32, f32), cursor: (i32, i32), dpi: u32) {
-        let dpi = dpi.max(96);
         let Some(size) = ghost_size(card_dip, dpi) else {
             logging::error(format!("ghost: unusable card size {card_dip:?}"));
             self.hide();
@@ -272,7 +271,7 @@ fn ghost_thread(hwnd: SendHwnd, rx: Receiver<GhostCommand>, ready: Sender<Result
             GhostCommand::Hide => release(&mut renderer, hwnd.0, &mut texture, &mut shown),
             GhostCommand::Show { image, rect, dpi } => {
                 size_px = (rect.width().max(1) as u32, rect.height().max(1) as u32);
-                follow_dpi = dpi.max(96);
+                follow_dpi = dpi;
                 // Never leave an old frame on screen while the new one is
                 // composed: hide first, draw, then show.
                 if shown {
@@ -366,7 +365,7 @@ fn ghost_size(card_dip: (f32, f32), dpi: u32) -> Option<(u32, u32)> {
     if !width_dip.is_finite() || !height_dip.is_finite() {
         return None;
     }
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let width = (width_dip * GHOST_SCALE * scale).ceil();
     let height = (height_dip * GHOST_SCALE * scale).ceil();
     if width < 1.0 || height < 1.0 || width > MAX_EDGE_PX || height > MAX_EDGE_PX {
@@ -378,7 +377,7 @@ fn ghost_size(card_dip: (f32, f32), dpi: u32) -> Option<(u32, u32)> {
 /// The ghost's window rectangle for a pointer position: centred on the pointer
 /// horizontally, 12 DIP below it, in device pixels.
 fn follow_rect(cursor: (i32, i32), size: (u32, u32), dpi: u32) -> RectI {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let width = size.0 as i32;
     let height = size.1 as i32;
     let left = cursor.0 - width / 2;

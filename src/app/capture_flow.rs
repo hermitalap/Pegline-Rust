@@ -43,7 +43,7 @@ impl super::App {
                 .spawn(move || {
                     let (thumb, text) = if note {
                         let text = notes::read(&thread_path);
-                        let image = text.as_deref().and_then(|text| notes::render(text, color));
+                        let image = text.as_deref().map(|text| notes::render(text, color));
                         (image, text)
                     } else {
                         (wic::decode_scaled(&thread_path, thumb_max).ok(), None)
@@ -141,7 +141,7 @@ impl super::App {
             .map(|age| age.as_secs_f64() < 3.0)
             .unwrap_or(false);
         let own = path.starts_with(win32::inbox_dir());
-        let area = self.guess_area(&path, fresh);
+        let area = Self::guess_area(&path, fresh);
         self.spawn_capture(path, own, area);
     }
 

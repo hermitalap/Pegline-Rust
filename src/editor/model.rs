@@ -134,7 +134,7 @@ pub fn mark_hits_eraser(mark: &Mark, point: (f32, f32), radius: f32) -> bool {
 
 /// The editable document: the source picture plus the marks drawn over it.
 pub struct Doc {
-    source: Option<crate::types::ImageData>,
+    source: crate::types::ImageData,
     marks: Vec<Mark>,
     /// Whole-document snapshots taken *before* each change. Small documents
     /// (a handful of marks) make snapshots cheaper than per-mark history and
@@ -153,7 +153,7 @@ const HISTORY_LIMIT: usize = 100;
 impl Doc {
     pub fn new(source: crate::types::ImageData) -> Self {
         Self {
-            source: Some(source),
+            source,
             marks: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -162,8 +162,8 @@ impl Doc {
         }
     }
 
-    pub fn source(&self) -> Option<&crate::types::ImageData> {
-        self.source.as_ref()
+    pub fn source(&self) -> &crate::types::ImageData {
+        &self.source
     }
 
     pub fn marks(&self) -> &[Mark] {

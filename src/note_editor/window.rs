@@ -144,11 +144,15 @@ struct Shared {
     move_ring: Box<[AtomicI64]>,
 }
 
+/// Locks `mutex`, taking the guard even if a panic poisoned it: the state is
+/// plain data, not a half-updated resource, so it is still safe to use.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 impl Shared {
     fn send(&self, command: Command) {
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(command);
-        }
+        let _ = lock(&self.tx).send(command);
     }
 
     /// Sends one pointer move and remembers when it was posted. The render
@@ -165,9 +169,7 @@ impl Shared {
     }
 
     fn push(&self, event: NoteEditorEvent, hwnd: HWND) {
-        if let Ok(mut events) = self.events.lock() {
-            events.push_back(event);
-        }
+        lock(&self.events).push_back(event);
         // SAFETY: posting to a window this process owns.
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_APP_NOTE_EVENT, WPARAM(0), LPARAM(0));
@@ -271,7 +273,7 @@ impl NoteEditor {
                 "note resize: small work area {}x{} at {} dpi, paper {:?} instead of {:?}",
                 monitor.work.width(),
                 monitor.work.height(),
-                dpi.max(96),
+                dpi,
                 frame.paper,
                 paper
             ));
@@ -318,7 +320,7 @@ impl NoteEditor {
 
         let (client_width, client_height) =
             client_size(hwnd).unwrap_or((frame.rect.width() as u32, frame.rect.height() as u32));
-        let render_dpi = win32::window_dpi(hwnd).max(96);
+        let render_dpi = win32::window_dpi(hwnd);
         let start = Start {
             hwnd: SendHwnd(hwnd),
             width_px: client_width,
@@ -379,10 +381,7 @@ impl NoteEditor {
     /// The size the user chose, in DIP, before clamping. This is what a save
     /// writes back to settings.
     pub fn explicit_paper(&self) -> PaperSize {
-        match self.shared.resize.lock() {
-            Ok(ui) => ui.explicit,
-            Err(_) => DEFAULT_PAPER,
-        }
+        lock(&self.shared.resize).explicit
     }
 
     /// True when a screen-pixel point is outside the paper and its resize
@@ -462,10 +461,7 @@ impl NoteEditor {
 
     /// Asks the render thread to commit. Safe to call more than once.
     pub fn commit(&mut self) {
-        if self.shared.commit_requested.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.shared.send(Command::Commit);
+        request_commit(&self.shared);
     }
 
     /// Stops the render thread and destroys the window. Idempotent.
@@ -803,23 +799,21 @@ fn render_thread(
             shared.frames.store(state.frames(), Ordering::Release);
         }
         publish_caret(&state, &shared);
-        // Wait only when nothing is queued: while the input queue has work, keep
-        // draining and drawing instead of sleeping between single commands.
-        if batch.is_empty() {
-            let now = win32::now_seconds();
-            match state.tick_in(now) {
-                Some(timeout) => match rx.recv_timeout(timeout) {
-                    Ok(command) => batch.push(command),
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                },
-                // Nothing is queued and nothing is due, so a blocking receive
-                // is the same wait without a wake-up that has no work to do.
-                None => match rx.recv() {
-                    Ok(command) => batch.push(command),
-                    Err(_) => break,
-                },
-            }
+        // The batch is empty here: the previous frame drained it. Wait for the
+        // next command, or for the frame the spring needs.
+        let now = win32::now_seconds();
+        match state.tick_in(now) {
+            Some(timeout) => match rx.recv_timeout(timeout) {
+                Ok(command) => batch.push(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            },
+            // Nothing is queued and nothing is due, so a blocking receive is
+            // the same wait without a wake-up that has no work to do.
+            None => match rx.recv() {
+                Ok(command) => batch.push(command),
+                Err(_) => break,
+            },
         }
         // Drain everything that is ready, up to a bounded batch, so one frame
         // can never spend unbounded time replaying input.
@@ -943,8 +937,7 @@ fn publish_caret(state: &EditorState, shared: &Shared) {
     }
 }
 
-fn request_commit(shared: &Shared, hwnd: HWND) {
-    let _ = hwnd;
+fn request_commit(shared: &Shared) {
     if shared.commit_requested.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -1137,7 +1130,7 @@ fn handle_mouse(hwnd: HWND, message: u32, lparam: LPARAM, shared: &Shared) -> LR
             match hit_test(x, y, paper, dpi) {
                 Hit::Resize(zone) => begin_resize(hwnd, zone, paper, shared),
                 Hit::Paper => begin_selection(hwnd, x, y, shared),
-                Hit::Margin | Hit::Outside => request_commit(shared, hwnd),
+                Hit::Margin | Hit::Outside => request_commit(shared),
             }
             return LRESULT(0);
         }
@@ -1224,16 +1217,13 @@ fn begin_selection(hwnd: HWND, x: i32, y: i32, shared: &Shared) {
 }
 
 /// The UI-thread resize state: the paper on screen and the zone being dragged.
-/// A poisoned lock degrades to the default paper rather than panicking.
 fn resize_state(shared: &Shared) -> (PaperSize, Option<ResizeZone>) {
-    match shared.resize.lock() {
-        Ok(ui) => (ui.effective, ui.drag.as_ref().map(|drag| drag.zone)),
-        Err(_) => (DEFAULT_PAPER, None),
-    }
+    let ui = lock(&shared.resize);
+    (ui.effective, ui.drag.as_ref().map(|drag| drag.zone))
 }
 
 fn take_drag(shared: &Shared) -> Option<Drag> {
-    shared.resize.lock().ok()?.drag.take()
+    lock(&shared.resize).drag.take()
 }
 
 /// Starts a resize drag from the margin. `SetCapture` is enough: the editor has
@@ -1248,7 +1238,8 @@ fn begin_resize(hwnd: HWND, zone: ResizeZone, paper: PaperSize, shared: &Shared)
         window.left + window.width() / 2,
         window.top + window.height() / 2,
     );
-    if let Ok(mut ui) = shared.resize.lock() {
+    {
+        let mut ui = lock(&shared.resize);
         ui.drag = Some(Drag {
             zone,
             start_cursor: cursor,
@@ -1281,7 +1272,8 @@ fn drag_resize(hwnd: HWND, cursor: (i32, i32), dpi: u32, shared: &Shared) {
     };
     let scale = dpi as f32 / 96.0;
     let mut applied = None;
-    if let Ok(mut ui) = shared.resize.lock() {
+    {
+        let mut ui = lock(&shared.resize);
         // Read the drag first; the size is then applied under the same lock but
         // without a second borrow of the drag.
         let (centre, paper, px, changed) = match ui.drag.as_ref() {
@@ -1333,14 +1325,12 @@ fn finish_resize(hwnd: HWND, shared: &Shared) -> Option<PaperSize> {
     }
     let dpi = win32::window_dpi(hwnd);
     let scale = dpi as f32 / 96.0;
-    let paper = match shared.resize.lock() {
-        Ok(mut ui) => {
-            let paper = ui.effective.rounded();
-            ui.explicit = paper;
-            ui.effective = paper;
-            paper
-        }
-        Err(_) => return None,
+    let paper = {
+        let mut ui = lock(&shared.resize);
+        let paper = ui.effective.rounded();
+        ui.explicit = paper;
+        ui.effective = paper;
+        paper
     };
     let (width, height) = window_pixels(paper, scale);
     // SAFETY: the final size of our own window, placed around the centre the
@@ -1438,7 +1428,7 @@ fn handle_key(message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
 
 /// Focus and activation. The first `WM_SETFOCUS` arms committing; losing focus
 /// or activation afterwards asks for a commit so the text is never lost.
-fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
+fn handle_focus(_hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
     match message {
         WM_ACTIVATE => {
             let active = (wparam.0 as u32) & 0xFFFF;
@@ -1447,7 +1437,7 @@ fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LR
                 if shared.focus_ready.load(Ordering::Acquire)
                     && !shared.stopping.load(Ordering::Acquire)
                 {
-                    request_commit(shared, hwnd);
+                    request_commit(shared);
                 }
             }
         }
@@ -1462,7 +1452,7 @@ fn handle_focus(hwnd: HWND, message: u32, wparam: WPARAM, shared: &Shared) -> LR
             if shared.focus_ready.load(Ordering::Acquire)
                 && !shared.stopping.load(Ordering::Acquire)
             {
-                request_commit(shared, hwnd);
+                request_commit(shared);
             }
         }
         _ => {}
@@ -1485,7 +1475,8 @@ fn handle_resize(
             let width = (lparam.0 as usize & 0xFFFF) as u32;
             let height = ((lparam.0 as usize >> 16) & 0xFFFF) as u32;
             let dpi = win32::window_dpi(hwnd);
-            if let Ok(mut ui) = shared.resize.lock() {
+            {
+                let mut ui = lock(&shared.resize);
                 ui.effective = crate::note_editor::render::paper_of_window(width, height, dpi);
             }
             if logging::trace_enabled() {
@@ -1512,9 +1503,9 @@ fn handle_resize(
 /// so a later resize still has room on every side. The value on disk is not
 /// touched until the user drags again.
 fn reflow(hwnd: HWND, shared: &Shared) {
-    let (paper, dragging) = match shared.resize.lock() {
-        Ok(ui) => (ui.explicit, ui.drag.is_some()),
-        Err(_) => (DEFAULT_PAPER, false),
+    let (paper, dragging) = {
+        let ui = lock(&shared.resize);
+        (ui.explicit, ui.drag.is_some())
     };
     if dragging {
         return;
@@ -1529,9 +1520,7 @@ fn reflow(hwnd: HWND, shared: &Shared) {
         return;
     };
     let frame = frame_for(monitor.work, paper, dpi);
-    if let Ok(mut ui) = shared.resize.lock() {
-        ui.effective = frame.paper;
-    }
+    lock(&shared.resize).effective = frame.paper;
     // SAFETY: re-placing our own window; it stays hidden from the taskbar.
     unsafe {
         let _ = SetWindowPos(
@@ -1612,7 +1601,7 @@ fn handle_close(hwnd: HWND, message: u32, shared: &Shared) -> LRESULT {
     match message {
         WM_CLOSE => {
             logging::trace("note editor WM_CLOSE");
-            request_commit(shared, hwnd);
+            request_commit(shared);
         }
         WM_DESTROY => {
             let ime = shared.ime.swap(0, Ordering::AcqRel);
@@ -1645,26 +1634,18 @@ fn shared(hwnd: HWND) -> Option<&'static Shared> {
 }
 
 fn deliver_pending(shared: &Shared) {
-    let notify = match shared.notify.lock() {
-        Ok(mut slot) => slot.take(),
-        Err(_) => None,
-    };
+    let notify = lock(&shared.notify).take();
     let Some(notify) = notify else {
         return;
     };
-    let events: Vec<NoteEditorEvent> = match shared.events.lock() {
-        Ok(mut queue) => queue.drain(..).collect(),
-        Err(_) => Vec::new(),
-    };
+    let events: Vec<NoteEditorEvent> = lock(&shared.events).drain(..).collect();
     for event in events {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify(event)));
         if outcome.is_err() {
             logging::error("panic in the note editor notify callback");
         }
     }
-    if let Ok(mut slot) = shared.notify.lock() {
-        *slot = Some(notify);
-    }
+    *lock(&shared.notify) = Some(notify);
 }
 
 fn ime_string(
@@ -1790,7 +1771,7 @@ struct Frame {
 /// §10.1), so the centre is the only place the window needs to be: a later
 /// resize has as much room on every side as this placement gives it.
 fn frame_for(work: crate::types::RectI, paper: PaperSize, dpi: u32) -> Frame {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let paper = fit_paper(work, paper, scale);
     let (width, height) = window_pixels(paper, scale);
     let width = width.min(work.width().max(1));
@@ -1843,7 +1824,7 @@ fn resized_paper(
     work: crate::types::RectI,
     dpi: u32,
 ) -> PaperSize {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let dx = (cursor.0 - drag.start_cursor.0) as f32 / scale;
     let dy = (cursor.1 - drag.start_cursor.1) as f32 / scale;
     let (available_width, available_height) = available_paper(drag.centre, work, scale);

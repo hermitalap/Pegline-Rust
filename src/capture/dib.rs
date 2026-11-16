@@ -29,14 +29,6 @@ fn dib_row_stride(width: u32, bit_count: u16) -> Option<usize> {
     usize::try_from(stride).ok()
 }
 
-/// Total bytes of a `CF_DIB` payload for a plain bitmap: a 40-byte
-/// `BITMAPINFOHEADER` plus 4-byte-aligned rows.
-fn dib_len(width: u32, height: u32, bit_count: u16) -> Option<usize> {
-    let stride = dib_row_stride(width, bit_count)?;
-    let pixels = stride.checked_mul(usize::try_from(height).ok()?)?;
-    pixels.checked_add(BITMAPINFOHEADER_LEN)
-}
-
 /// Builds the `CF_DIB` payload for an image: a `BITMAPINFOHEADER` followed by
 /// bottom-up 32-bit BGRA rows, with the alpha channel written.
 pub(crate) fn bgra_to_dib(image: &ImageData) -> Result<Vec<u8>, String> {
@@ -46,12 +38,12 @@ pub(crate) fn bgra_to_dib(image: &ImageData) -> Result<Vec<u8>, String> {
     if image.width > i32::MAX as u32 || image.height > i32::MAX as u32 {
         return Err("CF_DIB: image is too large for a BITMAPINFOHEADER".to_string());
     }
-    let stride = dib_row_stride(image.width, 32)
-        .ok_or_else(|| "CF_DIB: row stride overflowed".to_string())?;
-    let len = dib_len(image.width, image.height, 32)
-        .ok_or_else(|| "CF_DIB: payload size overflowed".to_string())?;
-    let size_image = u32::try_from(len - BITMAPINFOHEADER_LEN)
+    // Valid BGRA means the stride is exactly four bytes per pixel, so the
+    // only overflow left to check is the total payload size.
+    let stride = image.width as usize * 4;
+    let size_image = u32::try_from(image.bgra.len())
         .map_err(|_| "CF_DIB: image is too large for a BITMAPINFOHEADER".to_string())?;
+    let len = image.bgra.len() + BITMAPINFOHEADER_LEN;
 
     let mut dib = vec![0u8; len];
     dib[0..4].copy_from_slice(&(BITMAPINFOHEADER_LEN as u32).to_le_bytes());
@@ -268,13 +260,6 @@ mod tests {
         assert_eq!(dib_row_stride(1, 8), Some(4));
         assert_eq!(dib_row_stride(0, 24), None);
         assert_eq!(dib_row_stride(1, 0), None);
-    }
-
-    #[test]
-    fn dib_len_adds_the_header() {
-        assert_eq!(dib_len(3, 2, 24), Some(BITMAPINFOHEADER_LEN + 2 * 12));
-        assert_eq!(dib_len(2, 2, 32), Some(BITMAPINFOHEADER_LEN + 2 * 8));
-        assert_eq!(dib_len(0, 2, 32), None);
     }
 
     #[test]

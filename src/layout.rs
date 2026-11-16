@@ -142,7 +142,7 @@ pub fn below(note: bool) -> f32 {
 
 /// Height of one card's layout slot.
 pub fn slot_height(card_height: f32, note: bool) -> f32 {
-    CARD_OFFSET_BELOW_TOP + card_height + below(note).max(40.0).max(below(note) + 4.0)
+    CARD_OFFSET_BELOW_TOP + card_height + (below(note) + 4.0).max(40.0)
 }
 
 /// Top of the card frame in window DIP.

@@ -417,7 +417,6 @@ impl Renderer {
     pub fn new(hwnd: HWND, width_px: u32, height_px: u32, dpi: u32) -> Result<Self, String> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        let dpi = dpi.max(96);
 
         let (device, immediate) = create_d3d_device()?;
         let dxgi_device: IDXGIDevice = device
@@ -564,7 +563,6 @@ impl Renderer {
     pub fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        let dpi = dpi.max(96);
         if width_px == self.width_px && height_px == self.height_px && dpi as f32 == self.dpi {
             return Ok(());
         }
@@ -655,24 +653,25 @@ impl Renderer {
             .map_err(|e| format!("CreateBitmapFromDxgiSurface: {e}"))?;
             self.targets[index] = Some(bitmap);
         }
-        if let Some(bitmap) = self.targets[index].as_ref() {
-            // SAFETY: the bitmap is a target for this context and stays alive.
-            unsafe {
-                self.context.SetTarget(bitmap);
-                self.context.SetDpi(self.dpi, self.dpi);
-                self.context.SetTransform(&Matrix3x2::identity());
-                self.current = Matrix3x2::identity();
-                // Needs the context before BeginDraw; rebuilding the texture
-                // creates D2D resources, which is not a per-frame cost.
-                self.mica.refresh(&self.context);
-                self.context.BeginDraw();
-                self.context.Clear(Some(&D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.0,
-                }));
-            }
+        let bitmap = self.targets[index]
+            .as_ref()
+            .ok_or_else(|| format!("back buffer {index}"))?;
+        // SAFETY: the bitmap is a target for this context and stays alive.
+        unsafe {
+            self.context.SetTarget(bitmap);
+            self.context.SetDpi(self.dpi, self.dpi);
+            self.context.SetTransform(&Matrix3x2::identity());
+            self.current = Matrix3x2::identity();
+            // Needs the context before BeginDraw; rebuilding the texture
+            // creates D2D resources, which is not a per-frame cost.
+            self.mica.refresh(&self.context);
+            self.context.BeginDraw();
+            self.context.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
         }
         self.layer_depth = 0;
         Ok(())

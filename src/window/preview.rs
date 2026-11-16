@@ -477,7 +477,7 @@ fn show_frame(
     dpi: u32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
 ) -> Result<(), String> {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
     if window.is_empty() {
         return Err("empty preview window".to_string());
@@ -539,8 +539,8 @@ fn paint_preview_card(
 
 /// Paints the card (shadow, glass frame, the note paper inset like a photo and
 /// the hairline border), leaning by `degrees` (positive = clockwise) about the
-/// card's centre. `label` draws the blank entry's add-note icon and caption;
-/// the content preview carries its text in the paper bitmap instead.
+/// card's centre. Also draws the add-note icon and caption; a note's content
+/// preview carries its text in the paper bitmap instead.
 ///
 /// The lean stays inside [`NOTE_PADDING_DIP`], so the window keeps its size and
 /// the render thread can repaint without resizing or re-placing it.
@@ -549,7 +549,6 @@ fn draw_note(
     bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
     card: RectF,
     degrees: f32,
-    label: bool,
 ) -> Result<(), String> {
     let (center_x, center_y) = card.center();
     renderer.begin()?;
@@ -561,28 +560,25 @@ fn draw_note(
         },
     ));
     paint_preview_card(renderer, bitmap, card);
-    if label {
-        // The blank note says what it is in the note's own ink: an add-note
-        // icon above, and a label at the same size and weight as a short
-        // note's body text, so it reads as something already written on the
-        // paper.
-        let (text_w, text_h) = renderer.text_size(TextId::NewNote);
-        let content_h = NOTE_ICON_DIP + NOTE_ICON_GAP_DIP + text_h;
-        let top = center_y - content_h * 0.5;
-        renderer.draw_note_add_icon(
-            (center_x, top + NOTE_ICON_DIP * 0.5),
-            NOTE_ICON_DIP,
-            Brush::NoteInk,
-        );
-        renderer.draw_text(
-            TextId::NewNote,
-            (
-                center_x - text_w * 0.5,
-                top + NOTE_ICON_DIP + NOTE_ICON_GAP_DIP,
-            ),
-            Brush::NoteInk,
-        );
-    }
+    // The blank note says what it is in the note's own ink: an add-note
+    // icon above, and a label at the same size and weight as a short note's
+    // body text, so it reads as something already written on the paper.
+    let (text_w, text_h) = renderer.text_size(TextId::NewNote);
+    let content_h = NOTE_ICON_DIP + NOTE_ICON_GAP_DIP + text_h;
+    let top = center_y - content_h * 0.5;
+    renderer.draw_note_add_icon(
+        (center_x, top + NOTE_ICON_DIP * 0.5),
+        NOTE_ICON_DIP,
+        Brush::NoteInk,
+    );
+    renderer.draw_text(
+        TextId::NewNote,
+        (
+            center_x - text_w * 0.5,
+            top + NOTE_ICON_DIP + NOTE_ICON_GAP_DIP,
+        ),
+        Brush::NoteInk,
+    );
     renderer.reset_transform();
     renderer.end()
 }
@@ -604,9 +600,9 @@ fn show_note_frame(
     ));
     win32::place_window(hwnd, bounds, true);
     renderer.resize(width, height, dpi)?;
-    let image = notes::render("", color).ok_or_else(|| "note render failed".to_string())?;
+    let image = notes::render("", color);
     let bitmap = renderer.upload(&image)?;
-    draw_note(renderer, &bitmap, note_card(), tilt, true)?;
+    draw_note(renderer, &bitmap, note_card(), tilt)?;
     *texture = Some(bitmap);
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while showing a note preview".to_string());
@@ -626,7 +622,7 @@ fn show_note_content_frame(
     dpi: u32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
 ) -> Result<(), String> {
-    let scale = dpi.max(96) as f32 / 96.0;
+    let scale = dpi as f32 / 96.0;
     let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
     if window.is_empty() {
         return Err("empty preview window".to_string());
@@ -662,7 +658,7 @@ fn turn_note_frame(
     bitmap: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
     degrees: f32,
 ) -> Result<(), String> {
-    draw_note(renderer, bitmap, note_card(), degrees, true)?;
+    draw_note(renderer, bitmap, note_card(), degrees)?;
     if renderer.present(true) == Present::DeviceLost {
         return Err("device lost while leaning the note".to_string());
     }

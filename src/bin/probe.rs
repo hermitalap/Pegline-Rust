@@ -54,7 +54,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-    win32::ensure_dpi_awareness();
     pegline::logging::init();
     let _com = match pegline::window::ComGuard::apartment() {
         Ok(guard) => guard,
@@ -595,7 +594,7 @@ fn main() {}
         .to_string();
     let editor = NoteEditor::open_hidden(text, 0, paper, monitor.dpi, monitor, Box::new(|_| {}))?;
     let hwnd = editor.hwnd();
-    let dpi = win32::window_dpi(hwnd).max(96);
+    let dpi = win32::window_dpi(hwnd);
     let scale = dpi as f32 / 96.0;
     let window_px = |paper: PaperSize| {
         let (width, height) = paper.window_size();
