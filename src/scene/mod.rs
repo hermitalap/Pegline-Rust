@@ -497,7 +497,7 @@ impl Scene {
             snapshot,
             dirty: true,
         };
-        scene.publish(0.0);
+        scene.publish();
         scene
     }
 
@@ -563,7 +563,7 @@ impl Scene {
         if !visible {
             // A hide must not leave the drag half alive: settle the card into
             // its slot and let the release spring run when the line returns.
-            self.end_grab(0.0);
+            self.end_grab();
             self.hover = None;
             self.hover_action = None;
             self.pressed = None;
@@ -581,7 +581,7 @@ impl Scene {
                 if self.revealed != revealed {
                     self.revealed = revealed;
                     if !revealed {
-                        self.end_grab(now);
+                        self.end_grab();
                         self.hide_t = -1.0;
                         // The peeking corner belongs to a line that is down; it
                         // must not pop back when the strip returns.
@@ -682,14 +682,14 @@ impl Scene {
                     if id.is_some() {
                         // An OLE drag-out owns the pointer; a pin drag cannot
                         // also be running.
-                        self.end_grab(now);
+                        self.end_grab();
                         self.hover_action = None;
                     }
                     self.dirty = true;
                 }
             }
             Command::Grab { id, pointer } => self.begin_grab(id, pointer, now),
-            Command::EndGrab => self.end_grab(now),
+            Command::EndGrab => self.end_grab(),
             Command::PinHover(id) => {
                 if self.pin_hover != id {
                     self.pin_hover = id;
@@ -823,7 +823,7 @@ impl Scene {
     /// pointer's speed, so a flick carries into the release instead of stopping
     /// dead. This is also the cancel path, so it must not rely on the pointer
     /// still being over anything.
-    pub fn end_grab(&mut self, _now: f64) {
+    pub fn end_grab(&mut self) {
         let Some(grab) = self.grab.take() else {
             return;
         };
@@ -1045,7 +1045,7 @@ impl Scene {
             // The line is fully tucked away: freeze the cards, stop the breeze
             // clock and let the render thread block until the line comes back.
             if self.dirty {
-                self.publish(now);
+                self.publish();
             }
             return false;
         }
@@ -1207,7 +1207,7 @@ impl Scene {
         }
 
         if animating || self.dirty {
-            self.publish(now);
+            self.publish();
         }
         animating || self.dirty
     }
@@ -1222,7 +1222,7 @@ impl Scene {
     }
 
     /// Rebuilds the hit boxes and publishes them to the UI thread.
-    fn publish(&mut self, _now: f64) {
+    fn publish(&mut self) {
         let mut snapshot = match self.snapshot.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -1347,7 +1347,7 @@ mod tests {
         item.x.target = 786.0;
         item.drop.snap(0.0);
         scene.cards.push(item);
-        scene.publish(0.0);
+        scene.publish();
 
         let frame = snapshot.lock().expect("snapshot");
         let hit = frame.cards.first().expect("one published card");
@@ -1570,7 +1570,7 @@ mod tests {
         // The other cards must not close the gap while the note is away.
         let after: Vec<f32> = scene.cards.iter().map(|card| card.x.target).collect();
         assert_eq!(after, targets);
-        scene.publish(0.0);
+        scene.publish();
         assert_eq!(
             snapshot.lock().unwrap().cards.len(),
             1,
@@ -1581,7 +1581,7 @@ mod tests {
         assert!(!scene.cards[1].rehang);
         assert_eq!(scene.cards[1].opacity, 1.0);
         assert!(scene.cards[1].nudge_t >= 0.0, "landing must sway");
-        scene.publish(0.0);
+        scene.publish();
         assert_eq!(snapshot.lock().unwrap().cards.len(), 2);
     }
 
@@ -1764,7 +1764,7 @@ mod tests {
         scene.cards.push(note);
 
         scene.hover = Some(1);
-        scene.publish(0.0);
+        scene.publish();
         let frame = snapshot.lock().expect("snapshot");
         let picture = frame.cards.iter().find(|card| card.id == 1).unwrap();
         assert_eq!(picture.primary_action, ActionKind::Annotate);
@@ -1779,7 +1779,7 @@ mod tests {
 
         drop(frame);
         scene.hover = Some(2);
-        scene.publish(0.0);
+        scene.publish();
         let frame = snapshot.lock().expect("snapshot");
         let note = frame.cards.iter().find(|card| card.id == 2).unwrap();
         assert_eq!(note.primary_action, ActionKind::Copy);
@@ -1881,7 +1881,7 @@ mod tests {
         scene.update(1.0 / 60.0, 0.2);
         assert_eq!(scene.cards[1].id, 3, "the card takes the middle slot");
         assert_eq!(scene.cards[2].id, 2);
-        scene.publish(0.3);
+        scene.publish();
         assert_eq!(snapshot.lock().unwrap().order, vec![1, 3, 2]);
 
         // The deadband is symmetric: coming back 25 DIP is not enough, so the
@@ -1910,7 +1910,7 @@ mod tests {
             "the drag put the card in the last slot"
         );
 
-        scene.end_grab(1.0 / 60.0);
+        scene.end_grab();
         assert!(
             scene.cards[2].x.velocity > 0.0,
             "the pointer's speed is kept"
@@ -1944,11 +1944,11 @@ mod tests {
         for frame in 0..6 {
             scene.update(1.0 / 60.0, frame as f64 / 60.0);
         }
-        scene.end_grab(0.1);
+        scene.end_grab();
         for frame in 0..90 {
             scene.update(1.0 / 60.0, 0.1 + frame as f64 / 60.0);
         }
-        scene.publish(2.0);
+        scene.publish();
         assert_eq!(snapshot.lock().unwrap().order, vec![1, 2, 3]);
     }
 

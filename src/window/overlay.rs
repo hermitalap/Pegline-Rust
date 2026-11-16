@@ -426,7 +426,7 @@ fn render_thread(
             }
             let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
             if !down {
-                scene.end_grab(now);
+                scene.end_grab();
             }
         }
 
