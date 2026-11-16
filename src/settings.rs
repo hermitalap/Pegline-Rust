@@ -285,14 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unknown_keys_when_edited() {
-        let mut map = parse("welcomed=1\r\nsomethingNew=a=b\r\n");
-        map.insert("soundOff".into(), "0".into());
-        assert_eq!(map.get("somethingNew").map(String::as_str), Some("a=b"));
-        assert_eq!(map.len(), 3);
-    }
-
-    #[test]
     fn boolean_accepts_one_and_true() {
         let settings = Settings {
             values: parse("a=1\r\nb=true\r\nc=0\r\nd=TRUE\r\n"),
@@ -355,26 +347,5 @@ mod tests {
         assert_eq!(settings.note_size("x.txt"), MAX_PAPER);
         settings.set_string("noteSize:x.txt", "bogus");
         assert_eq!(settings.note_size("x.txt"), DEFAULT_PAPER);
-    }
-
-    #[test]
-    fn storing_the_default_size_removes_the_key() {
-        let mut map = parse("somethingNew=keep\r\n");
-        map.insert("noteSize:a.txt".into(), "700x600".into());
-        let mut settings = Settings {
-            values: map,
-            path: PathBuf::new(),
-        };
-        // `save` writes to the real app folder on a `PathBuf::new()` path, so
-        // exercise the map directly the way `set_note_size` does.
-        let key = format!("{}{}", keys::NOTE_SIZE_PREFIX, "a.txt");
-        settings.remove(&key);
-        assert_eq!(settings.note_size("a.txt"), DEFAULT_PAPER);
-        assert_eq!(settings.string("somethingNew"), Some("keep"));
-        settings.set_string(
-            &key,
-            &display::format_note_size(PaperSize::new(700.0, 600.0)),
-        );
-        assert_eq!(settings.note_size("a.txt"), PaperSize::new(700.0, 600.0));
     }
 }

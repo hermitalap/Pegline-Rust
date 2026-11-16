@@ -280,10 +280,4 @@ mod tests {
             assert_eq!(strings.clipboard_empty.matches("{}").count(), 1);
         }
     }
-
-    #[test]
-    fn placeholders_format() {
-        let text = s().delete_caught.replace("{}", "3");
-        assert!(text.contains('3'));
-    }
 }

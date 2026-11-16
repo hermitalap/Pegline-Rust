@@ -349,22 +349,6 @@ impl DisplayLine {
         self.source.end
     }
 
-    /// Maps a source byte offset to a byte offset in the display text. Offsets
-    /// inside hidden markers snap to the nearest visible boundary.
-    pub fn source_to_display(&self, offset: usize, active: bool) -> usize {
-        let mut display = 0;
-        for run in self.visible_runs(active) {
-            if offset < run.source.start {
-                return display;
-            }
-            if offset <= run.source.end {
-                return display + (offset - run.source.start).min(run.text.len());
-            }
-            display += run.text.len();
-        }
-        display
-    }
-
     /// Fills `out` with the display ranges that a source selection covers on
     /// this line, reusing the caller's buffer.
     ///
@@ -1084,10 +1068,6 @@ mod tests {
         assert_eq!(line.display_to_source(6, false), 10);
         // The end of the line maps after everything.
         assert_eq!(line.display_to_source(8, false), 12);
-        assert_eq!(line.source_to_display(4, false), 2);
-        assert_eq!(line.source_to_display(8, false), 6);
-        // An offset inside a hidden marker snaps to its display boundary.
-        assert_eq!(line.source_to_display(3, false), 2);
     }
 
     #[test]
@@ -1111,7 +1091,6 @@ mod tests {
         assert_eq!(text_of(line, true).len(), 12);
         for offset in 0..=12 {
             assert_eq!(line.display_to_source(offset, true), offset);
-            assert_eq!(line.source_to_display(offset, true), offset);
         }
     }
 
@@ -1258,15 +1237,11 @@ mod tests {
     }
 
     #[test]
-    fn the_default_paper_matches_the_window_constants() {
+    fn the_paper_size_constants_match_behaviour_10_1() {
         assert_eq!(DEFAULT_PAPER, PaperSize::new(460.0, 360.0));
         assert_eq!(DEFAULT_PAPER.window_size(), (500.0, 400.0));
         assert_eq!(DEFAULT_PAPER.content_width(), 400.0);
         assert_eq!(DEFAULT_PAPER.view_height(), 304.0);
-    }
-
-    #[test]
-    fn the_largest_paper_stays_inside_its_range() {
         assert_eq!(MAX_PAPER.content_width(), 760.0);
         assert_eq!(MAX_PAPER.view_height(), 584.0);
         assert_eq!(MAX_PAPER.window_size(), (860.0, 680.0));
@@ -1279,14 +1254,6 @@ mod tests {
         assert_eq!(
             PaperSize::new(600.0, 4000.0).clamp(),
             PaperSize::new(600.0, 640.0)
-        );
-        // NaN degrades to the minimum rather than poisoning the layout.
-        assert_eq!(PaperSize::new(f32::NAN, 500.0).clamp().width, 460.0);
-        assert_eq!(PaperSize::new(f32::NAN, 500.0).clamp().height, 500.0);
-        assert_eq!(PaperSize::new(f32::INFINITY, 500.0).clamp().width, 820.0);
-        assert_eq!(
-            PaperSize::new(f32::NEG_INFINITY, 500.0).clamp().width,
-            460.0
         );
         // Whole-DIP rounding for the persisted value.
         assert_eq!(

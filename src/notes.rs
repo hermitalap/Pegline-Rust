@@ -606,19 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn note_bitmap_is_three_times_the_card() {
+    fn the_note_bitmap_is_three_times_the_card_and_stays_opaque() {
         let image = render("hello", 0).expect("a note bitmap");
         assert_eq!((image.width, image.height), (408, 264));
         assert!(image.is_valid());
         // The paper is opaque everywhere.
         assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
-    }
-
-    #[test]
-    fn a_blank_note_renders_for_the_entry_hover() {
-        let image = render("", 0).expect("a blank note bitmap");
-        assert_eq!((image.width, image.height), (408, 264));
-        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        // The blank note the entry hovers over is the same sheet.
+        let blank = render("", 0).expect("a blank note bitmap");
+        assert_eq!((blank.width, blank.height), (408, 264));
+        assert!(blank.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
     #[test]
@@ -635,16 +632,12 @@ mod tests {
             .filter(|(in_with_text, in_blank)| in_with_text != in_blank)
             .count();
         assert!(drawn > 100, "the preview sheet has no text ({drawn} px)");
-        // A 200 % monitor renders the sheet at its native size.
+        // A 200 % monitor renders the sheet at its native size, blank or not.
         let image = render_preview("x", 1, 2.0).expect("a preview sheet");
         assert_eq!((image.width, image.height), (816, 528));
-    }
-
-    #[test]
-    fn an_empty_preview_is_still_a_sheet() {
-        let image = render_preview("", 3, 2.0).expect("a blank preview sheet");
-        assert_eq!((image.width, image.height), (816, 528));
-        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let blank = render_preview("", 3, 2.0).expect("a blank preview sheet");
+        assert_eq!((blank.width, blank.height), (816, 528));
+        assert!(blank.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
     #[test]
@@ -654,11 +647,12 @@ mod tests {
         assert_eq!((image.width, image.height), (408, 264));
         // Something was drawn: not every pixel is still the paper colour at the
         // ink's top-left area.
+        let paper = rgb(color(2).paper);
         let distinct = image
             .bgra
             .chunks_exact(4)
             .take(408 * 80)
-            .filter(|pixel| pixel[0] != 232 || pixel[1] != 225 || pixel[2] != 255)
+            .filter(|pixel| pixel[2] != paper[0] || pixel[1] != paper[1] || pixel[0] != paper[2])
             .count();
         assert!(distinct > 0, "no text pixels were drawn");
     }

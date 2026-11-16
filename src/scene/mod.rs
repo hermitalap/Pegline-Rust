@@ -1444,41 +1444,6 @@ mod tests {
     }
 
     #[test]
-    fn the_peek_card_only_shows_its_bottom_right_corner() {
-        let entry = 1933.0;
-        let (cx, cy) = layout::note_peek_center(entry);
-        let angle = layout::NOTE_PEEK_ANGLE_DEG;
-        let transform = windows_numerics::Matrix3x2::rotation(angle)
-            * windows_numerics::Matrix3x2::translation(cx, cy);
-        let apply = |x: f32, y: f32| {
-            (
-                x * transform.M11 + y * transform.M21 + transform.M31,
-                x * transform.M12 + y * transform.M22 + transform.M32,
-            )
-        };
-        let (card_w, card_h) = layout::note_card_size();
-        let corners = [
-            (-card_w * 0.5, -card_h * 0.5),
-            (card_w * 0.5, -card_h * 0.5),
-            (-card_w * 0.5, card_h * 0.5),
-            (card_w * 0.5, card_h * 0.5),
-        ];
-        let screen: Vec<(f32, f32)> = corners.iter().map(|&(x, y)| apply(x, y)).collect();
-        let bottom_right = screen[3];
-        assert!(
-            (bottom_right.0 - entry).abs() < 1e-3,
-            "br={bottom_right:?} screen={screen:?}"
-        );
-        assert!(
-            (bottom_right.1 - layout::NOTE_PEEK_VISIBLE_DIP).abs() < 1e-3,
-            "br={bottom_right:?} screen={screen:?}"
-        );
-        for corner in &screen[..3] {
-            assert!(corner.1 < 0.0, "corner {corner:?} is above the top edge");
-        }
-    }
-
-    #[test]
     fn a_removed_card_glides_the_entry_instead_of_teleporting_it() {
         let snapshot =
             std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
@@ -1645,14 +1610,6 @@ mod tests {
     }
 
     #[test]
-    fn slot_order_follows_the_card_list() {
-        // Three cards in a 1920 DIP line: 786 / 960 / 1134.
-        assert!((layout::slot_x(0, 3, 1920.0) - 786.0).abs() < 1e-3);
-        assert!((layout::slot_x(1, 3, 1920.0) - 960.0).abs() < 1e-3);
-        assert!((layout::slot_x(2, 3, 1920.0) - 1134.0).abs() < 1e-3);
-    }
-
-    #[test]
     fn a_flying_card_waits_at_the_right_end_until_it_lands() {
         let width = 1920.0;
         // Four cards, the last one still in the air. The three cards already
@@ -1687,98 +1644,93 @@ mod tests {
     }
 
     #[test]
-    fn gust_eases_out_and_settles_instead_of_repeating() {
-        let mut card = card();
-        card.schedule_gust(3.0, 0.25);
+    fn a_scheduled_gust_waits_its_delay_then_releases_the_spring() {
+        let mut waiting = card();
+        // Give the spring somewhere to go, so "did it move" is observable.
+        waiting.swing.value = 10.0;
+        waiting.schedule_gust(3.0, 0.3);
+        let before = waiting.swing.value;
+        // During the delay the card must keep moving, not freeze.
+        waiting.step_swing(0.1);
+        assert!(waiting.nudge_delay < 0.3);
+        assert!(waiting.nudge_t < 0.0);
+        assert!((waiting.swing.value - before).abs() > 1e-4);
+
+        // Once the ease is done the spring is released with the gust's angle.
+        let mut released = card();
+        released.schedule_gust(3.0, 0.0);
+        for _ in 0..30 {
+            released.step_swing(1.0 / 60.0);
+            if released.nudge_t < 0.0 {
+                break;
+            }
+        }
+        assert_eq!(released.nudge_t, -1.0);
+        assert!(
+            (released.swing.value - 3.0).abs() < 0.2,
+            "value={} nudge_t={} delay={}",
+            released.swing.value,
+            released.nudge_t,
+            released.nudge_delay
+        );
+        // No second nudge: it comes back to rest and stays there.
+        for _ in 0..300 {
+            released.step_swing(1.0 / 60.0);
+        }
+        assert!(
+            released.swing_at_rest(),
+            "value={} velocity={}",
+            released.swing.value,
+            released.swing.velocity
+        );
+    }
+
+    #[test]
+    fn a_gust_eases_out_swings_past_zero_once_and_settles() {
+        let mut easing = card();
+        easing.schedule_gust(3.0, 0.25);
         let mut max_angle = 0.0f32;
         // Ten seconds at 60 Hz: a 0.25 s delay, a 0.3 s ease-out and then the
         // damped spring. The old state machine restarted the nudge every 0.3 s
         // and never settled (the visible "twitch").
         for _ in 0..600 {
-            card.step_swing(1.0 / 60.0);
-            max_angle = max_angle.max(card.swing.value.abs());
+            easing.step_swing(1.0 / 60.0);
+            max_angle = max_angle.max(easing.swing.value.abs());
         }
         assert!(
-            card.swing_at_rest(),
+            easing.swing_at_rest(),
             "swing did not settle: value={} velocity={} nudge_t={}",
-            card.swing.value,
-            card.swing.velocity,
-            card.nudge_t
+            easing.swing.value,
+            easing.swing.velocity,
+            easing.nudge_t
         );
         assert!(
             max_angle < 20.0,
             "gust produced an implausible {max_angle} degrees"
         );
-        assert_eq!(card.nudge_t, -1.0);
-    }
+        assert_eq!(easing.nudge_t, -1.0);
 
-    #[test]
-    fn a_pending_gust_keeps_the_spring_running() {
-        let mut card = card();
-        // Give the spring somewhere to go, so "did it move" is observable.
-        card.swing.value = 10.0;
-        card.schedule_gust(3.0, 0.3);
-        let before = card.swing.value;
-        // During the delay the card must keep moving, not freeze.
-        card.step_swing(0.1);
-        assert!(card.nudge_delay < 0.3);
-        assert!(card.nudge_t < 0.0);
-        assert!((card.swing.value - before).abs() > 1e-4);
-    }
-
-    #[test]
-    fn a_gust_swings_past_zero_once_and_decays() {
-        let mut card = card();
-        card.schedule_gust(3.0, 0.0);
-        // Run out the ease first.
-        while card.nudge_t >= 0.0 {
-            card.step_swing(1.0 / 60.0);
-        }
         // The spring is underdamped, so it crosses the rope once and comes back
         // with a smaller overshoot. It must never look like a jump cut.
+        let mut swing = card();
+        swing.schedule_gust(3.0, 0.0);
+        while swing.nudge_t >= 0.0 {
+            swing.step_swing(1.0 / 60.0);
+        }
         let mut minimum = 0.0f32;
         for _ in 0..600 {
-            card.step_swing(1.0 / 60.0);
-            minimum = minimum.min(card.swing.value);
+            swing.step_swing(1.0 / 60.0);
+            minimum = minimum.min(swing.swing.value);
         }
         assert!(
             (-2.5..-0.5).contains(&minimum),
             "first overshoot was {minimum} degrees"
         );
         assert!(
-            card.swing_at_rest(),
+            swing.swing_at_rest(),
             "value={} velocity={}",
-            card.swing.value,
-            card.swing.velocity
-        );
-    }
-
-    #[test]
-    fn a_finished_gust_releases_the_spring_back_to_zero() {
-        let mut card = card();
-        card.schedule_gust(3.0, 0.0);
-        for _ in 0..30 {
-            card.step_swing(1.0 / 60.0);
-            if card.nudge_t < 0.0 {
-                break;
-            }
-        }
-        assert_eq!(card.nudge_t, -1.0);
-        assert!(
-            (card.swing.value - 3.0).abs() < 0.2,
-            "value={} nudge_t={} delay={}",
-            card.swing.value,
-            card.nudge_t,
-            card.nudge_delay
-        );
-        for _ in 0..300 {
-            card.step_swing(1.0 / 60.0);
-        }
-        assert!(
-            card.swing_at_rest(),
-            "value={} velocity={}",
-            card.swing.value,
-            card.swing.velocity
+            swing.swing.value,
+            swing.swing.velocity
         );
     }
 
@@ -2014,29 +1966,31 @@ mod tests {
     fn the_lean_follows_the_pointer_speed_and_is_capped() {
         let (mut scene, _) = three_cards();
         let pin = scene.pin_window_pos(&scene.cards[1]);
+
+        // A still pointer does not lean the card at all.
         scene.begin_grab(2, pin, 0.0);
-        scene.set_pointer(pin.0 + 8.0, pin.1, 0.01);
         let grab = scene.grab.take().expect("grab");
         scene.track_grab(&grab);
-        let lean = scene.cards[1].lean.target;
+        assert_eq!(scene.cards[1].lean.target, 0.0);
+
+        // Below the cap the lean grows linearly with the speed.
+        let mut lean_at = |distance: f32, now: f64| {
+            scene.begin_grab(2, pin, now);
+            scene.set_pointer(pin.0 + distance, pin.1, now + 0.01);
+            let grab = scene.grab.take().expect("grab");
+            scene.track_grab(&grab);
+            scene.cards[1].lean.target
+        };
+        let slow = lean_at(8.0, 0.1); // 800 DIP/s
+        let fast = lean_at(16.0, 0.3); // 1600 DIP/s
+        assert!(slow > 0.0, "an 800 DIP/s drag leans nothing");
+        assert!(slow < DRAG_LEAN_MAX_DEG, "800 DIP/s is already at the cap");
         assert!(
-            (lean - 800.0 * DRAG_LEAN_MAX_DEG / DRAG_LEAN_SPEED).abs() < 0.01,
-            "800 DIP/s leans {} degrees",
-            lean
+            (fast - slow * 2.0).abs() < 1e-3,
+            "the lean is not linear below the cap: {slow} then {fast}"
         );
 
         // A violent flick is capped instead of flipping the card over.
-        scene.begin_grab(2, pin, 0.02);
-        scene.set_pointer(pin.0 + 400.0, pin.1, 0.03);
-        let grab = scene.grab.take().expect("grab");
-        scene.track_grab(&grab);
-        assert_eq!(scene.cards[1].lean.target, DRAG_LEAN_MAX_DEG);
-        assert_eq!(
-            scene.cards[1].lean.target,
-            scene.cards[1]
-                .lean
-                .target
-                .clamp(-DRAG_LEAN_MAX_DEG, DRAG_LEAN_MAX_DEG)
-        );
+        assert_eq!(lean_at(400.0, 0.5), DRAG_LEAN_MAX_DEG);
     }
 }

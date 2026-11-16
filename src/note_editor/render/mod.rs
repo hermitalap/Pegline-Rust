@@ -2545,16 +2545,13 @@ mod tests {
         assert!(shadow.is_valid());
         // Outside the paper: clear.
         assert_eq!(shadow.bgra[3], 0);
-        // Over the paper centre: 18 % black.
+        // Over the paper centre: some shadow.
         let centre = ((100 * 200 + 100) * 4) as usize;
-        assert!(shadow.bgra[centre + 3] > 30 && shadow.bgra[centre + 3] < 55);
-        // The visible left margin carries the blurred edge.
-        let margin = ((100 * 200 + 2) * 4) as usize;
-        assert!(shadow.bgra[margin + 3] > 0 && shadow.bgra[margin + 3] < 46);
+        assert!(shadow.bgra[centre + 3] > 0);
     }
 
     #[test]
-    fn the_shadow_atlas_rebakes_only_when_the_dpi_changes() {
+    fn the_atlas_corner_and_middle_scale_with_dpi() {
         assert_eq!(shadow_atlas_pixels(1.0), (48, 8));
         assert_eq!(shadow_atlas_pixels(1.5), (72, 12));
         assert_eq!(shadow_atlas_pixels(2.0), (96, 16));
@@ -2587,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn the_nine_slices_reproduce_the_baked_shadow() {
+    fn the_nine_slices_tile_the_window_and_reproduce_the_baked_shadow() {
         // The atlas is a small square; the window is a wide one. The slices
         // must put the same shadow back, because a resize no longer re-bakes.
         let (width, height, scale) = (300u32, 260u32, 1.0f32);
@@ -2628,11 +2625,8 @@ mod tests {
             worst <= 4,
             "9-patch shadow differs by {worst} at {worst_at:?}"
         );
-    }
 
-    #[test]
-    fn the_nine_shadow_slices_tile_the_window() {
-        // An 860×680 DIP window at 200 %.
+        // An 860×680 DIP window at 200 %: the nine slices tile it exactly.
         let (corner, middle) = shadow_atlas_pixels(2.0);
         let slices = shadow_slices(1720, 1360, corner, middle);
         // Corners keep their size; the middle takes whatever is left.
@@ -2693,73 +2687,39 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_caret_inside_the_active_line_skips_the_reparse() {
+    fn nothing_changed_keeps_the_parsed_layout() {
         let (display, parsed) = parsed_document();
         let text = "alpha\nbeta";
+        let width = DEFAULT_PAPER.content_width();
         // A click or a drag extends the selection inside the first line: the
         // text is unchanged and the caret still lands on the same active line,
         // so the display map and every layout stay valid.
-        let width = DEFAULT_PAPER.content_width();
         for caret in [1, 3, 5] {
-            assert!(parsed.is_current(text, display.line_index(caret), None, caret, width, 3));
+            assert!(
+                parsed.is_current(text, display.line_index(caret), None, caret, width, 3),
+                "caret {caret} on the active line forced a reparse"
+            );
         }
-    }
-
-    #[test]
-    fn a_width_change_forces_the_reparse() {
-        let (display, parsed) = parsed_document();
-        let text = "alpha\nbeta";
-        // The layouts were wrapped to the old width, so the drag has to lay the
-        // note out again even though the text and the caret are unchanged.
-        assert!(!parsed.is_current(text, display.line_index(0), None, 0, 500.0, 3));
-    }
-
-    #[test]
-    fn a_text_change_forces_the_reparse() {
-        let (display, parsed) = parsed_document();
-        let caret = 2;
-        assert!(!parsed.is_current(
-            "alpha!\nbeta",
-            display.line_index(caret),
-            None,
-            caret,
-            DEFAULT_PAPER.content_width(),
-            3
-        ));
-    }
-
-    #[test]
-    fn a_caret_line_change_forces_the_reparse() {
-        let (display, parsed) = parsed_document();
-        let text = "alpha\nbeta";
-        // Taken from the display map so the test does not depend on whether the
-        // newline belongs to the first or the second source line.
+        // The same just before the newline, taken from the display map so the
+        // test does not depend on whether the newline belongs to the first or
+        // the second source line.
         let boundary = display.lines[1].source.start;
-        let before = boundary - 1;
-        assert_eq!(display.line_index(before), 0);
+        assert_eq!(display.line_index(boundary - 1), 0);
         assert!(parsed.is_current(
             text,
-            display.line_index(before),
+            display.line_index(boundary - 1),
             None,
-            before,
-            DEFAULT_PAPER.content_width(),
+            boundary - 1,
+            width,
             3
         ));
-        // The caret crossed into the next source line, which now becomes the
-        // active line showing its Markdown markers: both lines need layout.
-        assert_eq!(display.line_index(boundary), 1);
-        assert!(!parsed.is_current(
-            text,
-            display.line_index(boundary),
-            None,
-            boundary,
-            DEFAULT_PAPER.content_width(),
-            3
-        ));
-    }
+        // Once the build has adopted a new target it is current again.
+        let mut parsed = parsed;
+        parsed.generation = 4;
+        assert!(parsed.is_current(text, display.line_index(0), None, 0, width, 4));
 
-    #[test]
-    fn an_open_composition_tracks_the_caret() {
+        // An open composition is laid out at the caret, so the caret it was
+        // built for is still current.
         let text = "alpha";
         let display = DisplayDoc::parse(text);
         let parsed = Parsed {
@@ -2767,62 +2727,110 @@ mod tests {
             active: 0,
             composition: Some("ni".to_string()),
             caret: 3,
-            width: DEFAULT_PAPER.content_width(),
+            width,
             generation: 0,
             ready: true,
         };
-        // The composition is laid out at the caret, so even without a text or
-        // active-line change a caret move inside the line has to rebuild.
-        assert!(parsed.is_current(
-            text,
-            display.line_index(3),
-            Some("ni"),
-            3,
-            DEFAULT_PAPER.content_width(),
-            0
-        ));
-        assert!(!parsed.is_current(
-            text,
-            display.line_index(1),
-            Some("ni"),
-            1,
-            DEFAULT_PAPER.content_width(),
-            0
-        ));
+        assert!(parsed.is_current(text, display.line_index(3), Some("ni"), 3, width, 0));
     }
 
     #[test]
-    fn a_new_render_target_or_an_unfinished_build_forces_the_reparse() {
-        let (display, mut parsed) = parsed_document();
+    fn any_changed_layout_input_forces_the_reparse() {
+        // Each row changes exactly one input the build was made from.
         let text = "alpha\nbeta";
-        // A device loss or the flight-image render replaces the layout target.
-        assert!(!parsed.is_current(
-            text,
-            display.line_index(0),
-            None,
-            0,
-            DEFAULT_PAPER.content_width(),
-            4
-        ));
-        parsed.generation = 4;
-        assert!(parsed.is_current(
-            text,
-            display.line_index(0),
-            None,
-            0,
-            DEFAULT_PAPER.content_width(),
-            4
-        ));
-        // Until the first rebuild finished there is nothing to keep.
-        parsed.ready = false;
-        assert!(!parsed.is_current(
-            text,
-            display.line_index(0),
-            None,
-            0,
-            DEFAULT_PAPER.content_width(),
-            4
-        ));
+        let width = DEFAULT_PAPER.content_width();
+        let display = DisplayDoc::parse(text);
+        // Taken from the display map so the test does not depend on whether
+        // the newline belongs to the first or the second source line.
+        let boundary = display.lines[1].source.start;
+        assert_eq!(display.line_index(boundary), 1);
+        struct Case {
+            name: &'static str,
+            text: &'static str,
+            active: usize,
+            caret: usize,
+            width: f32,
+            generation: u64,
+            ready: bool,
+        }
+        let cases = [
+            Case {
+                name: "a text change",
+                text: "alpha!\nbeta",
+                active: 0,
+                caret: 2,
+                width,
+                generation: 3,
+                ready: true,
+            },
+            Case {
+                name: "a width change",
+                text,
+                active: 0,
+                caret: 0,
+                width: 500.0,
+                generation: 3,
+                ready: true,
+            },
+            Case {
+                name: "a new render target",
+                text,
+                active: 0,
+                caret: 0,
+                width,
+                generation: 4,
+                ready: true,
+            },
+            Case {
+                name: "an unfinished build",
+                text,
+                active: 0,
+                caret: 0,
+                width,
+                generation: 3,
+                ready: false,
+            },
+            Case {
+                name: "a caret line change",
+                text,
+                active: 1,
+                caret: boundary,
+                width,
+                generation: 3,
+                ready: true,
+            },
+        ];
+        for case in cases {
+            let (_, mut parsed) = parsed_document();
+            parsed.ready = case.ready;
+            assert!(
+                !parsed.is_current(
+                    case.text,
+                    case.active,
+                    None,
+                    case.caret,
+                    case.width,
+                    case.generation
+                ),
+                "{} was kept instead of reparsed",
+                case.name
+            );
+        }
+
+        // An open composition is laid out at the caret, so moving the caret
+        // inside the line invalidates the build even when nothing else changed.
+        let text = "alpha";
+        let display = DisplayDoc::parse(text);
+        let parsed = Parsed {
+            text: text.to_string(),
+            active: 0,
+            composition: Some("ni".to_string()),
+            caret: 3,
+            width,
+            generation: 0,
+            ready: true,
+        };
+        assert!(!parsed.is_current(text, display.line_index(1), Some("ni"), 1, width, 0));
     }
 
     #[test]

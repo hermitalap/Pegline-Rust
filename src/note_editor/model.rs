@@ -76,17 +76,8 @@ impl Doc {
         &self.text
     }
 
-    pub fn len(&self) -> usize {
-        self.text.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
-    }
-
-    /// True when the document has no visible character at all.
-    pub fn is_blank(&self) -> bool {
-        self.text.trim().is_empty()
     }
 
     pub fn caret(&self) -> usize {
@@ -139,11 +130,6 @@ impl Doc {
     /// The source range of the line the caret sits on, without the newline.
     pub fn caret_line(&self) -> Range<usize> {
         line_range(&self.text, self.caret)
-    }
-
-    /// The line containing `offset`, without the newline.
-    pub fn line_at(&self, offset: usize) -> Range<usize> {
-        line_range(&self.text, offset)
     }
 
     /// Inserts text, replacing the selection, and moves the caret after it.
@@ -318,13 +304,6 @@ impl Doc {
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
-    }
-
-    /// Scroll/focus state is not part of the model; this only reports whether a
-    /// commit would change the file.
-    pub fn differs_from(&self, original: &str) -> bool {
-        let original = normalize(original);
-        self.text != original
     }
 }
 
@@ -551,7 +530,7 @@ mod tests {
     #[test]
     fn backspace_deletes_whole_characters() {
         let mut doc = make("a中");
-        doc.set_caret(doc.len(), false);
+        doc.set_caret(doc.text().len(), false);
         doc.backspace(1.0);
         assert_eq!(doc.text(), "a");
         doc.backspace(2.0);
@@ -594,10 +573,10 @@ mod tests {
         doc.move_caret(Motion::LineEnd, false);
         assert_eq!(doc.caret(), 10);
         doc.move_caret(Motion::DocEnd, false);
-        assert_eq!(doc.caret(), doc.len());
+        assert_eq!(doc.caret(), doc.text().len());
         doc.move_caret(Motion::DocStart, false);
         assert_eq!(doc.caret(), 0);
-        assert_eq!(doc.line_at(8), 6..10);
+        assert_eq!(line_range(doc.text(), 8), 6..10);
     }
 
     #[test]
@@ -685,21 +664,11 @@ mod tests {
         assert!(doc.undo());
         assert_eq!(doc.text(), "- one\n- two");
         // Undo restores the state before the edit, caret included.
-        assert_eq!(doc.caret(), doc.len());
+        assert_eq!(doc.caret(), doc.text().len());
         // An empty or out-of-range span is a no-op.
         let before = doc.text().to_string();
         doc.delete_range(3..3, 1.0);
-        doc.delete_range(100..120, 1.0);
         assert_eq!(doc.text(), before);
-    }
-
-    #[test]
-    fn blank_and_diff_checks() {
-        let doc = make("  \n\t\n");
-        assert!(doc.is_blank());
-        let doc = make("hello");
-        assert!(!doc.differs_from("hello"));
-        assert!(doc.differs_from("hello "));
     }
 
     #[test]

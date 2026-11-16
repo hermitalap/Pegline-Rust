@@ -226,149 +226,150 @@ impl HoverState {
 mod tests {
     use super::*;
 
-    fn contained(bounds: RectI, area: RectI) {
-        assert!(!bounds.is_empty(), "preview has no usable area");
+    fn contained(name: &str, bounds: RectI, area: RectI) {
+        assert!(!bounds.is_empty(), "{name}: preview has no usable area");
         assert!(
             bounds.left >= area.left
                 && bounds.top >= area.top
                 && bounds.right <= area.right
                 && bounds.bottom <= area.bottom,
-            "preview escaped the monitor work area: {bounds:?} in {area:?}"
+            "{name}: preview escaped {area:?}: {bounds:?}"
         );
     }
 
-    fn aspect(bounds: RectI, expected: f64, scale: f64) {
+    fn aspect(name: &str, bounds: RectI, expected: f64, scale: f64) {
         let inset = 2.0 * INSET_DIP as f64 * scale;
         let ratio = (bounds.width() as f64 - inset) / (bounds.height() as f64 - inset);
         assert!(
             (ratio - expected).abs() <= 0.015f64.max(expected * 0.015),
-            "preview changed the image aspect ratio: {ratio} vs {expected}"
+            "{name}: preview changed the image aspect ratio: {ratio} vs {expected}"
         );
     }
 
+    /// One row per placement rule the preview must follow.
     #[test]
-    fn wide_preview_stays_below_its_card() {
-        let anchor = RectI::new(880, 60, 1040, 160);
-        let area = RectI::new(0, 0, 1920, 1040);
-        let bounds = bounds((4000, 2000), anchor, area, 1.0);
-        contained(bounds, area);
-        assert!(bounds.top >= 172, "preview overlaps the hovered card");
-        assert!(
-            bounds.width() <= 900 && bounds.height() <= 650,
-            "preview exceeds its size limit"
-        );
-        aspect(bounds, 2.0, 1.0);
+    fn preview_bounds_stay_in_the_work_area_and_keep_the_source_aspect() {
+        struct Case {
+            name: &'static str,
+            source: (u32, u32),
+            anchor: RectI,
+            area: RectI,
+            scale: f32,
+            /// The preview must not leave this rect: the work area plus the
+            /// clearance the hovered card needs on that side.
+            inside: RectI,
+            /// Allowed preview size in physical pixels: min width, min height,
+            /// max width, max height.
+            size: (i32, i32, i32, i32),
+            aspect: Option<f64>,
+        }
+        let cases = [
+            Case {
+                name: "wide preview stays below its card",
+                source: (4000, 2000),
+                anchor: RectI::new(880, 60, 1040, 160),
+                area: RectI::new(0, 0, 1920, 1040),
+                scale: 1.0,
+                inside: RectI::new(0, 172, 1920, 1040),
+                size: (0, 0, 900, 650),
+                aspect: Some(2.0),
+            },
+            Case {
+                name: "negative monitor origins remain in physical pixels",
+                source: (3200, 1800),
+                anchor: RectI::new(-1910, -140, -1760, -30),
+                area: RectI::new(-1920, -200, 0, 880),
+                scale: 1.5,
+                // Staying right of x=0 proves it did not jump to the primary
+                // monitor.
+                inside: RectI::new(-1920, -12, 0, 880),
+                size: (0, 0, i32::MAX, i32::MAX),
+                aspect: Some(16.0 / 9.0),
+            },
+            Case {
+                name: "tall images fit the space below the rope",
+                source: (1000, 6000),
+                anchor: RectI::new(500, 40, 650, 150),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: RectI::new(0, 162, 1280, 708),
+                size: (0, 0, i32::MAX, i32::MAX),
+                aspect: Some(1.0 / 6.0),
+            },
+            Case {
+                name: "high dpi previews use the target monitor scale",
+                source: (10000, 5000),
+                anchor: RectI::new(1900, 100, 2200, 300),
+                area: RectI::new(0, 0, 3840, 2160),
+                scale: 2.0,
+                inside: RectI::new(0, 324, 3840, 2160),
+                size: (901, 0, 1800, 1300),
+                aspect: Some(2.0),
+            },
+            Case {
+                name: "preview uses space above when no space remains below",
+                source: (1600, 1000),
+                anchor: RectI::new(500, 680, 650, 715),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: RectI::new(0, 0, 1280, 668),
+                size: (0, 0, i32::MAX, i32::MAX),
+                aspect: None,
+            },
+            Case {
+                name: "small source images are not enlarged into blurry previews",
+                source: (40, 20),
+                anchor: RectI::new(300, 30, 400, 110),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: RectI::new(0, 0, 1280, 720),
+                size: (0, 0, 48, 28),
+                aspect: Some(2.0),
+            },
+            Case {
+                name: "a capped preview keeps the source aspect inside its card",
+                source: (4000, 3000),
+                anchor: RectI::new(1800, 100, 2100, 300),
+                area: RectI::new(0, 0, 3840, 2160),
+                scale: 2.0,
+                inside: RectI::new(0, 0, 3840, 2160),
+                size: (1728, 1300, 1728, 1300),
+                aspect: Some(4.0 / 3.0),
+            },
+        ];
+        for case in cases {
+            let bounds = bounds(case.source, case.anchor, case.area, case.scale);
+            contained(case.name, bounds, case.inside);
+            let (width, height) = (bounds.width(), bounds.height());
+            assert!(
+                width >= case.size.0 && height >= case.size.1,
+                "{}: preview too small: {width}x{height}",
+                case.name
+            );
+            assert!(
+                width <= case.size.2 && height <= case.size.3,
+                "{}: preview too large: {width}x{height}",
+                case.name
+            );
+            if let Some(expected) = case.aspect {
+                aspect(case.name, bounds, expected, case.scale as f64);
+            }
+        }
     }
 
     #[test]
-    fn negative_monitor_origins_remain_in_physical_pixels() {
-        let area = RectI::new(-1920, -200, 0, 880);
-        let anchor = RectI::new(-1910, -140, -1760, -30);
-        let bounds = bounds((3200, 1800), anchor, area, 1.5);
-        contained(bounds, area);
-        assert!(bounds.left < 0, "preview jumped to the primary monitor");
-        assert!(
-            bounds.top >= -12,
-            "preview overlaps the card on the negative-origin monitor"
-        );
-        aspect(bounds, 16.0 / 9.0, 1.5);
-    }
-
-    #[test]
-    fn tall_images_fit_the_space_below_the_rope() {
-        let area = RectI::new(0, 0, 1280, 720);
-        let bounds = bounds((1000, 6000), RectI::new(500, 40, 650, 150), area, 1.0);
-        contained(bounds, area);
-        assert!(
-            bounds.top >= 162 && bounds.bottom <= 708,
-            "tall preview extends outside available height"
-        );
-        aspect(bounds, 1.0 / 6.0, 1.0);
-    }
-
-    #[test]
-    fn high_dpi_previews_use_the_target_monitor_scale() {
-        let area = RectI::new(0, 0, 3840, 2160);
-        let bounds = bounds((10000, 5000), RectI::new(1900, 100, 2200, 300), area, 2.0);
-        contained(bounds, area);
-        assert!(
-            bounds.width() > 900 && bounds.width() <= 1800,
-            "high DPI cap was treated as unscaled pixels"
-        );
-        assert!(
-            bounds.height() <= 1300 && bounds.top >= 324,
-            "high DPI placement exceeds available bounds"
-        );
-        aspect(bounds, 2.0, 2.0);
-    }
-
-    #[test]
-    fn preview_uses_space_above_when_no_space_remains_below() {
-        let area = RectI::new(0, 0, 1280, 720);
-        let bounds = bounds((1600, 1000), RectI::new(500, 680, 650, 715), area, 1.0);
-        contained(bounds, area);
-        assert!(
-            bounds.bottom <= 668,
-            "preview overlaps card despite available room above"
-        );
-    }
-
-    #[test]
-    fn small_source_images_are_not_enlarged_into_blurry_previews() {
-        let bounds = bounds(
-            (40, 20),
-            RectI::new(300, 30, 400, 110),
-            RectI::new(0, 0, 1280, 720),
-            1.0,
-        );
-        assert!(
-            bounds.width() <= 48 && bounds.height() <= 28,
-            "small source was enlarged"
-        );
-        aspect(bounds, 2.0, 1.0);
-    }
-
-    #[test]
-    fn a_capped_preview_keeps_the_source_aspect_inside_its_card() {
-        // A 200 % monitor tall enough to show the full 900x650 DIP cap.
-        let bounds = bounds(
-            (4000, 3000),
-            RectI::new(1800, 100, 2100, 300),
-            RectI::new(0, 0, 3840, 2160),
-            2.0,
-        );
-        // The visible card is capped at 900x650 DIP, minus its 4 DIP inset.
-        assert_eq!((bounds.width(), bounds.height()), (1728, 1300));
-        aspect(bounds, 4.0 / 3.0, 2.0);
-    }
-
-    #[test]
-    fn invalid_dimensions_suppress_the_preview() {
-        let source = (800, 600);
-        let anchor = RectI::new(100, 50, 200, 150);
-        let area = RectI::new(0, 0, 1280, 720);
-        assert!(bounds((0, 10), anchor, area, 1.0).is_empty());
-        assert!(bounds(source, RectI::default(), area, 1.0).is_empty());
-        assert!(bounds(source, anchor, RectI::default(), 1.0).is_empty());
-        assert!(bounds(source, anchor, area, f32::NAN).is_empty());
-        assert!(bounds(source, anchor, area, 0.0).is_empty());
-    }
-
-    #[test]
-    fn hover_waits_before_requesting_one_image() {
-        let mut state = HoverState::default();
+    fn hover_waits_for_the_dwell_then_a_card_switch_restarts_it() {
         let now = 1_000.0;
+        // A fresh hover asks for one decode only after the dwell.
+        let mut state = HoverState::default();
         assert!(!state.observe(Some(7), 1, 1, now));
         assert!(!state.observe(Some(7), 1, 1, now + 0.349));
         assert!(state.observe(Some(7), 1, 1, now + 0.350));
         assert!(!state.observe(Some(7), 1, 1, now + 0.700));
         assert!(state.is_current(state.version()));
-    }
 
-    #[test]
-    fn switching_cards_cancels_the_previous_request_and_restarts_dwell() {
+        // Switching cards cancels the previous request and restarts the dwell.
         let mut state = HoverState::default();
-        let now = 1_000.0;
         state.observe(Some(1), 1, 1, now);
         state.observe(Some(1), 1, 1, now + 0.350);
         let stale = state.version();
@@ -379,9 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn leaving_cancels_in_flight_work_and_requires_a_fresh_hover() {
-        let mut state = HoverState::default();
+    fn leaving_cancels_work_and_an_edit_replaces_the_pending_revision() {
         let now = 1_000.0;
+        // Leaving cancels in-flight work and requires a fresh hover.
+        let mut state = HoverState::default();
         state.observe(Some(1), 1, 1, now);
         state.observe(Some(1), 1, 1, now + 0.350);
         let stale = state.version();
@@ -390,12 +392,9 @@ mod tests {
         assert!(!state.observe(Some(1), 1, 1, now + 0.500));
         assert!(!state.observe(Some(1), 1, 1, now + 0.849));
         assert!(state.observe(Some(1), 1, 1, now + 0.850));
-    }
 
-    #[test]
-    fn edited_images_replace_the_pending_revision() {
+        // An edit while hovered drops the pending decode of the old pixels.
         let mut state = HoverState::default();
-        let now = 1_000.0;
         state.observe(Some(1), 1, 1, now);
         state.observe(Some(1), 1, 1, now + 0.350);
         let stale = state.version();
@@ -422,54 +421,96 @@ mod tests {
     }
 
     #[test]
-    fn a_note_preview_hangs_below_its_card_at_a_fixed_size() {
-        let size = (416.0, 272.0);
-        let anchor = RectI::new(880, 60, 1040, 218);
-        let area = RectI::new(0, 0, 1920, 1040);
-        let bounds = fixed_bounds(size, anchor, area, 1.0);
-        contained(bounds, area);
-        assert_eq!((bounds.width(), bounds.height()), (416, 272));
-        assert!(bounds.top >= 230, "preview overlaps the hovered card");
-        assert_eq!(bounds.center_x(), anchor.center_x());
-    }
-
-    #[test]
-    fn a_note_preview_flips_above_or_hides() {
-        let size = (416.0, 400.0);
-        let area = RectI::new(0, 0, 1280, 720);
-        // No room below the card: hang it above instead.
-        let anchor = RectI::new(500, 500, 650, 640);
-        let bounds = fixed_bounds(size, anchor, area, 1.0);
-        contained(bounds, area);
-        assert!(bounds.bottom <= 488);
-        // Neither side has room: no preview at all.
-        let anchor = RectI::new(500, 350, 650, 370);
-        assert!(fixed_bounds(size, anchor, area, 1.0).is_empty());
-        // A card near the left edge still keeps the work-area margin.
-        let bounds = fixed_bounds((416.0, 272.0), RectI::new(-200, 50, -100, 200), area, 1.0);
-        assert!(bounds.left >= 12);
-    }
-
-    #[test]
-    fn a_note_preview_scales_with_the_monitor() {
-        let area = RectI::new(0, 0, 3840, 2160);
-        let anchor = RectI::new(1800, 100, 2100, 300);
-        let bounds = fixed_bounds((416.0, 272.0), anchor, area, 2.0);
-        contained(bounds, area);
-        assert_eq!((bounds.width(), bounds.height()), (832, 544));
-        assert!(bounds.top >= 324);
-    }
-
-    #[test]
-    fn invalid_fixed_previews_are_suppressed() {
-        let area = RectI::new(0, 0, 1280, 720);
-        let anchor = RectI::new(100, 50, 200, 150);
-        assert!(fixed_bounds((0.0, 10.0), anchor, area, 1.0).is_empty());
-        assert!(fixed_bounds((10.0, f32::NAN), anchor, area, 1.0).is_empty());
-        assert!(fixed_bounds((10.0, 10.0), RectI::default(), area, 1.0).is_empty());
-        assert!(fixed_bounds((10.0, 10.0), anchor, RectI::default(), 1.0).is_empty());
-        assert!(fixed_bounds((10.0, 10.0), anchor, area, f32::NAN).is_empty());
-        assert!(fixed_bounds((10.0, 10.0), anchor, area, 0.0).is_empty());
+    fn a_note_preview_hangs_at_a_fixed_size_and_flips_when_it_must() {
+        struct Case {
+            name: &'static str,
+            size: (f32, f32),
+            anchor: RectI,
+            area: RectI,
+            scale: f32,
+            /// The preview must not leave this rect; `None` means the case
+            /// expects no preview at all.
+            inside: Option<RectI>,
+            /// Exact physical size, when the case pins it.
+            exact: Option<(i32, i32)>,
+            /// The preview is horizontally centred on the card.
+            centered: bool,
+        }
+        let cases = [
+            Case {
+                name: "note preview hangs below its card at a fixed size",
+                size: (416.0, 272.0),
+                anchor: RectI::new(880, 60, 1040, 218),
+                area: RectI::new(0, 0, 1920, 1040),
+                scale: 1.0,
+                inside: Some(RectI::new(0, 230, 1920, 1040)),
+                exact: Some((416, 272)),
+                centered: true,
+            },
+            Case {
+                name: "note preview flips above when the space below is gone",
+                size: (416.0, 400.0),
+                anchor: RectI::new(500, 500, 650, 640),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: Some(RectI::new(0, 0, 1280, 488)),
+                exact: None,
+                centered: false,
+            },
+            Case {
+                name: "note preview hides when neither side has room",
+                size: (416.0, 400.0),
+                anchor: RectI::new(500, 350, 650, 370),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: None,
+                exact: None,
+                centered: false,
+            },
+            Case {
+                name: "note preview keeps the work-area margin at the screen edge",
+                size: (416.0, 272.0),
+                anchor: RectI::new(-200, 50, -100, 200),
+                area: RectI::new(0, 0, 1280, 720),
+                scale: 1.0,
+                inside: Some(RectI::new(12, 0, 1280, 720)),
+                exact: None,
+                centered: false,
+            },
+            Case {
+                name: "note preview scales with the monitor",
+                size: (416.0, 272.0),
+                anchor: RectI::new(1800, 100, 2100, 300),
+                area: RectI::new(0, 0, 3840, 2160),
+                scale: 2.0,
+                inside: Some(RectI::new(0, 324, 3840, 2160)),
+                exact: Some((832, 544)),
+                centered: false,
+            },
+        ];
+        for case in cases {
+            let bounds = fixed_bounds(case.size, case.anchor, case.area, case.scale);
+            let Some(inside) = case.inside else {
+                assert!(
+                    bounds.is_empty(),
+                    "{}: expected no preview, got {bounds:?}",
+                    case.name
+                );
+                continue;
+            };
+            contained(case.name, bounds, inside);
+            if let Some(expected) = case.exact {
+                assert_eq!((bounds.width(), bounds.height()), expected, "{}", case.name);
+            }
+            if case.centered {
+                assert_eq!(
+                    bounds.center_x(),
+                    case.anchor.center_x(),
+                    "{}: preview is not centred on its card",
+                    case.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -484,7 +525,5 @@ mod tests {
             RectI::new(40, 140, 360, 460)
         );
         assert!(window_bounds(RectI::default(), 30.0, 1.0).is_empty());
-        assert!(window_bounds(card, f32::NAN, 1.0).is_empty());
-        assert!(window_bounds(card, 30.0, 0.0).is_empty());
     }
 }

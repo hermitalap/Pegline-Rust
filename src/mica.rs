@@ -477,23 +477,9 @@ fn noise(index: usize) -> i32 {
     (hash % 5) as i32 - 2
 }
 
-/// Exposed for tests: the texture size for a virtual screen.
-pub fn texture_size(virtual_width: i32, virtual_height: i32) -> (u32, u32) {
-    (
-        ((virtual_width as f32 * TEXTURE_SCALE).round() as u32).max(2),
-        ((virtual_height as f32 * TEXTURE_SCALE).round() as u32).max(2),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn texture_size_is_at_least_two() {
-        assert_eq!(texture_size(6016, 3384), (1023, 575));
-        assert_eq!(texture_size(1, 1), (2, 2));
-    }
 
     #[test]
     fn tint_keeps_alpha_opaque() {

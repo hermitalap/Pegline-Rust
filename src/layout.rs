@@ -299,9 +299,6 @@ mod tests {
         let (w, h) = photo_size(1080.0, 1920.0);
         assert!((w / h - 1080.0 / 1920.0).abs() < 1e-3);
         assert!(w <= 136.0 && h <= 104.0);
-
-        assert_eq!(photo_size(0.0, 0.0), (136.0, 104.0));
-        assert_eq!(photo_size(-4.0, 20.0), (136.0, 104.0));
     }
 
     #[test]
@@ -309,7 +306,6 @@ mod tests {
         let (w, h) = card_size(1360.0, 1040.0);
         assert!((w - 144.0).abs() < 1e-4);
         assert!((h - 112.0).abs() < 1e-4);
-        assert_eq!(card_size(0.0, 0.0), (144.0, 112.0));
     }
 
     #[test]

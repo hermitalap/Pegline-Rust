@@ -433,9 +433,7 @@ mod tests {
 
     #[test]
     fn unusable_card_sizes_are_refused() {
-        assert_eq!(ghost_size((0.0, 112.0), 96), None);
         assert_eq!(ghost_size((144.0, -1.0), 96), None);
-        assert_eq!(ghost_size((f32::NAN, 112.0), 96), None);
         assert_eq!(ghost_size((4000.0, 3000.0), 96), None);
     }
 

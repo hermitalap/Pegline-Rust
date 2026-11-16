@@ -4244,14 +4244,6 @@ mod tests {
     }
 
     #[test]
-    fn pseudo_random_is_in_unit_range() {
-        for id in 0..100 {
-            let value = pseudo_random(id);
-            assert!((0.0..=1.0).contains(&value));
-        }
-    }
-
-    #[test]
     fn annotating_a_card_writes_in_place_and_reloads_it() {
         let _com = window::ComGuard::init(windows::Win32::System::Com::COINIT_MULTITHREADED)
             .expect("COM initialization for the WIC test");

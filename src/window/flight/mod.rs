@@ -1452,10 +1452,7 @@ mod tests {
             assert!((pin.1 - (top + DROP_DISTANCE * e)).abs() < 1e-3);
             assert!((opacity - (1.0 - e)).abs() < 1e-4);
         }
-    }
-
-    #[test]
-    fn a_falling_card_is_gone_when_the_timeline_ends() {
+        // The timeline ends with the card one full drop below and invisible.
         let (transform, opacity) = drop_pose(1.0, 0.0, 10.0, 144.0, 0.0);
         let pin = apply(&transform, 72.0, 0.0);
         assert!((pin.1 - (10.0 + DROP_DISTANCE)).abs() < 1e-3);
