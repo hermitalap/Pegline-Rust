@@ -727,8 +727,8 @@ impl EditorState {
                     return Step::Continue;
                 }
                 self.pointer_down = true;
-                if let Some((display_byte, line)) = self.hit_test(x, y) {
-                    let source = line.display_to_source(display_byte, true);
+                if let Some((display_byte, line, active)) = self.hit_test(x, y) {
+                    let source = line.display_to_source(display_byte, active);
                     self.doc.set_caret(source, false);
                 }
                 self.composition = None;
@@ -739,8 +739,8 @@ impl EditorState {
                 if !self.enabled || !self.pointer_down {
                     return Step::Continue;
                 }
-                if let Some((display_byte, line)) = self.hit_test(x, y) {
-                    let source = line.display_to_source(display_byte, true);
+                if let Some((display_byte, line, active)) = self.hit_test(x, y) {
+                    let source = line.display_to_source(display_byte, active);
                     self.doc.set_caret(source, true);
                     self.rebuild();
                 }
@@ -1053,13 +1053,16 @@ impl EditorState {
             .display
             .lines
             .get(target.index)
-            .map(|line| line.display_to_source(byte, true))
+            .map(|line| line.display_to_source(byte, target.active))
             .unwrap_or(caret);
         self.doc.set_caret(source, extend);
     }
 
-    /// Maps client pixels to a display byte offset and the display line.
-    fn hit_test(&self, x_px: i32, y_px: i32) -> Option<(usize, &DisplayLine)> {
+    /// Maps client pixels to a display byte offset and the display line it was
+    /// laid out from. The third value is the line's active state at layout
+    /// time: the layout hides Markdown markers on inactive lines, so callers
+    /// must map the offset back with the same state (see `display_to_source`).
+    fn hit_test(&self, x_px: i32, y_px: i32) -> Option<(usize, &DisplayLine, bool)> {
         let x = x_px as f32 / self.scale - MARGIN_DIP - PAD_LEFT;
         let y = y_px as f32 / self.scale - MARGIN_DIP - PAD_TOP + self.scroll;
         let laid = self.lines.iter().min_by(|a, b| {
@@ -1094,7 +1097,7 @@ impl EditorState {
         } else {
             0
         };
-        Some((byte, line))
+        Some((byte, line, laid.active))
     }
 
     fn display_offset(&self, laid: &LaidLine, caret: usize) -> usize {
