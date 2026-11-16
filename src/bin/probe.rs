@@ -888,6 +888,15 @@ unsafe extern "system" fn probe_wndproc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
+/// Fills one card: the baked shadow, the glass and the hairline border.
+fn draw_card(renderer: &mut Renderer, rect: pegline::types::RectF, shadow: bool) {
+    if shadow {
+        renderer.draw_shadow(rect, 0.18, false);
+    }
+    renderer.draw_glass(rect, 16.0, false);
+    renderer.stroke_card(rect, 16.0, 0.75);
+}
+
 /// Draws one primitive kind, for the memory bisection in `--mode=primitive`.
 fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
     let size = (144.0, 98.7);
@@ -903,33 +912,32 @@ fn draw_primitive(renderer: &mut Renderer, scene: &Scene, kind: &str) {
             } else {
                 rect
             };
-            renderer.draw_shadow(panel, 0.18, false);
-            renderer.draw_glass(panel, 16.0, false);
-            renderer.stroke_card(panel, 16.0, 0.75);
+            draw_card(renderer, panel, true);
         }
         "text" => renderer.draw_hint(1504.0, 120.0),
         "card6" => {
             for index in 0..6 {
-                let x = 300.0 + index as f32 * 400.0;
-                let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
-                renderer.draw_shadow(r, 0.18, false);
-                renderer.draw_glass(r, 16.0, false);
-                renderer.stroke_card(r, 16.0, 0.75);
+                let at = pegline::types::RectF::from_xywh(
+                    300.0 + index as f32 * 400.0,
+                    60.0,
+                    size.0,
+                    size.1,
+                );
+                draw_card(renderer, at, true);
             }
         }
         "fill6" => {
             for index in 0..6 {
-                let x = 300.0 + index as f32 * 400.0;
-                let r = pegline::types::RectF::from_xywh(x, 60.0, size.0, size.1);
-                renderer.draw_glass(r, 16.0, false);
-                renderer.stroke_card(r, 16.0, 0.75);
+                let at = pegline::types::RectF::from_xywh(
+                    300.0 + index as f32 * 400.0,
+                    60.0,
+                    size.0,
+                    size.1,
+                );
+                draw_card(renderer, at, false);
             }
         }
-        "card" => {
-            renderer.draw_shadow(rect, 0.18, false);
-            renderer.draw_glass(rect, 16.0, false);
-            renderer.stroke_card(rect, 16.0, 0.75);
-        }
+        "card" => draw_card(renderer, rect, true),
         _ => {}
     }
 }

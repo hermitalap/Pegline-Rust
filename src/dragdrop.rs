@@ -8,14 +8,13 @@
 //! handler after OLE was initialised on that thread.
 
 use std::cell::Cell;
-use std::mem::{ManuallyDrop, size_of};
-use std::os::windows::ffi::OsStrExt;
+use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{
     DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
     DV_E_FORMATETC, DV_E_LINDEX, DV_E_TYMED, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, GlobalFree,
-    HGLOBAL, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
+    HGLOBAL, OLE_E_ADVISENOTSUPPORTED, S_OK,
 };
 use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
@@ -30,7 +29,6 @@ use windows::Win32::System::Ole::{
     IDropSource_Impl,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
-use windows::Win32::UI::Shell::DROPFILES;
 use windows::core::{BOOL, Error, HRESULT, Ref, implement, w};
 
 /// `IDataObject::GetCanonicalFormatEtc` returns this success code when it
@@ -223,7 +221,9 @@ impl IDataObject_Impl for FileDataObject_Impl {
         // A fresh block per request: the target owns it from now on and frees
         // it with ReleaseStgMedium.
         let handle = match self.offered(format) {
-            Ok(OfferedFormat::FileDrop) => alloc_hglobal(&dropfiles_bytes(&self.path))?,
+            Ok(OfferedFormat::FileDrop) => {
+                alloc_hglobal(&crate::win32::dropfiles_payload(&self.path))?
+            }
             Ok(OfferedFormat::Png) => alloc_hglobal(&self.png)?,
             Err(code) => return Err(Error::from_hresult(code)),
         };
@@ -340,33 +340,6 @@ impl IDropSource_Impl for FileDropSource_Impl {
     }
 }
 
-/// Builds the `CF_HDROP` payload for one file: a `DROPFILES` header followed by
-/// the absolute path in UTF-16, its NUL terminator, and the list's extra NUL.
-fn dropfiles_bytes(path: &Path) -> Vec<u8> {
-    let header = DROPFILES {
-        pFiles: size_of::<DROPFILES>() as u32,
-        pt: POINT::default(),
-        fNC: BOOL::from(false),
-        fWide: BOOL::from(true),
-    };
-    let units: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
-
-    let mut bytes = Vec::with_capacity(size_of::<DROPFILES>() + units.len() * 2);
-    // SAFETY: DROPFILES is a plain C struct with every field initialised; the
-    // slice covers exactly the struct's own bytes and does not outlive it.
-    let header_bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&header as *const DROPFILES).cast::<u8>(),
-            size_of::<DROPFILES>(),
-        )
-    };
-    bytes.extend_from_slice(header_bytes);
-    for unit in units {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    bytes
-}
-
 /// Copies `bytes` into a moveable `HGLOBAL` for a `STGMEDIUM`.
 ///
 /// On success OLE (or the drop target) owns the block; on failure it is freed
@@ -402,33 +375,4 @@ fn alloc_hglobal(bytes: &[u8]) -> windows::core::Result<HGLOBAL> {
         let _ = GlobalUnlock(handle);
     }
     Ok(handle)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::windows::ffi::OsStrExt;
-
-    /// The bytes must match what `CF_HDROP` consumers expect: a 20-byte
-    /// `DROPFILES` header, then the wide path, then two NULs.
-    #[test]
-    fn dropfiles_bytes_layout() {
-        let path = Path::new(r"C:\shots\pegged.png");
-        let bytes = dropfiles_bytes(path);
-        let header = std::mem::size_of::<DROPFILES>();
-
-        assert_eq!(header, 20);
-        assert_eq!(
-            u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize,
-            header
-        );
-        assert_eq!(i32::from_le_bytes(bytes[12..16].try_into().unwrap()), 0); // fNC
-        assert_eq!(i32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1); // fWide
-
-        let units: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
-        let expected: Vec<u8> = units.iter().flat_map(|unit| unit.to_le_bytes()).collect();
-        assert_eq!(bytes.len(), header + expected.len());
-        assert_eq!(&bytes[header..], expected.as_slice());
-        assert_eq!(&bytes[bytes.len() - 4..], &[0u8, 0, 0, 0][..]);
-    }
 }

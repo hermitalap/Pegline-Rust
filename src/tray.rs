@@ -38,35 +38,25 @@ const INFO_TITLE_CHARS: usize = 64;
 /// The tooltip the WPF app showed.
 const TOOLTIP: &str = "Pegline";
 
-// One menu id per command. They are explicit instead of derived from the enum
-// order because the enum is a stable API and the menu order is a product
-// decision; keeping them apart means adding a command cannot move an id.
-const ID_TOGGLE_REVEAL: u32 = 1;
-const ID_NOTE: u32 = 3;
-const ID_NOTE_KEY: u32 = 5;
-const ID_CLEAR_LINE: u32 = 6;
-const ID_CLEAR_FILES: u32 = 7;
-const ID_CATCH_SCREENSHOTS: u32 = 8;
-const ID_OPEN_FOLDER: u32 = 9;
-const ID_SOUND: u32 = 10;
-const ID_AUTOSTART: u32 = 11;
-const ID_EXIT: u32 = 12;
-const ID_LINE_ALWAYS: u32 = 13;
+// The discriminants are the menu ids. They are explicit instead of derived from
+// the enum order because the order is a product decision; keeping them in the
+// enum means adding a command cannot move an existing id.
 
 /// The tray menu items, in the order the WPF app showed them.
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuCommand {
-    ToggleReveal,
-    LineAlways,
-    Note,
-    NoteKey,
-    ClearLine,
-    ClearFiles,
-    CatchScreenshots,
-    OpenFolder,
-    Sound,
-    Autostart,
-    Exit,
+    ToggleReveal = 1,
+    Note = 3,
+    NoteKey = 5,
+    ClearLine = 6,
+    ClearFiles = 7,
+    CatchScreenshots = 8,
+    OpenFolder = 9,
+    Sound = 10,
+    Autostart = 11,
+    Exit = 12,
+    LineAlways = 13,
 }
 
 /// Check marks and enabled states for the menu.
@@ -296,7 +286,7 @@ fn append_item(
         AppendMenuW(
             menu,
             MF_STRING | flags,
-            menu_id(command) as usize,
+            command as u32 as usize,
             PCWSTR(text.as_ptr()),
         )
     }
@@ -410,37 +400,21 @@ fn delete_caught_label(template: &str, count: usize) -> String {
     template.replace("{}", &count.to_string())
 }
 
-/// The menu id for a command; one id per command, stable across builds.
-fn menu_id(command: MenuCommand) -> u32 {
-    match command {
-        MenuCommand::ToggleReveal => ID_TOGGLE_REVEAL,
-        MenuCommand::LineAlways => ID_LINE_ALWAYS,
-        MenuCommand::Note => ID_NOTE,
-        MenuCommand::NoteKey => ID_NOTE_KEY,
-        MenuCommand::ClearLine => ID_CLEAR_LINE,
-        MenuCommand::ClearFiles => ID_CLEAR_FILES,
-        MenuCommand::CatchScreenshots => ID_CATCH_SCREENSHOTS,
-        MenuCommand::OpenFolder => ID_OPEN_FOLDER,
-        MenuCommand::Sound => ID_SOUND,
-        MenuCommand::Autostart => ID_AUTOSTART,
-        MenuCommand::Exit => ID_EXIT,
-    }
-}
-
-/// The inverse of [`menu_id`]; `None` for "cancelled" (0) and unknown ids.
+/// The inverse of the enum discriminants; `None` for "cancelled" (0) and
+/// unknown ids.
 fn command_for_id(id: u32) -> Option<MenuCommand> {
     match id {
-        ID_TOGGLE_REVEAL => Some(MenuCommand::ToggleReveal),
-        ID_LINE_ALWAYS => Some(MenuCommand::LineAlways),
-        ID_NOTE => Some(MenuCommand::Note),
-        ID_NOTE_KEY => Some(MenuCommand::NoteKey),
-        ID_CLEAR_LINE => Some(MenuCommand::ClearLine),
-        ID_CLEAR_FILES => Some(MenuCommand::ClearFiles),
-        ID_CATCH_SCREENSHOTS => Some(MenuCommand::CatchScreenshots),
-        ID_OPEN_FOLDER => Some(MenuCommand::OpenFolder),
-        ID_SOUND => Some(MenuCommand::Sound),
-        ID_AUTOSTART => Some(MenuCommand::Autostart),
-        ID_EXIT => Some(MenuCommand::Exit),
+        1 => Some(MenuCommand::ToggleReveal),
+        3 => Some(MenuCommand::Note),
+        5 => Some(MenuCommand::NoteKey),
+        6 => Some(MenuCommand::ClearLine),
+        7 => Some(MenuCommand::ClearFiles),
+        8 => Some(MenuCommand::CatchScreenshots),
+        9 => Some(MenuCommand::OpenFolder),
+        10 => Some(MenuCommand::Sound),
+        11 => Some(MenuCommand::Autostart),
+        12 => Some(MenuCommand::Exit),
+        13 => Some(MenuCommand::LineAlways),
         _ => None,
     }
 }
@@ -466,13 +440,13 @@ mod tests {
     #[test]
     fn every_command_round_trips_through_its_menu_id() {
         for command in ALL {
-            assert_eq!(command_for_id(menu_id(command)), Some(command));
+            assert_eq!(command_for_id(command as u32), Some(command));
         }
     }
 
     #[test]
     fn menu_ids_are_unique_and_nonzero() {
-        let mut ids: Vec<u32> = ALL.iter().map(|command| menu_id(*command)).collect();
+        let mut ids: Vec<u32> = ALL.iter().map(|command| *command as u32).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), ALL.len(), "two commands share a menu id");

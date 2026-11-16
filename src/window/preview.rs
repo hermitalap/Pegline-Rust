@@ -37,6 +37,7 @@ use crate::render::{Brush, Present, Renderer, TextId};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
+use crate::window::SendHwnd;
 
 const CLASS_NAME: PCWSTR = w!("PeglinePreview");
 const WINDOW_TITLE: PCWSTR = w!("Pegline preview");
@@ -94,14 +95,6 @@ enum PreviewCommand {
     Hide,
     Stop,
 }
-
-/// HWND is a raw pointer; the window outlives the thread because `shutdown`
-/// joins before destroying it.
-struct SendHwnd(HWND);
-
-// SAFETY: the render thread only places the window and draws into its
-// composition target; it never destroys or re-parents it.
-unsafe impl Send for SendHwnd {}
 
 /// The pooled preview window, owned by the UI thread.
 pub struct Preview {
@@ -370,7 +363,15 @@ fn preview_thread(
                 }
             }
             PreviewCommand::Show { image, bounds, dpi } => {
-                let outcome = show_frame(&mut renderer, hwnd.0, &image, bounds, dpi, &mut texture);
+                let outcome = show_card_frame(
+                    &mut renderer,
+                    hwnd.0,
+                    &image,
+                    bounds,
+                    dpi,
+                    &mut texture,
+                    "preview card",
+                );
                 match outcome {
                     Ok(()) => {
                         if !shown {
@@ -420,13 +421,14 @@ fn preview_thread(
                 }
             }
             PreviewCommand::ShowNoteContent { image, bounds, dpi } => {
-                let outcome = show_note_content_frame(
+                let outcome = show_card_frame(
                     &mut renderer,
                     hwnd.0,
                     &image,
                     bounds,
                     dpi,
                     &mut texture,
+                    "note content preview",
                 );
                 match outcome {
                     Ok(()) => {
@@ -466,16 +468,17 @@ fn preview_thread(
     logging::trace("preview render thread stopped");
 }
 
-/// Shows a picture's hover preview. `bounds` is the visible card; the window
-/// around it is enlarged by [`PREVIEW_PADDING_DIP`] so the baked shadow fits
-/// exactly as on a note preview.
-fn show_frame(
+/// Shows a hover preview: `bounds` is the visible card, and the window around
+/// it is enlarged by [`PREVIEW_PADDING_DIP`] so the baked shadow fits exactly as
+/// on the line. A picture and a note's content share the frame.
+fn show_card_frame(
     renderer: &mut Renderer,
     hwnd: HWND,
     image: &ImageData,
     bounds: RectI,
     dpi: u32,
     texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+    label: &str,
 ) -> Result<(), String> {
     let scale = dpi as f32 / 96.0;
     let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
@@ -485,7 +488,7 @@ fn show_frame(
     let width = window.width().max(1) as u32;
     let height = window.height().max(1) as u32;
     logging::trace(format!(
-        "preview card {}x{} at {bounds:?}, window {window:?}",
+        "{label} {}x{} at {bounds:?}, window {window:?}",
         image.width, image.height
     ));
     win32::place_window(hwnd, window, true);
@@ -608,47 +611,6 @@ fn show_note_frame(
         return Err("device lost while showing a note preview".to_string());
     }
     logging::trace("note preview frame presented");
-    Ok(())
-}
-
-/// Draws the hover preview of a note that is hanging on the line: the same
-/// glass card and paper as the card, with the larger sheet rendered off the UI
-/// thread. `bounds` is the visible card; the window adds the shadow room.
-fn show_note_content_frame(
-    renderer: &mut Renderer,
-    hwnd: HWND,
-    image: &ImageData,
-    bounds: RectI,
-    dpi: u32,
-    texture: &mut Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
-) -> Result<(), String> {
-    let scale = dpi as f32 / 96.0;
-    let window = geometry::window_bounds(bounds, PREVIEW_PADDING_DIP, scale);
-    if window.is_empty() {
-        return Err("empty preview window".to_string());
-    }
-    let width = window.width().max(1) as u32;
-    let height = window.height().max(1) as u32;
-    logging::trace(format!(
-        "note content preview {}x{} at {bounds:?}, window {window:?}",
-        image.width, image.height
-    ));
-    win32::place_window(hwnd, window, true);
-    renderer.resize(width, height, dpi)?;
-    let card = RectF::from_xywh(
-        PREVIEW_PADDING_DIP,
-        PREVIEW_PADDING_DIP,
-        bounds.width() as f32 / scale,
-        bounds.height() as f32 / scale,
-    );
-    let bitmap = renderer.upload(image)?;
-    renderer.begin()?;
-    paint_preview_card(renderer, &bitmap, card);
-    renderer.end()?;
-    *texture = Some(bitmap);
-    if renderer.present(true) == Present::DeviceLost {
-        return Err("device lost while showing a note preview".to_string());
-    }
     Ok(())
 }
 

@@ -109,6 +109,25 @@ fn timestamp() -> String {
     )
 }
 
+/// Local time as `yyyy-MM-dd HHmmss`, the stamp screenshot file names use.
+pub fn local_stamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let offset = local_offset_seconds();
+    let local = now as i64 + offset as i64;
+    let days = local.div_euclid(86_400);
+    let seconds = local.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}{:02}{:02}",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
 /// Days since the Unix epoch to a proleptic Gregorian date (Howard Hinnant's
 /// `civil_from_days`, adapted). Kept local so the logging module has no deps.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {

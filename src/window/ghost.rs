@@ -28,6 +28,7 @@ use crate::render::{Present, Renderer};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
+use crate::window::SendHwnd;
 
 const CLASS_NAME: PCWSTR = w!("PeglineGhost");
 const WINDOW_TITLE: PCWSTR = w!("Pegline drag preview");
@@ -58,14 +59,6 @@ enum GhostCommand {
     Hide,
     Stop,
 }
-
-/// HWND is a raw pointer; the window outlives the thread because `shutdown`
-/// joins before destroying it.
-struct SendHwnd(HWND);
-
-// SAFETY: the render thread only places, shows and hides the window and draws
-// into its composition target; it never destroys or re-parents it.
-unsafe impl Send for SendHwnd {}
 
 /// The pooled drag ghost, owned by the UI thread.
 pub struct Ghost {

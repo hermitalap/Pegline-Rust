@@ -236,6 +236,36 @@ struct EditingNote {
     color: usize,
 }
 
+/// What the two note-editor entry points (a hanging note's card and the blank
+/// note's hotspot) pass to the shared opening path.
+struct NoteOpen<'a> {
+    original: String,
+    color: usize,
+    paper: PaperSize,
+    path: Option<PathBuf>,
+    card: Option<CardId>,
+    from: Option<RectI>,
+    angle: f32,
+    start_image: Option<ImageData>,
+    /// The image the entry flight uses when the editor has none ready.
+    image: ImageData,
+    pin: PinMode,
+    /// Hide the edited card when no entry flight could start.
+    hide_card: bool,
+    trace: &'a str,
+}
+
+/// The geometry and look of an editor-to-card flight.
+struct CardFlight {
+    token: u64,
+    pin: PinMode,
+    image: ImageData,
+    from: RectI,
+    target: RectI,
+    tilt: f32,
+    dpi: u32,
+}
+
 /// A capture seen in the last few seconds, kept for twin merging.
 struct Recent {
     at: f64,
@@ -1877,9 +1907,10 @@ impl App {
             return;
         }
         logging::trace("new note editor requested");
-        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
-            return;
-        };
+        self.cancel_note_hover();
+        // The flight window is about to be taken over for the trip to the
+        // editor; any card it was carrying must become visible in the scene.
+        self.release_flying_card();
         let from = self.note_hover_card_px();
         let angle = self
             .state
@@ -1890,74 +1921,22 @@ impl App {
         // The card's own blank paper dissolves into the editor view before the
         // flight starts; the editor image itself is rendered by its render
         // thread and taken below.
-        let start_image = Some(notes::render("", 0));
-        self.cancel_note_hover();
-        // The flight window is about to be taken over for the trip to the
-        // editor; any card it was carrying must become visible in the scene.
-        self.release_flying_card();
-        let tx = self.events_tx.clone();
-        let notify = Box::new(move |event| {
-            let _ = tx.send(Event::NoteEditor(event));
+        let blank = notes::render("", 0);
+        self.open_note_editor_with(NoteOpen {
+            original: String::new(),
+            color: 0,
+            paper: PaperSize::default(),
+            path: None,
+            card: None,
+            from,
+            angle,
+            start_image: Some(blank.clone()),
+            image: blank,
+            // A brand-new note is not hanging yet, so its flight has no pin.
+            pin: PinMode::Hidden,
+            hide_card: false,
+            trace: "new note editor opened from the entry hotspot",
         });
-        match NoteEditor::open_hidden(
-            String::new(),
-            0,
-            PaperSize::default(),
-            monitor.dpi,
-            monitor,
-            notify,
-        ) {
-            Ok(editor) => {
-                self.windows.note_editor = Some(editor);
-                self.sessions.note_editing = Some(EditingNote {
-                    path: None,
-                    card: None,
-                    original: String::new(),
-                    color: 0,
-                });
-                self.sessions.note_committing = false;
-                self.present();
-                self.reveal(true, 0.0);
-                let image = self
-                    .windows
-                    .note_editor
-                    .as_mut()
-                    .and_then(NoteEditor::take_flight_image)
-                    .or_else(|| Some(notes::render("", 0)));
-                let to = self.note_editor_card_px();
-                let dpi = monitor.dpi;
-                let launched = match (from, to, image) {
-                    (Some(from), Some(to), Some(image)) => {
-                        // A brand-new note is not hanging yet, so its flight has
-                        // no clothespin.
-                        self.windows
-                            .ensure_flight(&self.events_tx)
-                            .is_some_and(|flight| {
-                                flight.fly_entry(
-                                    NOTE_FLIGHT_TOKEN,
-                                    FlightImage::Ready(image),
-                                    start_image,
-                                    from,
-                                    to,
-                                    angle,
-                                    PinMode::Hidden,
-                                    dpi,
-                                    true,
-                                )
-                            })
-                    }
-                    _ => false,
-                };
-                if launched {
-                    self.windows.flight_idle_at = None;
-                    self.book.note_show_at = Some(win32::now_seconds() + 1.5);
-                } else if let Some(editor) = self.windows.note_editor.as_mut() {
-                    editor.show();
-                }
-                logging::trace("new note editor opened from the entry hotspot");
-            }
-            Err(error) => logging::error(format!("note editor: {error}")),
-        }
     }
 
     /// Dwells on the hovered card and shows its large preview: the decoded
@@ -2299,25 +2278,59 @@ impl App {
         let card_image = item.thumb.clone();
         let from = self.current_card_px(id);
         let angle = self.current_card_angle(id).unwrap_or(item.tilt);
-        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
-            return;
-        };
-        let tx = self.events_tx.clone();
-        let notify = Box::new(move |event| {
-            let _ = tx.send(Event::NoteEditor(event));
-        });
         let paper = path
             .file_name()
             .and_then(|name| name.to_str())
             .map(|name| self.settings.note_size(name))
             .unwrap_or_default();
+        let trace = format!("note editor for card {id}");
+        self.open_note_editor_with(NoteOpen {
+            original,
+            color,
+            paper,
+            path: Some(path),
+            card: Some(id),
+            from,
+            angle,
+            start_image: Some(card_image.clone()),
+            image: card_image,
+            pin: PinMode::Leave,
+            hide_card: true,
+            trace: &trace,
+        });
+    }
+
+    /// Opens the note editor window and starts the entry flight. Both entry
+    /// points differ only in the request they assemble.
+    fn open_note_editor_with(&mut self, open: NoteOpen<'_>) {
+        let Some(monitor) = self.screen.or_else(Self::pointer_screen) else {
+            return;
+        };
+        let NoteOpen {
+            original,
+            color,
+            paper,
+            path,
+            card,
+            from,
+            angle,
+            start_image,
+            image,
+            pin,
+            hide_card,
+            trace,
+        } = open;
+        let tx = self.events_tx.clone();
+        let notify = Box::new(move |event| {
+            let _ = tx.send(Event::NoteEditor(event));
+        });
         match NoteEditor::open_hidden(original.clone(), color, paper, monitor.dpi, monitor, notify)
         {
             Ok(editor) => {
                 self.windows.note_editor = Some(editor);
                 self.sessions.note_editing = Some(EditingNote {
-                    path: Some(path),
-                    card: Some(id),
+                    path,
+                    card,
                     original,
                     color,
                 });
@@ -2329,7 +2342,7 @@ impl App {
                     .note_editor
                     .as_mut()
                     .and_then(NoteEditor::take_flight_image)
-                    .unwrap_or_else(|| card_image.clone());
+                    .unwrap_or(image);
                 let to = self.note_editor_card_px();
                 let dpi = monitor.dpi;
                 let launched = match (from, to) {
@@ -2340,11 +2353,11 @@ impl App {
                             flight.fly_entry(
                                 NOTE_FLIGHT_TOKEN,
                                 FlightImage::Ready(image),
-                                Some(card_image),
+                                start_image,
                                 from,
                                 to,
                                 angle,
-                                PinMode::Leave,
+                                pin,
                                 dpi,
                                 true,
                             )
@@ -2358,11 +2371,13 @@ impl App {
                     if let Some(editor) = self.windows.note_editor.as_mut() {
                         editor.show();
                     }
-                    // No flight (the strip is gone or the flight window could
-                    // not be built): hide the card at once.
-                    self.hide_note_card();
+                    if hide_card {
+                        // No flight (the strip is gone or the flight window
+                        // could not be built): hide the card at once.
+                        self.hide_note_card();
+                    }
                 }
-                logging::trace(format!("note editor for card {id}"));
+                logging::trace(trace);
             }
             Err(error) => logging::error(format!("note editor: {error}")),
         }
@@ -2504,7 +2519,7 @@ impl App {
         };
         let image = self.sessions.note_return_image.take().unwrap_or(card_image);
         let from = self.note_editor_card_px();
-        let target = self.card_slot_px(index, self.line.items.len(), card_size);
+        let target = self.slot_px(index, self.line.items.len(), card_size, false);
         let dpi = self.screen_dpi();
         if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
             logging::trace(format!("unchanged note {id} flies back to its slot"));
@@ -2566,7 +2581,7 @@ impl App {
                     .position(|item| item.id == id)
                     .and_then(|index| {
                         let card_size = self.line.items[index].card_size;
-                        self.card_slot_px(index, self.line.items.len(), card_size)
+                        self.slot_px(index, self.line.items.len(), card_size, false)
                     });
                 if let Some(item) = self.line.items.iter_mut().find(|item| item.id == id) {
                     item.text = Some(text);
@@ -2593,7 +2608,7 @@ impl App {
                 let card_size = layout::card_size(notes::CARD_WIDTH, notes::CARD_HEIGHT);
                 let index = self.line.items.len();
                 let tilt = pseudo_random(id) * 5.0 - 2.5;
-                let target = self.flight_target_px(index, index + 1, card_size);
+                let target = self.slot_px(index, index + 1, card_size, true);
                 let mut flying = false;
                 let flight_image = return_image.unwrap_or_else(|| image.clone());
                 if let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) {
@@ -2649,9 +2664,41 @@ impl App {
         self.close_note_editor();
     }
 
-    /// Starts the editor-to-card flight for an existing note. The strip is
+    /// Flies a card back into `id`'s slot after its editor closed. The strip is
     /// brought down first (if it had retracted) and the card waits invisible in
-    /// its own slot, so the row never reflows around a note coming home.
+    /// its own slot, so the row never reflows around it coming home.
+    fn fly_card_back(&mut self, id: CardId, flight: CardFlight) -> bool {
+        let CardFlight {
+            token,
+            pin,
+            image,
+            from,
+            target,
+            tilt,
+            dpi,
+        } = flight;
+        self.release_flying_card();
+        self.present();
+        self.reveal(false, PEEK_SECONDS);
+        self.send_scene(Command::SetRehang { id, flying: true });
+        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
+            if flight.fly_decorated(token, image, from, target, tilt, 0.0, pin, dpi) {
+                self.windows.flight_idle_at = None;
+                self.book.flying_card = Some(id);
+                self.book.flying_rehang = true;
+                if let Some(flight) = self.windows.flight.as_ref() {
+                    // `present`/`reveal` may have put the strip above the
+                    // flight window; the landing card must stay on top.
+                    win32::set_topmost(flight.hwnd());
+                }
+                return true;
+            }
+        }
+        self.send_scene(Command::SetRehang { id, flying: false });
+        false
+    }
+
+    /// Starts the editor-to-card flight for an existing note.
     fn fly_note_back(
         &mut self,
         id: CardId,
@@ -2660,26 +2707,19 @@ impl App {
         tilt: f32,
         target: RectI,
         dpi: u32,
-    ) -> bool {
-        self.release_flying_card();
-        self.present();
-        self.reveal(false, PEEK_SECONDS);
-        self.send_scene(Command::SetRehang { id, flying: true });
-        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
-            if flight.fly_decorated(id, image, from, target, tilt, 0.0, PinMode::Arrive, dpi) {
-                self.windows.flight_idle_at = None;
-                self.book.flying_card = Some(id);
-                self.book.flying_rehang = true;
-                if let Some(flight) = self.windows.flight.as_ref() {
-                    // `present`/`reveal` may have put the strip above the
-                    // flight window; the landing note must stay on top.
-                    win32::set_topmost(flight.hwnd());
-                }
-                return true;
-            }
-        }
-        self.send_scene(Command::SetRehang { id, flying: false });
-        false
+    ) {
+        self.fly_card_back(
+            id,
+            CardFlight {
+                token: id,
+                pin: PinMode::Arrive,
+                image,
+                from,
+                target,
+                tilt,
+                dpi,
+            },
+        );
     }
 
     /// Stops tracking a card the flight window is carrying and makes that card
@@ -3171,7 +3211,7 @@ impl App {
             return;
         };
         let card_size = self.line.items[index].card_size;
-        let target = self.card_slot_px(index, self.line.items.len(), card_size);
+        let target = self.slot_px(index, self.line.items.len(), card_size, false);
         let from = from.or_else(|| self.current_card_px(id));
         let dpi = self.screen_dpi();
         let (Some(from), Some(target), Some(dpi)) = (from, target, dpi) else {
@@ -3180,35 +3220,23 @@ impl App {
             self.close_editor();
             return;
         };
-        self.release_flying_card();
-        self.present();
-        self.reveal(false, PEEK_SECONDS);
-        self.send_scene(Command::SetRehang { id, flying: true });
-        if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
-            if flight.fly_decorated(
-                ANNOTATE_CLOSE_TOKEN,
+        let flying = self.fly_card_back(
+            id,
+            CardFlight {
+                token: ANNOTATE_CLOSE_TOKEN,
+                pin: PinMode::Full,
                 image,
                 from,
                 target,
                 tilt,
-                0.0,
-                PinMode::Full,
                 dpi,
-            ) {
-                self.windows.flight_idle_at = None;
-                self.book.flying_card = Some(id);
-                self.book.flying_rehang = true;
-                self.book.annotate_close_at = Some(win32::now_seconds() + 2.0);
-                if let Some(flight) = self.windows.flight.as_ref() {
-                    // `present`/`reveal` may have put the strip above the
-                    // flight window; the landing picture must stay on top.
-                    win32::set_topmost(flight.hwnd());
-                }
-                return;
-            }
+            },
+        );
+        if flying {
+            self.book.annotate_close_at = Some(win32::now_seconds() + 2.0);
+        } else {
+            self.close_editor();
         }
-        self.send_scene(Command::SetRehang { id, flying: false });
-        self.close_editor();
     }
 
     /// Releases the annotation window (hidden or not) and its bookkeeping.
@@ -3978,28 +4006,19 @@ fn step_hover_physics(
     }
 
     // Keep the whole preview window (card + shadow padding) inside the work
-    // area; stop outward velocity so it does not buzz against the edge.
+    // area; drop the velocity that pushed it out so it does not buzz against
+    // the edge.
     let (card_w, card_h) = layout::note_card_size();
     let half_width = (card_w * 0.5 + NOTE_PADDING_DIP) * scale;
     let half_height = (card_h * 0.5 + NOTE_PADDING_DIP) * scale;
-    let min_x = work.left as f32 + half_width;
-    let max_x = work.right as f32 - half_width;
-    let min_y = work.top as f32 + half_height;
-    let max_y = work.bottom as f32 - half_height;
-    if hover.pos.0 < min_x {
-        hover.pos.0 = min_x;
-        hover.vel.0 = hover.vel.0.max(0.0);
-    } else if hover.pos.0 > max_x {
-        hover.pos.0 = max_x;
-        hover.vel.0 = hover.vel.0.min(0.0);
+    let clamped = clamp_center(hover.pos, half_width, half_height, work);
+    if clamped.0 != hover.pos.0 {
+        hover.vel.0 = 0.0;
     }
-    if hover.pos.1 < min_y {
-        hover.pos.1 = min_y;
-        hover.vel.1 = hover.vel.1.max(0.0);
-    } else if hover.pos.1 > max_y {
-        hover.pos.1 = max_y;
-        hover.vel.1 = hover.vel.1.min(0.0);
+    if clamped.1 != hover.pos.1 {
+        hover.vel.1 = 0.0;
     }
+    hover.pos = clamped;
     hover.center = hover.pos;
     if now >= hover.trace_at {
         logging::trace_args(format_args!(
@@ -4106,7 +4125,7 @@ fn count_inbox_files() -> usize {
 }
 
 fn inbox_path(folder: &std::path::Path) -> PathBuf {
-    let stamp = local_stamp();
+    let stamp = logging::local_stamp();
     let prefix = i18n::s().screenshot_file_prefix;
     let base = folder.join(format!("{prefix} {stamp}.png"));
     unique_path(folder, Path::new(base.file_name().unwrap_or_default()))
@@ -4134,54 +4153,6 @@ fn unique_path(folder: &std::path::Path, name: &std::path::Path) -> PathBuf {
     folder.join(format!("{stem} {}.{extension}", pseudo_random(1) as u32))
 }
 
-/// Local time as `yyyy-MM-dd HHmmss`, the format the WPF app used.
-fn local_stamp() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // The logging module owns the civil-date conversion for its timestamps;
-    // reuse the same algorithm with the local offset from the system.
-    let offset = local_offset_seconds();
-    let local = now as i64 + offset as i64;
-    let days = local.div_euclid(86_400);
-    let seconds = local.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}{:02}{:02}",
-        seconds / 3600,
-        (seconds % 3600) / 60,
-        seconds % 60
-    )
-}
-
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-fn local_offset_seconds() -> i32 {
-    use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
-    let mut info = TIME_ZONE_INFORMATION::default();
-    // SAFETY: the API fills the struct; the return value picks the bias.
-    let result = unsafe { GetTimeZoneInformation(&mut info) };
-    let bias = match result {
-        0 => info.Bias,
-        1 => info.Bias + info.StandardBias,
-        2 => info.Bias + info.DaylightBias,
-        _ => info.Bias,
-    };
-    -(bias * 60)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4202,7 +4173,7 @@ mod tests {
 
     #[test]
     fn stamp_shape_is_stable() {
-        let stamp = local_stamp();
+        let stamp = crate::logging::local_stamp();
         assert_eq!(stamp.len(), 17, "yyyy-MM-dd HHmmss");
         assert_eq!(&stamp[4..5], "-");
         assert_eq!(&stamp[10..11], " ");

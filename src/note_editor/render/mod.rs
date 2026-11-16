@@ -59,6 +59,7 @@ use crate::gfx::{
 use crate::logging;
 use crate::note_editor::display::{
     self, Block, DisplayDoc, DisplayLine, PAD_LEFT, PAD_TOP, PaperSize, ResizeZone, Style,
+    inside_rounded,
 };
 use crate::note_editor::model::{self, Doc, Motion};
 use crate::render::Present;
@@ -2006,7 +2007,7 @@ fn bake_shadow(width_px: u32, height_px: u32, scale: f32) -> ImageData {
     let mut mask = vec![0u8; width * height];
     for y in 0..height {
         for x in 0..width {
-            if inside_rounded(x as f32 + 0.5, y as f32 + 0.5, paper, radius) {
+            if inside_rounded(paper, radius, x as f32 + 0.5, y as f32 + 0.5) {
                 mask[y * width + x] = 255;
             }
         }
@@ -2025,30 +2026,6 @@ fn bake_shadow(width_px: u32, height_px: u32, scale: f32) -> ImageData {
         bgra[index * 4 + 3] = value;
     }
     ImageData::new(width as u32, height as u32, bgra)
-}
-
-fn inside_rounded(x: f32, y: f32, rect: RectF, radius: f32) -> bool {
-    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
-        return false;
-    }
-    let radius = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
-    let cx = if x < rect.left + radius {
-        rect.left + radius
-    } else if x > rect.right - radius {
-        rect.right - radius
-    } else {
-        x
-    };
-    let cy = if y < rect.top + radius {
-        rect.top + radius
-    } else if y > rect.bottom - radius {
-        rect.bottom - radius
-    } else {
-        y
-    };
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= radius * radius
 }
 
 fn blur_horizontal(source: &[u8], target: &mut [u8], width: usize, height: usize, radius: i32) {
@@ -2520,9 +2497,9 @@ mod tests {
     #[test]
     fn rounded_hit_matches_the_corners() {
         let rect = RectF::from_xywh(20.0, 20.0, 460.0, 360.0);
-        assert!(inside_rounded(250.0, 200.0, rect, 22.0));
-        assert!(!inside_rounded(21.0, 21.0, rect, 22.0));
-        assert!(inside_rounded(42.0, 42.0, rect, 22.0));
+        assert!(inside_rounded(rect, 22.0, 250.0, 200.0));
+        assert!(!inside_rounded(rect, 22.0, 21.0, 21.0));
+        assert!(inside_rounded(rect, 22.0, 42.0, 42.0));
     }
 
     #[test]

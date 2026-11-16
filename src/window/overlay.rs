@@ -27,17 +27,10 @@ use crate::scene::{Command, Scene};
 use crate::types::{FrameSnapshot, RectI};
 use crate::win32;
 use crate::window;
+use crate::window::SendHwnd;
 
 const CLASS_NAME: PCWSTR = w!("PeglineOverlay");
 const WINDOW_TITLE: PCWSTR = w!("Pegline");
-
-/// HWND is a raw pointer; the window outlives the thread because `shutdown`
-/// joins before destroying it.
-struct SendHwnd(HWND);
-
-// SAFETY: the thread never destroys or re-parents the window; it only uses the
-// handle with DirectComposition, which is free-threaded.
-unsafe impl Send for SendHwnd {}
 
 /// The cursor shape the line should show; only the hover buttons ask for a
 /// hand (the WPF card buttons used `Cursors.Hand`).

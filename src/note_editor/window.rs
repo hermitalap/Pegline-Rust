@@ -1294,19 +1294,28 @@ fn drag_resize(hwnd: HWND, cursor: (i32, i32), dpi: u32, shared: &Shared) {
         }
     }
     if let Some((centre, (width, height))) = applied {
-        // SAFETY: resizing our own top-level window, which is hidden from the
-        // taskbar and never activated by this call.
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                centre.0 - width / 2,
-                centre.1 - height / 2,
-                width,
-                height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-        }
+        place_window(
+            hwnd,
+            (centre.0 - width / 2, centre.1 - height / 2, width, height),
+        );
+    }
+}
+
+/// Places the editor window at `rect` (left, top, width, height) in screen
+/// pixels. The window stays hidden from the taskbar and is never activated.
+fn place_window(hwnd: HWND, rect: (i32, i32, i32, i32)) {
+    // SAFETY: placing our own top-level window; it is never activated by this
+    // call and never re-parented.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -1333,19 +1342,16 @@ fn finish_resize(hwnd: HWND, shared: &Shared) -> Option<PaperSize> {
         paper
     };
     let (width, height) = window_pixels(paper, scale);
-    // SAFETY: the final size of our own window, placed around the centre the
-    // drag kept fixed, so a release never shifts the paper.
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
+    // The centre the drag kept fixed, so a release never shifts the paper.
+    place_window(
+        hwnd,
+        (
             drag.centre.0 - width / 2,
             drag.centre.1 - height / 2,
             width,
             height,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
+        ),
+    );
     logging::trace(format!(
         "note editor resize: paper={}x{}",
         paper.width.round(),
@@ -1521,18 +1527,15 @@ fn reflow(hwnd: HWND, shared: &Shared) {
     };
     let frame = frame_for(monitor.work, paper, dpi);
     lock(&shared.resize).effective = frame.paper;
-    // SAFETY: re-placing our own window; it stays hidden from the taskbar.
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
+    place_window(
+        hwnd,
+        (
             frame.rect.left,
             frame.rect.top,
             frame.rect.width(),
             frame.rect.height(),
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
+        ),
+    );
 }
 
 /// `WM_GETMINMAXINFO` bounds the window: the smallest paper, the largest paper

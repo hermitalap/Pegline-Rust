@@ -377,7 +377,7 @@ impl super::App {
         if let (Some(area), Some(image), Some(dpi)) = (area, flight_image, self.screen_dpi()) {
             let card_size = layout::card_size(size_px.0 as f32, size_px.1 as f32);
             let index = self.line.items.len();
-            if let Some(end) = self.flight_target_px(index, index + 1, card_size) {
+            if let Some(end) = self.slot_px(index, index + 1, card_size, true) {
                 // A burst of captures must not queue flights: show the old card
                 // at its slot and let the flight window switch to the new one.
                 self.release_flying_card();

@@ -29,7 +29,6 @@ use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
-use windows::Win32::UI::Shell::DROPFILES;
 
 use crate::capture::dib::{bgra_to_dib, dib_to_bgra};
 use crate::types::ImageData;
@@ -113,7 +112,7 @@ pub fn write_image(
     // Build both payloads before opening the clipboard: the DIB copy is the
     // expensive part and other applications should not wait for it.
     let dib = bgra_to_dib(image)?;
-    let drop_list = file.map(hdrop_payload);
+    let drop_list = file.map(crate::win32::dropfiles_payload);
     let formats = formats();
     if formats.png == 0 {
         return Err("RegisterClipboardFormatW(PNG) returned 0".to_string());
@@ -451,28 +450,6 @@ fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Builds the `CF_HDROP` payload: a `DROPFILES` header with `fWide = TRUE`, the
-/// UTF-16 path, and a double NUL terminator.
-fn hdrop_payload(file: &Path) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-
-    let units: Vec<u16> = file.as_os_str().encode_wide().collect();
-    let header_len = std::mem::size_of::<DROPFILES>();
-    let mut bytes = vec![0u8; header_len + (units.len() + 2) * 2];
-
-    let files_offset = header_len as u32;
-    let offset = std::mem::offset_of!(DROPFILES, pFiles);
-    bytes[offset..offset + 4].copy_from_slice(&files_offset.to_le_bytes());
-    let offset = std::mem::offset_of!(DROPFILES, fWide);
-    bytes[offset..offset + 4].copy_from_slice(&1i32.to_le_bytes());
-    for (index, unit) in units.iter().enumerate() {
-        let offset = header_len + index * 2;
-        bytes[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
-    }
-    // The tail (the path's NUL plus the list's second NUL) is already zero.
-    bytes
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,9 +458,10 @@ mod tests {
     #[test]
     fn hdrop_payload_is_a_wide_dropfiles_list() {
         use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::DROPFILES;
 
         let path = Path::new(r"C:\shot.png");
-        let payload = hdrop_payload(path);
+        let payload = crate::win32::dropfiles_payload(path);
         let header_len = std::mem::size_of::<DROPFILES>();
         assert_eq!(read_u32(&payload, 0), Some(header_len as u32));
         let wide = std::mem::offset_of!(DROPFILES, fWide);

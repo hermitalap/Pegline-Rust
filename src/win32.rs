@@ -5,7 +5,7 @@
 //! caller can log it and degrade instead of unwrapping.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -21,7 +21,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{
-    FO_DELETE, FOLDERID_Desktop, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW,
+    DROPFILES, FO_DELETE, FOLDERID_Desktop, FOLDERID_Screenshots, KF_FLAG_DEFAULT, SHFILEOPSTRUCTW,
     SHFileOperationW, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -254,47 +254,48 @@ fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
     text.map(PathBuf::from)
 }
 
-/// Opens a file or folder with its default handler.
-pub fn shell_open(path: &std::path::Path) -> WinResult<()> {
-    let target = HSTRING::from(path.as_os_str());
+/// Runs `ShellExecuteW`'s fill for `file`, mapping its `<= 32` result to an error.
+fn shell_execute(verb: PCWSTR, label: &str, file: PCWSTR, params: PCWSTR) -> WinResult<()> {
     // SAFETY: ShellExecuteW only reads the NUL-terminated strings; no out-params.
     let result = unsafe {
         windows::Win32::UI::Shell::ShellExecuteW(
             None,
-            windows::core::w!("open"),
-            PCWSTR(target.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as usize <= 32 {
-        return Err(format!("ShellExecuteW returned {}", result.0 as usize));
-    }
-    Ok(())
-}
-
-/// Opens a file with its registered editor (`ShellExecuteW` verb `edit`).
-pub fn shell_edit(path: &std::path::Path) -> WinResult<()> {
-    let target = HSTRING::from(path.as_os_str());
-    // SAFETY: ShellExecuteW only reads the NUL-terminated strings; no out-params.
-    let result = unsafe {
-        windows::Win32::UI::Shell::ShellExecuteW(
-            None,
-            windows::core::w!("edit"),
-            PCWSTR(target.as_ptr()),
-            PCWSTR::null(),
+            verb,
+            file,
+            params,
             PCWSTR::null(),
             windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
         )
     };
     if result.0 as usize <= 32 {
         return Err(format!(
-            "ShellExecuteW(edit) returned {}",
+            "ShellExecuteW({label}) returned {}",
             result.0 as usize
         ));
     }
     Ok(())
+}
+
+/// Opens a file or folder with its default handler.
+pub fn shell_open(path: &std::path::Path) -> WinResult<()> {
+    let target = HSTRING::from(path.as_os_str());
+    shell_execute(
+        windows::core::w!("open"),
+        "open",
+        PCWSTR(target.as_ptr()),
+        PCWSTR::null(),
+    )
+}
+
+/// Opens a file with its registered editor (`ShellExecuteW` verb `edit`).
+pub fn shell_edit(path: &std::path::Path) -> WinResult<()> {
+    let target = HSTRING::from(path.as_os_str());
+    shell_execute(
+        windows::core::w!("edit"),
+        "edit",
+        PCWSTR(target.as_ptr()),
+        PCWSTR::null(),
+    )
 }
 
 /// Starts a program with one file argument, detached.
@@ -312,24 +313,12 @@ pub fn reveal_in_explorer(path: &std::path::Path) -> WinResult<()> {
     let arg = format!("/select,\"{}\"", path.display());
     let file = HSTRING::from("explorer.exe");
     let params = HSTRING::from(arg);
-    // SAFETY: as above; both strings are alive for the call.
-    let result = unsafe {
-        windows::Win32::UI::Shell::ShellExecuteW(
-            None,
-            PCWSTR::null(),
-            PCWSTR(file.as_ptr()),
-            PCWSTR(params.as_ptr()),
-            PCWSTR::null(),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as usize <= 32 {
-        return Err(format!(
-            "ShellExecuteW(explorer) returned {}",
-            result.0 as usize
-        ));
-    }
-    Ok(())
+    shell_execute(
+        PCWSTR::null(),
+        "explorer",
+        PCWSTR(file.as_ptr()),
+        PCWSTR(params.as_ptr()),
+    )
 }
 
 /// Moves files to the recycle bin. Explorer does the work, so the call must not
@@ -620,6 +609,31 @@ pub fn local_time_parts() -> (i32, u32, u32, u32, u32, u32) {
         time.wMinute as u32,
         time.wSecond as u32,
     )
+}
+
+/// Builds the `CF_HDROP` payload for one file: a `DROPFILES` header with
+/// `fWide = TRUE`, the path in UTF-16, and the list's double NUL terminator.
+///
+/// The bytes are written by field offset instead of casting the struct, so no
+/// padding byte is copied out of uninitialised memory.
+pub(crate) fn dropfiles_payload(file: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let units: Vec<u16> = file.as_os_str().encode_wide().collect();
+    let header_len = std::mem::size_of::<DROPFILES>();
+    let mut bytes = vec![0u8; header_len + (units.len() + 2) * 2];
+
+    let files_offset = header_len as u32;
+    let offset = std::mem::offset_of!(DROPFILES, pFiles);
+    bytes[offset..offset + 4].copy_from_slice(&files_offset.to_le_bytes());
+    let offset = std::mem::offset_of!(DROPFILES, fWide);
+    bytes[offset..offset + 4].copy_from_slice(&1i32.to_le_bytes());
+    for (index, unit) in units.iter().enumerate() {
+        let offset = header_len + index * 2;
+        bytes[offset..offset + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    // The tail (the path's NUL plus the list's second NUL) is already zero.
+    bytes
 }
 
 #[cfg(test)]

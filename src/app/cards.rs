@@ -36,48 +36,30 @@ impl super::App {
             .clamp(96.0, crate::capture::THUMB_MAX as f32) as u32
     }
 
-    /// Where the flight should land card `index` of `count`, in screen pixels.
-    ///
-    /// The landing spot is one full spacing beyond the last card of the
-    /// current row — half a spacing beyond the final slot — so the new card
-    /// lands clear of its neighbour; the row then slides left to centre it
-    /// (BEHAVIOR §5.2).
-    pub(super) fn flight_target_px(
-        &self,
-        index: usize,
-        count: usize,
-        card_size: (f32, f32),
-    ) -> Option<RectI> {
-        let overlay = self.windows.overlay.as_ref()?;
-        let window = win32::window_rect(overlay.hwnd())?;
-        let scale = overlay.scale().max(0.1);
-        let width_dip = overlay.width_px() as f32 / scale;
-        let x = layout::flight_slot_x(index, count, width_dip);
-        let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
-        let left = x - card_size.0 * 0.5;
-        Some(RectI::new(
-            window.left + (left * scale).round() as i32,
-            window.top + (top * scale).round() as i32,
-            window.left + ((left + card_size.0) * scale).round() as i32,
-            window.top + ((top + card_size.1) * scale).round() as i32,
-        ))
-    }
-
     /// Where card `index` of `count` will sit once the row settles, in screen
     /// pixels, ignoring any reveal offset. Used as the landing target when an
     /// edited note returns to its existing slot, including when the strip is
     /// still on its way down.
-    pub(super) fn card_slot_px(
+    ///
+    /// With `landing`, the slot is one full spacing beyond the last card of the
+    /// current row, so a flying card lands clear of its neighbour and the row
+    /// then slides left to centre it (BEHAVIOR 5.2).
+    pub(super) fn slot_px(
         &self,
         index: usize,
         count: usize,
         card_size: (f32, f32),
+        landing: bool,
     ) -> Option<RectI> {
         let overlay = self.windows.overlay.as_ref()?;
         let window = win32::window_rect(overlay.hwnd())?;
         let scale = overlay.scale().max(0.1);
         let width_dip = overlay.width_px() as f32 / scale;
-        let x = layout::slot_x(index, count, width_dip);
+        let x = if landing {
+            layout::flight_slot_x(index, count, width_dip)
+        } else {
+            layout::slot_x(index, count, width_dip)
+        };
         let top = layout::rope_y(x, width_dip) - layout::PIN_ABOVE + layout::CARD_OFFSET_BELOW_TOP;
         let left = x - card_size.0 * 0.5;
         Some(RectI::new(

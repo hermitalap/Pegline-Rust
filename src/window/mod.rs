@@ -26,6 +26,14 @@ pub mod overlay;
 pub mod preview;
 pub mod shortcuts;
 
+/// HWND is a raw pointer; the window outlives its render thread because the
+/// owner joins that thread before destroying the window.
+pub(crate) struct SendHwnd(pub(crate) HWND);
+
+// SAFETY: render threads only place, show, hide and draw into these windows;
+// they never destroy or re-parent them, and the owner joins before teardown.
+unsafe impl Send for SendHwnd {}
+
 use crate::logging;
 
 /// Tray icon callback: `lParam` is the mouse message, `wParam` the icon id.

@@ -32,6 +32,7 @@ use crate::spring::{Spring, ease};
 use crate::types::{ImageData, RectF, RectI};
 use crate::win32;
 use crate::window;
+use crate::window::SendHwnd;
 use paint::{draw_flight_card, drop_pose, paint, paint_pre_roll};
 
 const CLASS_NAME: PCWSTR = w!("PeglineFlight");
@@ -214,13 +215,6 @@ enum FlightCommand {
     },
     Stop,
 }
-
-/// HWND is a raw pointer; the window outlives the thread because `shutdown`
-/// joins before destroying it.
-struct SendHwnd(HWND);
-
-// SAFETY: the render thread only draws into the window's composition target.
-unsafe impl Send for SendHwnd {}
 
 /// The pooled flight window.
 pub struct Flight {

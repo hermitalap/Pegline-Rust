@@ -13,6 +13,8 @@
 
 use std::ops::Range;
 
+use crate::types::RectF;
+
 /// The paper the editor draws, DIP (NOTE-EDITOR.md §5.1).
 pub const PAPER_WIDTH: f32 = 460.0;
 pub const PAPER_HEIGHT: f32 = 360.0;
@@ -86,32 +88,34 @@ impl PaperSize {
     /// The window DIP origin is the window's top-left corner, so the paper
     /// starts at `MARGIN_DIP` on both axes.
     pub fn contains(self, x: f32, y: f32) -> bool {
-        let left = MARGIN_DIP;
-        let top = MARGIN_DIP;
-        let right = MARGIN_DIP + self.width;
-        let bottom = MARGIN_DIP + self.height;
-        if x < left || x >= right || y < top || y >= bottom {
-            return false;
-        }
-        let radius = RADIUS_DIP;
-        let cx = if x < left + radius {
-            left + radius
-        } else if x > right - radius {
-            right - radius
-        } else {
-            x
-        };
-        let cy = if y < top + radius {
-            top + radius
-        } else if y > bottom - radius {
-            bottom - radius
-        } else {
-            y
-        };
-        let dx = x - cx;
-        let dy = y - cy;
-        dx * dx + dy * dy <= radius * radius
+        let rect = RectF::from_xywh(MARGIN_DIP, MARGIN_DIP, self.width, self.height);
+        inside_rounded(rect, RADIUS_DIP, x, y)
     }
+}
+
+/// Whether a point is inside `rect` with rounded corners of `radius`.
+pub fn inside_rounded(rect: RectF, radius: f32, x: f32, y: f32) -> bool {
+    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+        return false;
+    }
+    let radius = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    let cx = if x < rect.left + radius {
+        rect.left + radius
+    } else if x > rect.right - radius {
+        rect.right - radius
+    } else {
+        x
+    };
+    let cy = if y < rect.top + radius {
+        rect.top + radius
+    } else if y > rect.bottom - radius {
+        rect.bottom - radius
+    } else {
+        y
+    };
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= radius * radius
 }
 
 impl Default for PaperSize {

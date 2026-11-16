@@ -1663,6 +1663,17 @@ impl EditorState {
         Ok(())
     }
 
+    /// Runs `edit` on the document, marking the text and the card bitmap dirty
+    /// when it changed something, and reports whether it did.
+    fn with_doc(&mut self, edit: impl FnOnce(&mut Doc) -> bool) -> bool {
+        let changed = self.doc.as_mut().is_some_and(edit);
+        if changed {
+            self.texts_dirty = true;
+            self.content_dirty = true;
+        }
+        changed
+    }
+
     fn apply(&mut self, command: Command) -> Step {
         match command {
             Command::Resize {
@@ -1686,39 +1697,19 @@ impl EditorState {
                 }
             }
             Command::Char(character) => {
-                if self.doc.as_mut().map(|doc| doc.type_char(character)) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.type_char(character));
             }
             Command::Backspace => {
-                if self.doc.as_mut().map(|doc| doc.backspace()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.backspace());
             }
             Command::Composition { text, cursor } => {
-                if self
-                    .doc
-                    .as_mut()
-                    .map(|doc| doc.set_composition(&text, cursor))
-                    == Some(true)
-                {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.set_composition(&text, cursor));
             }
             Command::CommitComposition(text) => {
-                if self.doc.as_mut().map(|doc| doc.commit_composition(&text)) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.commit_composition(&text));
             }
             Command::EndComposition => {
-                if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.clear_composition());
             }
             Command::FinishText => {
                 if let Some(doc) = self.doc.as_mut() {
@@ -1738,17 +1729,14 @@ impl EditorState {
                 }
                 // A composition Esc that slipped past the UI thread's guard
                 // still only cancels the pinyin: the text box stays open.
-                if self.doc.as_mut().map(|doc| doc.clear_composition()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
+                if self.with_doc(|doc| doc.clear_composition()) {
                     return Step::Continue;
                 }
                 if self.doc.as_ref().map(|doc| doc.is_typing()) == Some(true) {
-                    if let Some(doc) = self.doc.as_mut() {
+                    self.with_doc(|doc| {
                         doc.finish_text();
-                    }
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
+                        true
+                    });
                     return Step::Continue;
                 }
                 return self.cancel_event();
@@ -1758,19 +1746,13 @@ impl EditorState {
                 if self.doc.as_ref().map(|doc| doc.is_composing()) == Some(true) {
                     return Step::Continue;
                 }
-                if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.undo());
             }
             Command::Redo => {
                 if self.doc.as_ref().map(|doc| doc.is_composing()) == Some(true) {
                     return Step::Continue;
                 }
-                if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.redo());
             }
             Command::Save => return self.save_step(),
             Command::Stop => return Step::Stop,
@@ -1789,11 +1771,7 @@ impl EditorState {
         if image.width() <= 0.0 || !image.contains(x, y) {
             return None;
         }
-        let scale = self.canvas.scale.max(0.0001);
-        Some((
-            ((x - image.left) / scale).clamp(0.0, self.source_size.0 as f32),
-            ((y - image.top) / scale).clamp(0.0, self.source_size.1 as f32),
-        ))
+        Some(self.source_clamped(x, y))
     }
 
     /// Source coordinates, clamped to the picture even outside it.
@@ -2060,16 +2038,10 @@ impl EditorState {
                 }
             }
             Hit::Undo => {
-                if self.doc.as_mut().map(|doc| doc.undo()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.undo());
             }
             Hit::Redo => {
-                if self.doc.as_mut().map(|doc| doc.redo()) == Some(true) {
-                    self.texts_dirty = true;
-                    self.content_dirty = true;
-                }
+                self.with_doc(|doc| doc.redo());
             }
             Hit::Cancel => return self.cancel_event(),
             Hit::Save => return self.save_step(),
