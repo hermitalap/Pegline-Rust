@@ -1908,80 +1908,63 @@ mod tests {
     fn the_hit_test_names_every_region_of_the_window() {
         // 100 %: paper 20..480 x 20..380, window 500x400, corner grip 2 DIP.
         let paper = DEFAULT_PAPER;
-        let cases: &[(&str, (i32, i32, u32), Hit)] = &[
-            ("inside the paper", (250, 200, 96), Hit::Paper),
-            ("the shadow margin", (10, 200, 96), Hit::Margin),
-            // Inside the paper rectangle but outside the 22 DIP rounded corner.
-            ("the rounded corner", (21, 21, 96), Hit::Margin),
-            ("past the rounded corner", (45, 45, 96), Hit::Paper),
-            // The right and bottom bands reach into the paper by the grip.
-            (
-                "the right band in the margin",
-                (490, 200, 96),
-                Hit::Resize(ResizeZone::Right),
-            ),
-            (
-                "the right band in the paper",
-                (479, 200, 96),
-                Hit::Resize(ResizeZone::Right),
-            ),
-            (
-                "the bottom band",
-                (250, 390, 96),
-                Hit::Resize(ResizeZone::Bottom),
-            ),
-            (
-                "the band intersection",
-                (480, 380, 96),
-                Hit::Resize(ResizeZone::Corner),
-            ),
-            // The corner anchor is a 16 DIP square (24 before 2.6.2), not the
-            // 2 DIP band intersection: it reaches into the paper and over the
-            // shadow margin.
-            (
-                "the anchor's inner corner",
-                (464, 364, 96),
-                Hit::Resize(ResizeZone::Corner),
-            ),
-            (
-                "the anchor's outer corner",
-                (499, 399, 96),
-                Hit::Resize(ResizeZone::Corner),
-            ),
-            ("just left of the anchor", (463, 364, 96), Hit::Paper),
-            ("just above the anchor", (464, 363, 96), Hit::Paper),
-            (
-                "the far shadow corner in the anchor",
-                (495, 395, 96),
-                Hit::Resize(ResizeZone::Corner),
-            ),
-            // The top-right and bottom-left shadow corners stay commit areas.
-            ("the top-right shadow corner", (490, 10, 96), Hit::Margin),
-            ("the bottom-left shadow corner", (10, 390, 96), Hit::Margin),
-            ("below the window", (250, 410, 96), Hit::Outside),
-            ("left of the window", (-1, 200, 96), Hit::Outside),
-            // 200 %: the client point, bands and the 16 DIP anchor double.
-            ("200 % paper", (500, 400, 192), Hit::Paper),
-            (
-                "200 % anchor",
-                (928, 728, 192),
-                Hit::Resize(ResizeZone::Corner),
-            ),
-            ("200 % just left of the anchor", (926, 728, 192), Hit::Paper),
-            ("200 % margin", (30, 400, 192), Hit::Margin),
-            (
-                "200 % right band",
-                (970, 400, 192),
-                Hit::Resize(ResizeZone::Right),
-            ),
-        ];
-        for (name, (x, y, dpi), expected) in cases {
-            assert_eq!(
-                &hit_test(*x, *y, paper, *dpi),
-                expected,
-                "{name}: hit_test({x}, {y}, {dpi})"
-            );
-        }
+        assert_eq!(hit_test(250, 200, paper, 96), Hit::Paper);
+        assert_eq!(hit_test(10, 200, paper, 96), Hit::Margin);
+        // Inside the paper rectangle but outside the 22 DIP rounded corner.
+        assert_eq!(hit_test(21, 21, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(45, 45, paper, 96), Hit::Paper);
+        // The right and bottom bands reach into the paper by the grip.
+        assert_eq!(
+            hit_test(490, 200, paper, 96),
+            Hit::Resize(ResizeZone::Right)
+        );
+        assert_eq!(
+            hit_test(479, 200, paper, 96),
+            Hit::Resize(ResizeZone::Right)
+        );
+        assert_eq!(
+            hit_test(250, 390, paper, 96),
+            Hit::Resize(ResizeZone::Bottom)
+        );
+        assert_eq!(
+            hit_test(480, 380, paper, 96),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        // The corner anchor is a 16 DIP square (24 before 2.6.2), not the
+        // 2 DIP band intersection: it reaches into the paper and over the
+        // shadow margin.
+        assert_eq!(
+            hit_test(464, 364, paper, 96),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        assert_eq!(
+            hit_test(499, 399, paper, 96),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        assert_eq!(hit_test(463, 364, paper, 96), Hit::Paper);
+        assert_eq!(hit_test(464, 363, paper, 96), Hit::Paper);
+        // The far corner of the shadow is still part of the anchor.
+        assert_eq!(
+            hit_test(495, 395, paper, 96),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        // The top-right and bottom-left shadow corners stay commit areas.
+        assert_eq!(hit_test(490, 10, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(10, 390, paper, 96), Hit::Margin);
+        assert_eq!(hit_test(250, 410, paper, 96), Hit::Outside);
+        assert_eq!(hit_test(-1, 200, paper, 96), Hit::Outside);
+        // 200 %: the client point, bands and the 16 DIP anchor double.
+        assert_eq!(hit_test(500, 400, paper, 192), Hit::Paper);
+        assert_eq!(
+            hit_test(928, 728, paper, 192),
+            Hit::Resize(ResizeZone::Corner)
+        );
+        assert_eq!(hit_test(926, 728, paper, 192), Hit::Paper);
+        assert_eq!(hit_test(30, 400, paper, 192), Hit::Margin);
+        assert_eq!(
+            hit_test(970, 400, paper, 192),
+            Hit::Resize(ResizeZone::Right)
+        );
     }
 
     #[test]
@@ -2020,96 +2003,41 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_is_centred_and_clamped_in_the_work_area() {
-        struct Case {
-            name: &'static str,
-            work: crate::types::RectI,
-            paper: PaperSize,
-            dpi: u32,
-            /// Expected window rect: `(left, top, width, height)`.
-            rect: (i32, i32, i32, i32),
-            /// Expected paper; a clamped row shows less than it asked for.
-            paper_size: (f32, f32),
-        }
+    fn the_editor_is_centred_in_the_work_area() {
         let work = crate::types::RectI::new(0, 0, 1920, 1080);
-        let cases = [
-            Case {
-                name: "centred at 100 %",
-                work,
-                paper: DEFAULT_PAPER,
-                dpi: 96,
-                rect: (710, 340, 500, 400),
-                paper_size: (DEFAULT_PAPER.width, DEFAULT_PAPER.height),
-            },
-            Case {
-                // The centre is the same point in DIP at 200 %, so the paper's
-                // centre sits in the middle of the work area.
-                name: "centred at 200 %",
-                work,
-                paper: DEFAULT_PAPER,
-                dpi: 192,
-                rect: (460, 140, 1000, 800),
-                paper_size: (DEFAULT_PAPER.width, DEFAULT_PAPER.height),
-            },
-            Case {
-                name: "a work area away from the origin keeps the relative centre",
-                work: crate::types::RectI::new(200, 100, 2120, 1180),
-                paper: DEFAULT_PAPER,
-                dpi: 96,
-                rect: (910, 440, 500, 400),
-                paper_size: (DEFAULT_PAPER.width, DEFAULT_PAPER.height),
-            },
-            Case {
-                name: "a short work area centres what still fits",
-                work: crate::types::RectI::new(0, 0, 1024, 600),
-                paper: DEFAULT_PAPER,
-                dpi: 96,
-                rect: (262, 100, 500, 400),
-                paper_size: (DEFAULT_PAPER.width, DEFAULT_PAPER.height),
-            },
-            Case {
-                name: "a short work area clamps the paper to its edge",
-                work: crate::types::RectI::new(0, 0, 1024, 600),
-                paper: MAX_PAPER,
-                dpi: 96,
-                rect: (82, 0, 860, 600),
-                paper_size: (820.0, 560.0),
-            },
-            Case {
-                name: "a tiny work area shrinks the paper below its minimum",
-                work: crate::types::RectI::new(0, 0, 400, 300),
-                paper: DEFAULT_PAPER,
-                dpi: 96,
-                rect: (0, 0, 400, 300),
-                paper_size: (360.0, 260.0),
-            },
-        ];
-        for case in cases {
-            let frame = frame_for(case.work, case.paper, case.dpi);
-            assert_eq!(
-                (
-                    frame.rect.left,
-                    frame.rect.top,
-                    frame.rect.width(),
-                    frame.rect.height()
-                ),
-                case.rect,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                (frame.paper.width, frame.paper.height),
-                case.paper_size,
-                "{}",
-                case.name
-            );
-        }
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
+        assert_eq!((frame.rect.left, frame.rect.top), (710, 340));
 
-        // A centre near the work-area edge clamps the paper and keeps the
-        // centre: only the shadow margin is lost.
-        let work = crate::types::RectI::new(100, 100, 1000, 500);
-        let paper = available_paper((400, 300), work, 1.0);
-        assert_eq!(paper, (600.0 - 40.0, 400.0 - 40.0));
+        // At 200 % the window is 1000x800; the centre is the same point in DIP,
+        // so the paper's centre sits in the middle of the work area.
+        let frame = frame_for(work, DEFAULT_PAPER, 192);
+        assert_eq!((frame.rect.width(), frame.rect.height()), (1000, 800));
+        assert_eq!((frame.rect.left, frame.rect.top), (460, 140));
+
+        // A work area that is not at the origin keeps the same relative centre.
+        let work = crate::types::RectI::new(200, 100, 2120, 1180);
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.left, frame.rect.top), (910, 440));
+
+        // A short work area centres what still fits and clamps the paper.
+        let work = crate::types::RectI::new(0, 0, 1024, 600);
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.rect.left, frame.rect.top), (262, 100));
+        assert_eq!((frame.rect.width(), frame.rect.height()), (500, 400));
+        let frame = frame_for(work, MAX_PAPER, 96);
+        assert_eq!((frame.paper.width, frame.paper.height), (820.0, 560.0));
+        assert_eq!(frame.rect.top, 0);
+        assert_eq!(frame.rect.bottom, 600);
+    }
+
+    #[test]
+    fn a_tiny_work_area_shrinks_the_paper_below_its_minimum() {
+        let work = crate::types::RectI::new(0, 0, 400, 300);
+        let frame = frame_for(work, DEFAULT_PAPER, 96);
+        assert_eq!((frame.paper.width, frame.paper.height), (360.0, 260.0));
+        assert_eq!((frame.rect.width(), frame.rect.height()), (400, 300));
+        assert_eq!((frame.rect.left, frame.rect.top), (0, 0));
     }
 
     #[test]
@@ -2153,6 +2081,18 @@ mod tests {
         };
         let paper = resized_paper(&drag, (1310, 790), work, 96);
         assert_eq!((paper.width, paper.height), (660.0, DEFAULT_PAPER.height));
+    }
+
+    #[test]
+    fn a_work_area_too_small_for_the_paper_clamps_without_moving_the_centre() {
+        // Centre 300 px from the left edge of a 400 px tall work area: the
+        // window may reach 600 px wide (300 each way) and 800 px tall.
+        let work = crate::types::RectI::new(100, 100, 1000, 500);
+        let paper = available_paper((400, 300), work, 1.0);
+        assert_eq!(paper, (600.0 - 40.0, 400.0 - 40.0));
+        // Only the shadow margin is lost: 300 px each way minus 2x20 DIP.
+        assert_eq!(paper.0, 560.0);
+        assert_eq!(paper.1, 360.0);
     }
 
     /// Applies `next_applied` the way the render loop does, including the stop.
