@@ -153,7 +153,11 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Shared {
     fn send(&self, command: Command) {
-        let _ = lock(&self.tx).send(command);
+        // The receiver only goes away when the render thread panicked; a dropped
+        // Commit used to leave the editor on screen with no log at all.
+        if lock(&self.tx).send(command).is_err() {
+            logging::error("note editor: render thread is gone; command dropped");
+        }
     }
 
     /// Sends one pointer move and remembers when it was posted. The render
