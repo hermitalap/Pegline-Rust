@@ -73,7 +73,14 @@ pub fn read_screenshot() -> Result<Option<ImageData>, String> {
             }
             Ok(Some(image))
         }
-        Some(Payload::Dib(bytes)) => Ok(dib_to_bgra(&bytes)),
+        Some(Payload::Dib(bytes)) => match dib_to_bgra(&bytes) {
+            Some(image) => Ok(Some(image)),
+            None => {
+                // Counted as "not a screenshot" by the caller, so leave a trace.
+                crate::logging::trace("clipboard: unsupported CF_DIB payload");
+                Ok(None)
+            }
+        },
     }
 }
 

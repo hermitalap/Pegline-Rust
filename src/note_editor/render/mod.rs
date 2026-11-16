@@ -350,6 +350,9 @@ struct Assets {
     /// The resize hover highlight: the system highlight colour, drawn on the
     /// window layer so the paper bitmap and its ClearType stay untouched.
     hover: ID2D1SolidColorBrush,
+    /// The empty note's placeholder, already UTF-16, so a repaint does not
+    /// rebuild it every frame.
+    placeholder: Vec<u16>,
 }
 
 impl Assets {
@@ -397,6 +400,7 @@ impl Assets {
             fold_shade: solid(context, 0x000000, 0.12)?,
             error: solid(context, 0xC4_2B_1C, 1.0)?,
             hover: solid(context, system_highlight(), 1.0)?,
+            placeholder: crate::i18n::s().note_placeholder.encode_utf16().collect(),
         })
     }
 
@@ -516,6 +520,8 @@ pub struct EditorState {
     frames: u64,
     /// CPU time of the last painted frame, before `Present` blocks on vsync.
     last_paint_us: u32,
+    /// Reused buffer for the selection's display ranges, one line at a time.
+    selection_segments: Vec<Range<usize>>,
 }
 
 impl EditorState {
@@ -572,6 +578,7 @@ impl EditorState {
             parsed: Parsed::default(),
             frames: 0,
             last_paint_us: 0,
+            selection_segments: Vec::new(),
         };
         state.rebuild_scenery()?;
         state.rebuild_shadow()?;

@@ -384,15 +384,21 @@ impl DisplayLine {
         display
     }
 
-    /// The display ranges that a source selection covers on this line.
+    /// Fills `out` with the display ranges that a source selection covers on
+    /// this line, reusing the caller's buffer.
     ///
     /// A selection that spans hidden markers comes back as one contiguous
     /// range because those markers contribute no display text.
-    pub fn segments(&self, selection: Range<usize>, active: bool) -> Vec<Range<usize>> {
+    pub fn segments_into(
+        &self,
+        selection: Range<usize>,
+        active: bool,
+        out: &mut Vec<Range<usize>>,
+    ) {
+        out.clear();
         if selection.start >= self.source.end || selection.end <= self.source.start {
-            return Vec::new();
+            return;
         }
-        let mut segments: Vec<Range<usize>> = Vec::new();
         let mut display = 0;
         for run in self.visible_runs(active) {
             let start = selection.start.max(run.source.start);
@@ -400,14 +406,13 @@ impl DisplayLine {
             if start < end {
                 let from = display + (start - run.source.start);
                 let to = display + (end - run.source.start);
-                match segments.last_mut() {
+                match out.last_mut() {
                     Some(last) if last.end == from => last.end = to,
-                    _ => segments.push(from..to),
+                    _ => out.push(from..to),
                 }
             }
             display += run.text.len();
         }
-        segments
     }
 }
 
@@ -1114,12 +1119,16 @@ mod tests {
     #[test]
     fn selection_segments_span_hidden_markers() {
         let line = &make("a **bold** z").lines[0];
+        let mut segments: Vec<Range<usize>> = Vec::new();
         // Select the whole line: one contiguous display range.
-        assert_eq!(line.segments(0..12, false), vec![0..8]);
+        line.segments_into(0..12, false, &mut segments);
+        assert_eq!(segments, vec![0..8]);
         // Select just the bold word including markers: display 2..6.
-        assert_eq!(line.segments(2..10, false), vec![2..6]);
+        line.segments_into(2..10, false, &mut segments);
+        assert_eq!(segments, vec![2..6]);
         // A selection entirely inside a hidden marker is invisible.
-        assert_eq!(line.segments(2..4, false), Vec::<Range<usize>>::new());
+        line.segments_into(2..4, false, &mut segments);
+        assert!(segments.is_empty());
     }
 
     #[test]

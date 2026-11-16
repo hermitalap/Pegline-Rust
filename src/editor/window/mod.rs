@@ -1452,6 +1452,9 @@ struct EditorState {
     /// Marks as they were when the current eraser gesture began; committed as
     /// one undo step when the gesture ends.
     erase_before: Option<Vec<Mark>>,
+    /// Scratch hit flags for one eraser step, reused so a drag does not
+    /// allocate a vector per step.
+    erase_hits: Vec<bool>,
     /// The button under the pointer, for the hover state.
     hover: Option<Hit>,
     /// Card, photo, pin and every floating button, in DIP.
@@ -1516,6 +1519,7 @@ impl EditorState {
             width: WIDTHS[1],
             drag: None,
             erase_before: None,
+            erase_hits: Vec::new(),
             hover: None,
             layout,
             photo_mask: None,
@@ -1543,13 +1547,23 @@ impl EditorState {
             radiusY: radius,
         };
         // SAFETY: the factory and the struct are alive for the call.
-        self.photo_mask = unsafe {
+        match unsafe {
             self.surface
                 .factory
                 .CreateRoundedRectangleGeometry(&rounded)
+        } {
+            Ok(geometry) => match geometry.cast() {
+                Ok(mask) => self.photo_mask = Some(mask),
+                Err(error) => {
+                    logging::error(format!("editor photo mask: {error}"));
+                    self.photo_mask = None;
+                }
+            },
+            Err(error) => {
+                logging::error(format!("editor photo mask: {error}"));
+                self.photo_mask = None;
+            }
         }
-        .ok()
-        .and_then(|geometry| geometry.cast().ok());
     }
 
     fn width_dip(&self) -> f32 {
@@ -1652,7 +1666,7 @@ impl EditorState {
         // the window is composed with it in the same frame.
         self.content_dirty = true;
         self.lost = 0;
-        logging::error("editor surface rebuilt");
+        logging::trace("editor surface rebuilt");
         Ok(())
     }
 
@@ -1972,28 +1986,32 @@ impl EditorState {
 
     /// Removes every mark the eraser disc touches at `point`.
     fn erase_at(&mut self, point: (f32, f32), radius: f32) {
-        let Some(doc) = self.doc.as_ref() else {
-            return;
-        };
-        let hits: Vec<bool> = doc
-            .marks()
-            .iter()
-            .map(|mark| self.mark_hits_eraser(mark, point, radius))
-            .collect();
+        // The flags live on the surface so a fast drag reuses one buffer
+        // instead of allocating one vector per step.
+        let mut hits = std::mem::take(&mut self.erase_hits);
+        hits.clear();
+        if let Some(doc) = self.doc.as_ref() {
+            hits.extend(
+                doc.marks()
+                    .iter()
+                    .map(|mark| self.mark_hits_eraser(mark, point, radius)),
+            );
+        }
         if !hits.iter().any(|hit| *hit) {
+            self.erase_hits = hits;
             return;
         }
-        let Some(doc) = self.doc.as_mut() else {
-            return;
-        };
-        let mut index = 0;
-        doc.erase_marks(|_| {
-            let hit = hits[index];
-            index += 1;
-            hit
-        });
-        self.texts_dirty = true;
-        self.content_dirty = true;
+        if let Some(doc) = self.doc.as_mut() {
+            let mut index = 0;
+            doc.erase_marks(|_| {
+                let hit = hits[index];
+                index += 1;
+                hit
+            });
+            self.texts_dirty = true;
+            self.content_dirty = true;
+        }
+        self.erase_hits = hits;
     }
 
     /// Eraser hit test. Text uses its real layout box; the other marks use the
@@ -2750,7 +2768,12 @@ impl Surface {
         self.target_props.dpiY = self.dpi;
         self.card_props.dpiX = self.dpi;
         self.card_props.dpiY = self.dpi;
-        self.shadow = crate::render::bake_card_shadow(&self.context, self.dpi, 20.0, 5.0).ok();
+        match crate::render::bake_card_shadow(&self.context, self.dpi, 20.0, 5.0) {
+            Ok(shadow) => self.shadow = Some(shadow),
+            // The previous shadow is still usable; a DPI change is the likely
+            // cause and the next rebuild can succeed.
+            Err(error) => logging::error(format!("editor shadow: {error}")),
+        }
         Ok(())
     }
 

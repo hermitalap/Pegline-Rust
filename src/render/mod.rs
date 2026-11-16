@@ -255,8 +255,10 @@ fn create_layout(
 fn text_metrics(layout: &IDWriteTextLayout) -> DWRITE_TEXT_METRICS {
     let mut metrics = DWRITE_TEXT_METRICS::default();
     // SAFETY: writes one struct owned by this stack frame.
-    unsafe {
-        let _ = layout.GetMetrics(&mut metrics);
+    let result = unsafe { layout.GetMetrics(&mut metrics) };
+    if let Err(error) = result {
+        // A zero-sized metric would draw an invisible pill; say why.
+        crate::logging::error(format!("text metrics: {error}"));
     }
     metrics
 }
@@ -862,6 +864,9 @@ impl Renderer {
                 right: column * 512.0 + 512.0,
                 bottom: row * 256.0 + 256.0,
             };
+            // SAFETY: the context is live and owned by this renderer, the
+            // bitmap is a caller-provided Direct2D bitmap, and the rects are
+            // valid for the duration of the call.
             unsafe {
                 self.context.DrawBitmap(
                     bitmap,

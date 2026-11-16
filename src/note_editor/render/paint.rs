@@ -23,7 +23,6 @@ use super::{
     BORDER_DIP, LaidLine, RADIUS_DIP, color_of, d2d_rect, layout_end, layout_start, paper_rect,
     shadow_slices, utf16_offset,
 };
-use crate::i18n;
 use crate::note_editor::display::{self, Block, PAD_BOTTOM, PAD_LEFT, PAD_TOP, ResizeZone, Style};
 
 impl super::EditorState {
@@ -331,12 +330,14 @@ impl super::EditorState {
         }
     }
 
-    fn paint_selection(&self, context: &ID2D1RenderTarget, origin_x: f32) {
+    fn paint_selection(&mut self, context: &ID2D1RenderTarget, origin_x: f32) {
         let Some(selection) = self.doc.selection() else {
             return;
         };
         let mut stack = [DWRITE_HIT_TEST_METRICS::default(); RANGE_METRICS_ON_STACK];
         let mut spill: Vec<DWRITE_HIT_TEST_METRICS> = Vec::new();
+        // One reused buffer for every line: the paint path must not allocate.
+        let mut segments = std::mem::take(&mut self.selection_segments);
         for line in &self.lines {
             if !in_view(line, self.scroll, self.view_height) {
                 continue;
@@ -345,7 +346,8 @@ impl super::EditorState {
                 continue;
             };
             let display = &self.display.lines[line.index];
-            for segment in display.segments(selection.clone(), line.active) {
+            display.segments_into(selection.clone(), line.active, &mut segments);
+            for segment in segments.iter() {
                 // `segments` are base-display offsets; the layout text has the
                 // IME composition inserted at `composition.start`. Add its
                 // length for offsets after the insertion point instead of
@@ -374,6 +376,7 @@ impl super::EditorState {
                 }
             }
         }
+        self.selection_segments = segments;
     }
 
     fn paint_caret(&self, context: &ID2D1RenderTarget, origin_x: f32) {
@@ -399,8 +402,6 @@ impl super::EditorState {
         if !self.doc.is_empty() || self.composition.is_some() {
             return;
         }
-        let text = i18n::s().note_placeholder;
-        let wide: Vec<u16> = text.encode_utf16().collect();
         let rect = D2D_RECT_F {
             left: origin_x,
             top: PAD_TOP,
@@ -410,7 +411,7 @@ impl super::EditorState {
         // SAFETY: drawing on the paper target with the body format.
         unsafe {
             context.DrawText(
-                &wide,
+                &self.assets.placeholder,
                 &self.assets.body,
                 &rect,
                 &self.assets.marker,

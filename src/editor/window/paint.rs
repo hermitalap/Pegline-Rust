@@ -86,10 +86,29 @@ impl super::EditorState {
 
     /// Draws the opaque photo bitmap inside the rounded photo corners.
     fn paint_card_bitmap(&self, bitmap: &ID2D1Bitmap1) {
+        let photo = self.layout.photo;
+        let destination = d2d_rect(photo);
+        let source = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: self.layout.photo.width(),
+            bottom: self.layout.photo.height(),
+        };
         let Some(mask) = self.photo_mask.as_ref() else {
+            // A missing mask must not hide the picture: without the rounded
+            // geometry the photo gets square corners until it is rebuilt.
+            // SAFETY: the render target and the bitmap are alive for the call.
+            unsafe {
+                self.assets.rt.DrawBitmap(
+                    bitmap,
+                    Some(&destination),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    Some(&source),
+                );
+            }
             return;
         };
-        let photo = self.layout.photo;
         let parameters = D2D1_LAYER_PARAMETERS {
             contentBounds: d2d_rect(photo),
             geometricMask: ManuallyDrop::new(Some(mask.clone())),
@@ -98,13 +117,6 @@ impl super::EditorState {
             opacity: 1.0,
             opacityBrush: ManuallyDrop::new(None),
             layerOptions: D2D1_LAYER_OPTIONS_NONE,
-        };
-        let destination = d2d_rect(photo);
-        let source = D2D_RECT_F {
-            left: 0.0,
-            top: 0.0,
-            right: self.layout.photo.width(),
-            bottom: self.layout.photo.height(),
         };
         // SAFETY: the layer parameters and the rounded mask are alive for the
         // calls; an internal layer is used because none is passed.

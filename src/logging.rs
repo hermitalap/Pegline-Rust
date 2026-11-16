@@ -38,7 +38,8 @@ fn path(name: &str) -> Option<PathBuf> {
     STATE.get().map(|state| state.dir.join(name))
 }
 
-fn trace_enabled() -> bool {
+/// Whether tracing is on for this process. Lets a hot loop skip formatting.
+pub fn trace_enabled() -> bool {
     STATE.get().map(|state| state.trace).unwrap_or(false)
 }
 
@@ -73,6 +74,14 @@ pub fn error(message: impl AsRef<str>) {
 pub fn trace(message: impl AsRef<str>) {
     if trace_enabled() {
         write_line("trace.log", "TRACE", message.as_ref());
+    }
+}
+
+/// Records a trace event whose message is formatted only when tracing is on, so
+/// a hot loop does not build a `String` for a log that is not written.
+pub fn trace_args(args: std::fmt::Arguments<'_>) {
+    if trace_enabled() {
+        write_line("trace.log", "TRACE", &args.to_string());
     }
 }
 

@@ -303,7 +303,7 @@ impl NoteEditor {
                 drag: None,
             }),
             cursor_kind: AtomicU8::new(0),
-            trace_on: logging_trace_on(),
+            trace_on: logging::trace_enabled(),
             moves_posted: AtomicU64::new(0),
             move_ring: (0..MOVE_RING)
                 .map(|_| AtomicI64::new(0))
@@ -589,14 +589,6 @@ fn start_render_thread(
             Err("note editor render thread died during setup".to_string())
         }
     }
-}
-
-/// Mirrors `logging::init`: tracing is on when `PEGLINE_TRACE=1` or a
-/// `trace.on` file sits next to the settings. Duplicated only to decide whether
-/// the loop formats its measurements at all.
-fn logging_trace_on() -> bool {
-    std::env::var("PEGLINE_TRACE").as_deref() == Ok("1")
-        || win32::app_dir().join("trace.on").exists()
 }
 
 /// Monotonic microseconds from the same clock as `win32::now_seconds`. Only the
@@ -1406,6 +1398,8 @@ fn handle_key(message: u32, wparam: WPARAM, shared: &Shared) -> LRESULT {
     match message {
         WM_KEYDOWN => {
             if let Some(key) = key_code(wparam.0 as u32) {
+                // SAFETY: `GetKeyState` only reads this thread's key state; no
+                // pointers or handles are passed.
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
                 let control = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
                 if control && key == KeyCode::V {
@@ -1487,7 +1481,7 @@ fn handle_resize(
             if let Ok(mut ui) = shared.resize.lock() {
                 ui.effective = crate::note_editor::render::paper_of_window(width, height, dpi);
             }
-            if logging_trace_on() {
+            if logging::trace_enabled() {
                 logging::trace(format!("note editor WM_SIZE {width}x{height} dpi={dpi}"));
             }
             shared.send(Command::Resize {

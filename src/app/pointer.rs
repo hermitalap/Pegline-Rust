@@ -325,6 +325,8 @@ impl super::App {
         }
 
         let blocked = win32::foreground_is_fullscreen_on(screen.bounds);
+        // SAFETY: `GetAsyncKeyState` only reads this thread's key state; no
+        // pointers or handles are passed.
         let button_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
 
         // The render thread follows the pointer and ends the grab itself when
@@ -465,11 +467,7 @@ impl super::App {
                 press.moved = true;
                 logging::trace(format!("press moved {distance:.0}px, drag armed"));
             }
-            if !press.moved
-                && !press.handled
-                && now - press.since >= LONG_PRESS
-                && unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0
-            {
+            if !press.moved && !press.handled && now - press.since >= LONG_PRESS && button_down {
                 let id = press.id;
                 press.handled = true;
                 self.edit_item(id);
@@ -477,8 +475,7 @@ impl super::App {
         }
         // Start a drag once the pointer has clearly moved.
         if let Some(press) = self.state.pressed.as_ref() {
-            if press.moved && !press.handled && unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0
-            {
+            if press.moved && !press.handled && button_down {
                 let id = press.id;
                 self.start_drag(id);
             }

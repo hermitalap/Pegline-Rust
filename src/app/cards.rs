@@ -200,13 +200,15 @@ impl super::App {
             self.start_fall(id);
             self.remove_item(id);
         }
+        self.save_pegged();
     }
 
+    /// Takes a card off the line. The caller writes `pegged.txt` once the whole
+    /// batch is down: a loop over the line must not write the file per card.
     pub(super) fn remove_item(&mut self, id: CardId) {
         if let Some(position) = self.line.items.iter().position(|item| item.id == id) {
             self.line.items.remove(position);
             self.send_scene(Command::RemoveCard { id });
-            self.save_pegged();
         }
     }
 

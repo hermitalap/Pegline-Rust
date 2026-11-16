@@ -7,7 +7,6 @@
 //! down with it.
 
 use std::cell::{Cell, RefCell};
-use std::panic::AssertUnwindSafe;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
@@ -168,9 +167,8 @@ pub fn create_message_window(
 
 /// Runs the message loop until `WM_QUIT`. Returns the quit code.
 ///
-/// `DispatchMessageW` is wrapped in `catch_unwind`: a panic in a window
-/// procedure is logged and the loop continues, which is what keeps a tray app
-/// usable after one bad frame.
+/// Panics are caught inside every window procedure, not here: a panic crossing
+/// `extern "system"` aborts the process, so this loop only dispatches.
 pub fn message_loop() -> i32 {
     let mut message = MSG::default();
     loop {
@@ -187,12 +185,9 @@ pub fn message_loop() -> i32 {
             return message.wParam.0 as i32;
         }
         // SAFETY: messages are dispatched to this thread's windows.
-        let dispatched = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
-        }));
-        if dispatched.is_err() {
-            logging::error("panic while dispatching a window message");
         }
     }
     0

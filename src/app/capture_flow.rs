@@ -41,7 +41,7 @@ impl super::App {
             let thumb_max = self.thumb_max();
             let note = notes::is_note(&path);
             let color = self.settings.note_color(&file_name(&path));
-            let _ = std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("pegline-restore".to_string())
                 .spawn(move || {
                     let (thumb, text) = if note {
@@ -76,6 +76,16 @@ impl super::App {
                     });
                     window::wake();
                 });
+            if let Err(error) = spawned {
+                // `restore_pending` is only decremented by `on_restore_ready`,
+                // which this thread would have sent; leaving it standing would
+                // make every later save bail out for the rest of the process.
+                logging::error(format!("restore thread: {error}"));
+                self.capture.restore_pending = self.capture.restore_pending.saturating_sub(1);
+                if self.capture.restore_pending == 0 {
+                    self.save_pegged();
+                }
+            }
         }
     }
 
@@ -161,7 +171,7 @@ impl super::App {
         let thread_path = path.clone();
         let want_flight = area.is_some();
         let thumb_max = self.thumb_max();
-        let _ = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("pegline-decode".to_string())
             .spawn(move || {
                 let thumb = match wic::decode_scaled(&thread_path, thumb_max) {
@@ -204,6 +214,13 @@ impl super::App {
                 });
                 window::wake();
             });
+        if let Err(error) = spawned {
+            // Nothing will send `CaptureReady` for this path, so forget the
+            // candidate: a twin arriving later must not fold into a card that
+            // never appears. The keypress would otherwise do nothing silently.
+            logging::error(format!("decode thread: {error}"));
+            self.capture.recent.retain(|recent| recent.path != path);
+        }
     }
 
     /// Forgets captures older than the twin window.

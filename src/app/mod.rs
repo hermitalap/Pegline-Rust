@@ -1311,9 +1311,13 @@ impl App {
                 }
             }
         }
+        if gone.is_empty() {
+            return;
+        }
         for id in gone {
             self.remove_item(id);
         }
+        self.save_pegged();
     }
 
     /// Destroys pooled helper windows after they have been idle long enough
@@ -1581,7 +1585,10 @@ impl App {
                     hover.center = center;
                     hover.angle = layout::NOTE_PEEK_ANGLE_DEG * (1.0 - k);
                     if now >= hover.trace_at {
-                        logging::trace(format!("hover fly-in t={t:.2} center={:?}", hover.center));
+                        logging::trace_args(format_args!(
+                            "hover fly-in t={t:.2} center={:?}",
+                            hover.center
+                        ));
                         hover.trace_at = now + 0.1;
                     }
                     if t >= 1.0 {
@@ -1634,7 +1641,10 @@ impl App {
                         step_hover_spin(hover, 0.0, dt);
                     }
                     if now >= hover.trace_at {
-                        logging::trace(format!("hover fly-out t={t:.2} center={:?}", hover.center));
+                        logging::trace_args(format_args!(
+                            "hover fly-out t={t:.2} center={:?}",
+                            hover.center
+                        ));
                         hover.trace_at = now + 0.1;
                     }
                     if t >= 1.0 {
@@ -2761,6 +2771,7 @@ impl App {
                 self.start_fall(id);
                 self.remove_item(id);
                 self.close_note_editor();
+                self.save_pegged();
             }
             Err(error) => {
                 logging::error(format!("archive note: {error}"));
@@ -3340,6 +3351,7 @@ impl App {
             return;
         }
         self.remove_item(id);
+        self.save_pegged();
     }
 
     fn discard(&mut self, id: CardId) {
@@ -3367,6 +3379,7 @@ impl App {
                 });
         }
         self.remove_item(id);
+        self.save_pegged();
     }
 
     /// "Move to Recycle Bin": recycles the file even when it is not ours, then
@@ -3387,6 +3400,7 @@ impl App {
                 let _ = tx.send(Event::TrashDone { paths: vec![path] });
             });
         self.remove_item(id);
+        self.save_pegged();
     }
 
     /// Starts the falling animation for a card that is leaving the line.
@@ -3429,6 +3443,7 @@ impl App {
                 self.remove_item(id);
             }
         }
+        self.save_pegged();
     }
 
     fn clear_inbox(&mut self) {
@@ -3454,6 +3469,7 @@ impl App {
         {
             self.remove_item(id);
         }
+        self.save_pegged();
         let tx = self.events_tx.clone();
         let list = files.clone();
         let _ = std::thread::Builder::new()
@@ -3482,6 +3498,7 @@ impl App {
         let card_size = item.card_size;
         if !path.exists() {
             self.remove_item(id);
+            self.save_pegged();
             return;
         }
         // Click-through while dragging so the drop target under the pointer is
@@ -3540,6 +3557,7 @@ impl App {
         let moved = effect & 2 != 0; // DROPEFFECT_MOVE
         if moved && !path.exists() {
             self.remove_item(id);
+            self.save_pegged();
         }
         self.update_click_through();
     }
@@ -4033,7 +4051,7 @@ fn step_hover_physics(
     }
     hover.center = hover.pos;
     if now >= hover.trace_at {
-        logging::trace(format!(
+        logging::trace_args(format_args!(
             "hover physics center={:?} lean={:.2}",
             hover.center, hover.angle
         ));
