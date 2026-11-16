@@ -41,12 +41,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, IDYES, KillTimer, MB_ICONQUESTION,
-    MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING, MSLLHOOKSTRUCT, MessageBoxW,
-    PostMessageW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowsHookExW,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, UnhookWindowsHookEx, WH_MOUSE_LL,
-    WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_TIMER,
+    AppendMenuW, CallNextHookEx, CreatePopupMenu, DestroyMenu, DestroyWindow, GWLP_USERDATA, IDYES,
+    KillTimer, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MF_SEPARATOR, MF_STRING,
+    MSLLHOOKSTRUCT, MessageBoxW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, UnhookWindowsHookEx, WH_MOUSE_LL, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
+    WM_DESTROY, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NULL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_TIMER,
 };
 use windows::core::{PCWSTR, w};
 
@@ -484,11 +485,22 @@ pub fn run() -> i32 {
 
     let code = window::message_loop();
 
-    // SAFETY: the loop has ended and this thread runs no window procedure any
-    // more. `shutdown` releases the tray icon, the hooks and the render threads;
-    // the hidden window itself is left to the process exit.
+    // SAFETY: the loop has ended and this thread runs no window procedure that
+    // could observe `App` any more. The pointer in `GWLP_USERDATA` is cleared
+    // first: `OleUninitialize`/`CoUninitialize` in `drop(com)` may run a modal
+    // loop that dispatches our pending messages, and `shutdown` releases
+    // timers, hooks and render threads. Only after that is the window destroyed
+    // and the box released, so a late message finds a null pointer and goes to
+    // `DefWindowProcW` instead of a freed `App`.
     unsafe {
+        let hwnd = (*raw).hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         (*raw).shutdown();
+        // The timers still point at the window; killing them before destroying
+        // it keeps a stray tick from arriving during teardown.
+        let _ = KillTimer(Some(hwnd), TIMER_TICK);
+        let _ = KillTimer(Some(hwnd), TIMER_NOTE);
+        let _ = DestroyWindow(hwnd);
         drop(Box::from_raw(raw));
     }
     drop(com);
@@ -3823,8 +3835,10 @@ enum CardAction {
 
 /// Window procedure for the hidden message window.
 ///
-/// SAFETY: `GWLP_USERDATA` holds the boxed `App` pointer for the lifetime of the
-/// window; all messages are delivered on the thread that created it.
+/// SAFETY: `GWLP_USERDATA` holds the boxed `App` pointer only while the message
+/// loop runs; `run` clears it before shutdown and destroys the window before
+/// releasing the box, so a late message sees a null pointer. All messages are
+/// delivered on the thread that created the window.
 unsafe extern "system" fn hidden_wndproc(
     hwnd: HWND,
     message: u32,
