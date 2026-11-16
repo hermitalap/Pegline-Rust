@@ -93,11 +93,6 @@ pub fn color(color: usize) -> NoteColor {
     PALETTE[color.min(COLOR_COUNT - 1)]
 }
 
-/// The swatch shown for a colour: the edge, a little deeper than the paper.
-pub fn swatch(color: usize) -> u32 {
-    self::color(color).edge
-}
-
 /// `%LOCALAPPDATA%\Pegline\Notes`.
 pub fn folder() -> PathBuf {
     win32::local_dir().join("Notes")
@@ -341,25 +336,6 @@ pub fn render_preview(text: &str, color_index: usize, scale: f32) -> Option<Imag
     for pixel in pixels.chunks_exact_mut(4) {
         pixel[3] = 255;
     }
-    Some(ImageData::new(width, height, pixels))
-}
-
-/// Renders only the blank paper (gradient and dog-ear) at `width_dip` x
-/// `height_dip`.
-///
-/// The discard animation starts from the editor's paper, which is far larger
-/// than a card, so it needs a bitmap of its own: stretching the card bitmap
-/// would blow the dog-ear up by the size ratio.
-pub fn render_paper(width_dip: f32, height_dip: f32, color_index: usize) -> Option<ImageData> {
-    // Two pixels per DIP covers a 200% display without an upscale.
-    const PAPER_SCALE: u32 = 2;
-    let width = (width_dip * PAPER_SCALE as f32).round() as u32;
-    let height = (height_dip * PAPER_SCALE as f32).round() as u32;
-    if width < 2 || height < 2 {
-        return None;
-    }
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    paint_paper(&mut pixels, width, height, color_index, PAPER_SCALE as f32);
     Some(ImageData::new(width, height, pixels))
 }
 
@@ -627,7 +603,6 @@ mod tests {
         assert_eq!(COLOR_COUNT, 4);
         assert_eq!(color(0).paper, 0xFFF4B8);
         assert_eq!(color(99).ink, color(3).ink);
-        assert_eq!(swatch(1), 0xBAE1F9);
     }
 
     #[test]
@@ -670,31 +645,6 @@ mod tests {
         let image = render_preview("", 3, 2.0).expect("a blank preview sheet");
         assert_eq!((image.width, image.height), (816, 528));
         assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
-    }
-
-    #[test]
-    fn the_discard_paper_matches_the_editor_size() {
-        // The editor's paper is 460x360 DIP; the throw-away bitmap is rendered
-        // at two pixels per DIP so a 200% display shows it 1:1.
-        let image = render_paper(460.0, 360.0, 0).expect("a paper bitmap");
-        assert_eq!((image.width, image.height), (920, 720));
-        assert!(image.bgra.chunks_exact(4).all(|pixel| pixel[3] == 255));
-        // The dog-ear is 13 DIP whatever the paper size: the first pixel of the
-        // fold square is the lifted edge colour, not the paper.
-        let palette = color(0);
-        let edge = rgb(palette.edge);
-        let fold = (13.0 * 2.0) as u32;
-        let x = image.width - fold;
-        let y = image.height - fold;
-        let index = ((y * image.width + x) * 4) as usize;
-        assert_eq!(
-            (
-                image.bgra[index + 2],
-                image.bgra[index + 1],
-                image.bgra[index]
-            ),
-            (edge[0], edge[1], edge[2])
-        );
     }
 
     #[test]

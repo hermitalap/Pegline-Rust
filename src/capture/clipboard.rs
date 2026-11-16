@@ -66,11 +66,6 @@ pub fn read_screenshot() -> Result<Option<ImageData>, String> {
         Some(Payload::Png(bytes)) => {
             let image = crate::capture::wic::decode_bytes(&bytes, u32::MAX)
                 .map_err(|error| format!("decode clipboard PNG: {error}"))?;
-            if !image.is_valid() {
-                return Err(
-                    "decode clipboard PNG: decoder returned an invalid BGRA buffer".to_string(),
-                );
-            }
             Ok(Some(image))
         }
         Some(Payload::Dib(bytes)) => match dib_to_bgra(&bytes) {

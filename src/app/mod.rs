@@ -72,7 +72,7 @@ use crate::window::flight::{FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
 use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_card_dip};
-use crate::window::{self, WM_APP_QUIT, WM_APP_WAKE, WM_TRAY_CALLBACK};
+use crate::window::{self, WM_APP_WAKE, WM_TRAY_CALLBACK};
 
 const CLASS_NAME: PCWSTR = w!("PeglineMessage");
 const WINDOW_TITLE: PCWSTR = w!("Pegline");
@@ -836,10 +836,6 @@ impl App {
             }
             WM_APP_WAKE => {
                 self.tick();
-                Some(LRESULT(0))
-            }
-            WM_APP_QUIT => {
-                self.request_quit();
                 Some(LRESULT(0))
             }
             WM_TRAY_CALLBACK => {
@@ -2248,7 +2244,6 @@ impl App {
             true,
             (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
             image,
-            None,
             false,
             false,
             true,
@@ -2659,7 +2654,6 @@ impl App {
                     true,
                     (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
                     image,
-                    None,
                     true,
                     flying,
                     true,
@@ -3531,13 +3525,12 @@ impl App {
         // only when the file is small enough that reading it here is not a
         // stall. `drag_file` takes ownership so the bytes are not copied again.
         let png = if note { Vec::new() } else { drag_png(&path) };
-        let image = ImageData::new(1, 1, vec![0, 0, 0, 0]);
         self.state.dragging = true;
         // `DoDragDrop` pumps this thread's messages while `&mut self` is live;
         // the ghost follows the pointer from its own render thread, so nothing
         // else has to run in here.
         let _modal = window::ModalGuard::enter();
-        let effect = match crate::dragdrop::drag_file(self.hwnd, &path, &image, png) {
+        let effect = match crate::dragdrop::drag_file(&path, png) {
             Ok(effect) => effect,
             Err(error) => {
                 logging::error(format!("drag: {error}"));
@@ -3647,7 +3640,6 @@ impl App {
     }
 
     fn handle_clipboard(&mut self) {
-        let now = win32::now_seconds();
         let tx = self.events_tx.clone();
         let foreground = win32::foreground_rect().map(|(_, rect)| rect);
         let pointer = win32::cursor_pos().unwrap_or((0, 0));
@@ -3712,7 +3704,6 @@ impl App {
                     clip_hash: Some(hash),
                 });
                 window::wake();
-                let _ = now;
             });
     }
 
@@ -3863,12 +3854,7 @@ unsafe extern "system" fn hidden_wndproc(
         // The rest is queued and re-posted when the outermost loop exits.
         if matches!(
             message,
-            WM_CLIPBOARDUPDATE
-                | WM_HOTKEY
-                | WM_APP_QUIT
-                | WM_TRAY_CALLBACK
-                | WM_APP_WAKE
-                | WM_CLOSE
+            WM_CLIPBOARDUPDATE | WM_HOTKEY | WM_TRAY_CALLBACK | WM_APP_WAKE | WM_CLOSE
         ) {
             window::defer_message(hwnd, message, wparam, lparam);
             return LRESULT(0);

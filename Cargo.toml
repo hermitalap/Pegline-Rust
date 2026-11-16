@@ -29,6 +29,8 @@ features = [
   "Win32_Graphics_Imaging",
   "Win32_Globalization",
   "Win32_Media_Audio",
+  # CreateMutexW's generated signature names Security::SECURITY_ATTRIBUTES, so
+  # this feature is required even though no code mentions it.
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Com_StructuredStorage",
@@ -47,7 +49,7 @@ features = [
   "Win32_UI_HiDpi",
   "Win32_UI_Input_Ime",
   "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_Shell_Common",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ]
 

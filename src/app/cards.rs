@@ -125,7 +125,6 @@ impl super::App {
         own: bool,
         size_px: (u32, u32),
         thumb: ImageData,
-        area: Option<RectI>,
         arriving: bool,
         flying: bool,
         note: bool,
@@ -167,7 +166,6 @@ impl super::App {
         if flying {
             self.send_scene(Command::SetFlying { id, flying: true });
         }
-        let _ = area;
         self.enforce_capacity();
         self.save_pegged();
         self.state.empty_since = None;

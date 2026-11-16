@@ -220,10 +220,6 @@ impl HoverState {
         self.stamp = 0;
         self.requested = false;
     }
-
-    pub fn is_active(&self) -> bool {
-        self.id.is_some()
-    }
 }
 
 #[cfg(test)]

@@ -3,9 +3,7 @@
 //!
 //! A child module of its parent, so it reads `EditorState`'s private fields and
 //! adds its own `impl super::EditorState` block instead of widening any field;
-//! only the two entry points the parent calls are `pub(super)`. The code is the
-//! parent's painting slice moved verbatim: same calls, same order, same
-//! transforms, same antialias modes and the same layer push/pop.
+//! only the two entry points the parent calls are `pub(super)`.
 
 use std::mem::ManuallyDrop;
 

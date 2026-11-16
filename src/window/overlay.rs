@@ -216,10 +216,6 @@ impl Overlay {
         }
     }
 
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-
     /// Moves and resizes the window for a monitor's work area and DPI.
     pub fn place(&mut self, work: RectI, dpi: u32) {
         let width_px = work.width().max(1) as u32;
@@ -268,10 +264,6 @@ impl Overlay {
 
     pub fn width_px(&self) -> u32 {
         self.width_px
-    }
-
-    pub fn height_px(&self) -> u32 {
-        self.height_px
     }
 
     /// Stops the render thread and destroys the window. Idempotent.

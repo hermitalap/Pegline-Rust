@@ -15,7 +15,7 @@ use std::sync::atomic::{
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
@@ -807,11 +807,18 @@ fn render_thread(
         // draining and drawing instead of sleeping between single commands.
         if batch.is_empty() {
             let now = win32::now_seconds();
-            let timeout = state.tick_in(now).unwrap_or(Duration::from_secs(3600));
-            match rx.recv_timeout(timeout) {
-                Ok(command) => batch.push(command),
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            match state.tick_in(now) {
+                Some(timeout) => match rx.recv_timeout(timeout) {
+                    Ok(command) => batch.push(command),
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                // Nothing is queued and nothing is due, so a blocking receive
+                // is the same wait without a wake-up that has no work to do.
+                None => match rx.recv() {
+                    Ok(command) => batch.push(command),
+                    Err(_) => break,
+                },
             }
         }
         // Drain everything that is ready, up to a bounded batch, so one frame

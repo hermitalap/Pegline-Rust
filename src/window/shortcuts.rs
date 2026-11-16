@@ -26,10 +26,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, IsWindow, MSG, PostMessageW, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_QUIT, WS_CAPTION, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
+    GetWindowLongPtrW, IsWindow, MSG, PostMessageW, SW_SHOW, SetForegroundWindow,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_PAINT, WM_QUIT, WS_CAPTION,
+    WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -101,7 +101,6 @@ pub fn ask(
         pressed: None,
         partial: false,
         error: String::new(),
-        hover: None,
         down: None,
         buttons: [RectI::default(); 3],
         choice: None,
@@ -164,15 +163,6 @@ pub fn ask(
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-        );
     }
 
     // Local modal loop: the app's own timers arrive here too, so the line keeps
@@ -226,7 +216,6 @@ struct State {
     /// True while only modifiers are down; OK stays disabled.
     partial: bool,
     error: String,
-    hover: Option<usize>,
     down: Option<usize>,
     /// Button rectangles in client pixels, left to right:
     /// 0 = no shortcut, 1 = cancel, 2 = OK.
@@ -626,18 +615,6 @@ unsafe fn dialog_wndproc_inner(
             LRESULT(0)
         }
         WM_CHAR => LRESULT(0),
-        WM_MOUSEMOVE => {
-            let x = (lparam.0 & 0xFFFF) as i16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let hover = state.button_at(x, y);
-            if state.hover != hover {
-                state.hover = hover;
-                let _ = unsafe {
-                    windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false)
-                };
-            }
-            LRESULT(0)
-        }
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -707,11 +684,6 @@ pub fn available(hwnd: HWND, hotkey: Hotkey) -> bool {
     }
 }
 
-/// The reason a combination cannot be used, for the app's validator.
-pub fn conflict(reason: &str) -> String {
-    reason.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +702,5 @@ mod tests {
     #[test]
     fn client_size_is_scaled() {
         let _ = core::mem::size_of::<State>();
-        let _ = conflict("x");
     }
 }

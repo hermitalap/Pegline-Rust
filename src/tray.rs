@@ -82,21 +82,6 @@ pub struct MenuState {
     pub note_key: String,
 }
 
-impl Default for MenuState {
-    fn default() -> Self {
-        Self {
-            revealed: false,
-            line_always: false,
-            catch_clipboard: true,
-            sound_on: true,
-            autostart: false,
-            caught_files: 0,
-            live_cards: 1,
-            note_key: "Ctrl+Alt+N".to_string(),
-        }
-    }
-}
-
 /// The live tray icon.
 pub struct Tray {
     hwnd: HWND,

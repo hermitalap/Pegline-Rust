@@ -607,7 +607,6 @@ fn main() {}
     // Let the opening frame and the flight image settle before sampling.
     pump_for(Duration::from_millis(600), &editor);
     let (private_open, ws_open) = process_memory_mb();
-    let (private_before, _) = process_memory_mb();
 
     let mut paint_us: Vec<f64> = Vec::new();
     let mut draw_us: Vec<f64> = Vec::new();
@@ -680,11 +679,11 @@ fn main() {}
     let draw_p95 = percentile(&draw_us, 0.95);
     let (width, height) = window_px(paper);
     let mut line = format!(
-        "PROBE mode=note paper={}x{} window={width}x{height} dpi={dpi} cycles={} open={private_open:.1}MB before={private_before:.1}MB after={private_after:.1}MB drift={:.1}MB",
+        "PROBE mode=note paper={}x{} window={width}x{height} dpi={dpi} cycles={} open={private_open:.1}MB after={private_after:.1}MB drift={:.1}MB",
         paper.width,
         paper.height,
         config.cycles,
-        private_after - private_before,
+        private_after - private_open,
     );
     line.push_str(&format!(
         " timeouts={timeouts} paint_p50={paint_p50:.2}ms paint_p95={paint_p95:.2}ms draw_p50={draw_p50:.3}ms draw_p95={draw_p95:.3}ms ws={ws_after:.1}MB open_ws={ws_open:.1}MB"

@@ -205,10 +205,6 @@ impl Preview {
         })
     }
 
-    pub fn hwnd(&self) -> HWND {
-        self.hwnd
-    }
-
     pub fn is_visible(&self) -> bool {
         self.visible
     }

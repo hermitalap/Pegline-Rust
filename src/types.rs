@@ -64,30 +64,12 @@ impl RectF {
         )
     }
 
-    pub fn union(&self, other: &RectF) -> Self {
-        Self::new(
-            self.left.min(other.left),
-            self.top.min(other.top),
-            self.right.max(other.right),
-            self.bottom.max(other.bottom),
-        )
-    }
-
     pub fn offset(&self, dx: f32, dy: f32) -> Self {
         Self::new(
             self.left + dx,
             self.top + dy,
             self.right + dx,
             self.bottom + dy,
-        )
-    }
-
-    pub fn scaled(&self, factor: f32) -> Self {
-        Self::new(
-            self.left * factor,
-            self.top * factor,
-            self.right * factor,
-            self.bottom * factor,
         )
     }
 }
@@ -129,15 +111,6 @@ impl RectI {
 
     pub fn center_y(&self) -> f32 {
         (self.top + self.bottom) as f32 * 0.5
-    }
-
-    pub fn to_f32(self) -> RectF {
-        RectF::new(
-            self.left as f32,
-            self.top as f32,
-            self.right as f32,
-            self.bottom as f32,
-        )
     }
 
     pub fn union(&self, other: &RectI) -> Self {
@@ -182,10 +155,6 @@ impl ImageData {
             height,
             bgra,
         }
-    }
-
-    pub fn byte_len(&self) -> usize {
-        self.bgra.len()
     }
 
     pub fn is_valid(&self) -> bool {
@@ -253,8 +222,6 @@ pub struct HitCard {
     /// What a click on `primary_button` does.
     pub primary_action: ActionKind,
     pub open_button: RectF,
-    /// True for a sticky note.
-    pub note: bool,
     /// The card's current visual angle, degrees, swing plus its fixed tilt.
     /// The annotations flight starts from this angle and settles upright.
     pub angle: f32,
@@ -428,7 +395,6 @@ mod tests {
             primary_button: RectF::new(120.0, 206.0, 180.0, 232.0),
             primary_action: ActionKind::Annotate,
             open_button: RectF::new(186.0, 206.0, 280.0, 232.0),
-            note: false,
             angle: 0.0,
             // The clothespin sits PIN_ABOVE the frame's top, on the centre.
             pin: (200.0, 36.0),

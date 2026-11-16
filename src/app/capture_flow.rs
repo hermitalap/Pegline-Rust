@@ -31,9 +31,6 @@ impl super::App {
             .collect();
         self.capture.restore_pending = paths.len();
         for path in paths {
-            if !path.exists() || !(wic::is_image_path(&path) || notes::is_note(&path)) {
-                continue;
-            }
             let id = self.line.next_id;
             self.line.next_id += 1;
             let tx = self.events_tx.clone();
@@ -112,7 +109,7 @@ impl super::App {
         }
         let own = path.starts_with(win32::inbox_dir()) || notes::is_note(&path);
         self.add_item(
-            id, path, own, size_px, thumb, None, false, false, note, color, text,
+            id, path, own, size_px, thumb, false, false, note, color, text,
         );
     }
 
@@ -305,8 +302,7 @@ impl super::App {
         let mut hash: u64 = 14_695_981_039_346_656_037;
         hash ^= (image.width as u64) * 31 + image.height as u64;
         let stride = image.width as usize * 4;
-        for (row, y) in (0..image.height as usize).step_by(4).enumerate() {
-            let _ = row;
+        for y in (0..image.height as usize).step_by(4) {
             let start = y * stride;
             let end = (start + stride).min(image.bgra.len());
             let mut index = start;
@@ -410,7 +406,6 @@ impl super::App {
             own,
             size_px,
             thumb,
-            area,
             true,
             flying,
             false,

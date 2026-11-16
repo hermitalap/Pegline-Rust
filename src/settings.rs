@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::logging;
 use crate::note_editor::display::{self, PaperSize};
@@ -21,7 +21,6 @@ pub mod keys {
     pub const CATCH_CLIPBOARD: &str = "catchClipboard";
     pub const SOUND_OFF: &str = "soundOff";
     pub const LINE_ALWAYS: &str = "lineAlways";
-    pub const NOTE_KEY: &str = "noteKey";
     pub const FPS: &str = "fps";
     /// Prefix of the per-note colour keys (`noteColor:<file name>`).
     pub const NOTE_COLOR_PREFIX: &str = "noteColor:";
@@ -46,14 +45,6 @@ impl FpsCap {
             "60" => Self::Hz60,
             "120" => Self::Hz120,
             _ => Self::Auto,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Hz60 => "60",
-            Self::Hz120 => "120",
         }
     }
 
@@ -154,10 +145,6 @@ impl Settings {
 
     pub fn remove(&mut self, key: &str) {
         self.values.remove(key);
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// First run: show the welcome line for five seconds.

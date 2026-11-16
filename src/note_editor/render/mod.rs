@@ -67,9 +67,7 @@ use crate::types::{ImageData, RectF};
 /// The window is the paper plus a 20 DIP transparent margin for the shadow
 /// (NOTE-EDITOR.md §5.1). Owned by `display`; re-exported so callers that only
 /// know the render module keep working.
-pub use crate::note_editor::display::{
-    MARGIN_DIP, RADIUS_DIP, WINDOW_HEIGHT_DIP, WINDOW_WIDTH_DIP,
-};
+pub use crate::note_editor::display::{MARGIN_DIP, RADIUS_DIP};
 /// Glass border width, DIP.
 pub const BORDER_DIP: f32 = 1.5;
 /// Dog-ear size, DIP.
@@ -644,10 +642,6 @@ impl EditorState {
 
     /// Rebuilds the GPU stack after a device loss, keeping the document, the
     /// caret and the scroll position.
-    ///
-    /// Without this the editor kept drawing into a dead device: every keystroke
-    /// failed, the window froze on its last frame and the text could never be
-    /// committed, because the flight image needs a live surface too.
     pub fn rebuild_surface(&mut self, hwnd: HWND) -> Result<(), String> {
         let surface = Surface::new(hwnd, self.width_px, self.height_px, self.dpi)?;
         let assets = Assets::new(&surface.rt, &surface.dwrite, self.color)?;
@@ -816,7 +810,7 @@ impl EditorState {
                 if !self.enabled {
                     return Step::Continue;
                 }
-                self.doc.paste(&text, now);
+                self.doc.insert(&text, now);
                 self.restart_blink(now);
                 self.rebuild();
             }
@@ -2227,13 +2221,12 @@ impl Surface {
         let scale = self.dpi / 96.0;
         let width = (paper.width * scale).round().max(1.0) as u32;
         let height = (paper.height * scale).round().max(1.0) as u32;
-        if self
-            .paper
-            .as_ref()
-            .map(|bitmap| bitmap_width(bitmap) == width && bitmap_height(bitmap) == height)
-            .unwrap_or(false)
-        {
-            return Ok(());
+        if let Some(bitmap) = self.paper.as_ref() {
+            // SAFETY: a pure query on a live bitmap owned by self.
+            let size = unsafe { bitmap.GetPixelSize() };
+            if size.width == width && size.height == height {
+                return Ok(());
+            }
         }
         // SAFETY: the context is ours; a new opaque bitmap is created with the
         // paper's physical pixel size.
@@ -2389,16 +2382,6 @@ impl Surface {
     }
 }
 
-fn bitmap_width(bitmap: &ID2D1Bitmap1) -> u32 {
-    // SAFETY: a pure query on a live bitmap.
-    unsafe { bitmap.GetPixelSize() }.width
-}
-
-fn bitmap_height(bitmap: &ID2D1Bitmap1) -> u32 {
-    // SAFETY: a pure query on a live bitmap.
-    unsafe { bitmap.GetPixelSize() }.height
-}
-
 #[cfg(test)]
 mod tests {
     use super::paint::in_view;
@@ -2421,12 +2404,10 @@ mod tests {
             metrics: LineMetrics {
                 font_size: display::BODY_SIZE,
                 line_spacing: display::BODY_SPACING,
-                bold: false,
                 mono: false,
                 indent: 0.0,
                 space_before: 0.0,
                 space_after: 0.0,
-                ink: 1.0,
             },
         }
     }
@@ -2515,8 +2496,7 @@ mod tests {
 
     #[test]
     fn the_window_is_paper_plus_a_shadow_margin() {
-        assert_eq!(WINDOW_WIDTH_DIP, 500.0);
-        assert_eq!(WINDOW_HEIGHT_DIP, 400.0);
+        assert_eq!(DEFAULT_PAPER.window_size(), (500.0, 400.0));
         let paper = paper_rect(DEFAULT_PAPER);
         assert_eq!(paper.left, 20.0);
         assert_eq!(paper.top, 20.0);

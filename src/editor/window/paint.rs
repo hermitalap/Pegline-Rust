@@ -703,14 +703,6 @@ impl super::EditorState {
         let source = doc
             .source()
             .ok_or_else(|| "there is no picture to save".to_string())?;
-        if !source.is_valid() {
-            return Err(format!(
-                "invalid source image ({}x{}, {} bytes)",
-                source.width,
-                source.height,
-                source.bgra.len()
-            ));
-        }
         let (source_width, source_height) = (source.width, source.height);
         let factory = wic_factory()?;
         // SAFETY: the factory is live, the size is at least one pixel and the

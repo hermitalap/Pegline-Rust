@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
     DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS,
     DV_E_FORMATETC, DV_E_LINDEX, DV_E_TYMED, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, GlobalFree,
-    HGLOBAL, HWND, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
+    HGLOBAL, OLE_E_ADVISENOTSUPPORTED, POINT, S_OK,
 };
 use windows::Win32::System::Com::{
     DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC,
@@ -33,8 +33,6 @@ use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_RBUTTON, MODIFIERKEY
 use windows::Win32::UI::Shell::DROPFILES;
 use windows::core::{BOOL, Error, HRESULT, Ref, implement, w};
 
-use crate::types::ImageData;
-
 /// `IDataObject::GetCanonicalFormatEtc` returns this success code when it
 /// copied the format. The Windows headers name the value
 /// `DATA_S_SAMEFORMATETC`; the OLE documentation calls it `DATA_S_FMTETC`.
@@ -48,15 +46,8 @@ const HGLOBAL_FLAGS: GLOBAL_ALLOC_FLAGS = GLOBAL_ALLOC_FLAGS(GMEM_MOVEABLE.0 | G
 /// (`DROPEFFECT_COPY`, `DROPEFFECT_MOVE`, or 0 when nothing accepted).
 ///
 /// Blocks until the drag ends; only call from the UI thread, and only from a
-/// message handler (OLE pumps messages internally). `hwnd` and `image` are kept
-/// for the drag preview and the bitmap payload of a later phase; the OLE drag
-/// loop itself needs neither.
-pub fn drag_file(
-    _hwnd: HWND,
-    path: &Path,
-    _image: &ImageData,
-    png: Vec<u8>,
-) -> Result<u32, String> {
+/// message handler (OLE pumps messages internally).
+pub fn drag_file(path: &Path, png: Vec<u8>) -> Result<u32, String> {
     // The drag must name the file, not a path relative to our working
     // directory: Explorer resolves the drop in the target's context.
     let path =

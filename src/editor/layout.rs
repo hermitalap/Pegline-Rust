@@ -85,8 +85,6 @@ pub enum Hit {
 /// Everything the editor draws and hit-tests, in DIP.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
-    pub width: f32,
-    pub height: f32,
     /// The glass card (photo plus [`CARD_INSET`] on every side).
     pub card: RectF,
     /// The photo itself; the canvas transform maps source pixels here.
@@ -161,7 +159,7 @@ impl Layout {
 
 /// Width of one pill holding `count` elements of `size`.
 fn row_width(count: usize, size: f32, gap: f32, pad: f32) -> f32 {
-    pad * 2.0 + size * count as f32 + gap * (count.saturating_sub(1)) as f32
+    pad * 2.0 + size * count as f32 + gap * (count - 1) as f32
 }
 
 /// Total width of the three pills above the card.
@@ -287,8 +285,6 @@ pub fn fit(width: f32, height: f32, source: (u32, u32)) -> Layout {
     let save = cancel_save[1];
 
     Layout {
-        width,
-        height,
         card,
         photo,
         scale,

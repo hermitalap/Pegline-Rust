@@ -93,10 +93,6 @@ pub enum Brush {
     Glass,
     /// Hovered button background: #F2FFFFFF.
     GlassLit,
-    /// Solid white, used for highlights.
-    White,
-    /// Opaque paper: the hover preview's frame, #F8F8F8.
-    Paper,
     /// The cross glyph.
     CrossInk,
     /// The default note paper, used by the entry's peeking corner: #FFF4B8.
@@ -298,8 +294,6 @@ struct Palette {
     hint_ink: ID2D1SolidColorBrush,
     glass: ID2D1SolidColorBrush,
     glass_lit: ID2D1SolidColorBrush,
-    white: ID2D1SolidColorBrush,
-    paper: ID2D1SolidColorBrush,
     cross_ink: ID2D1SolidColorBrush,
     note_paper: ID2D1SolidColorBrush,
     note_ink: ID2D1SolidColorBrush,
@@ -348,8 +342,6 @@ impl Palette {
             hint_ink: solid(context, [0x46, 0x46, 0x46], 1.0)?,
             glass: solid(context, [0xF7, 0xF7, 0xF7], 0xB8 as f32 / 255.0)?,
             glass_lit: solid(context, [0xFF, 0xFF, 0xFF], 0xF2 as f32 / 255.0)?,
-            white: solid(context, [0xFF, 0xFF, 0xFF], 1.0)?,
-            paper: solid(context, [0xF8, 0xF8, 0xF8], 1.0)?,
             cross_ink: solid(context, [0x28, 0x28, 0x28], 1.0)?,
             note_paper: solid(context, split(crate::notes::PALETTE[0].paper), 1.0)?,
             note_ink: solid(context, split(crate::notes::PALETTE[0].ink), 1.0)?,
@@ -373,8 +365,6 @@ impl Palette {
             Brush::HintInk => &self.hint_ink,
             Brush::Glass => &self.glass,
             Brush::GlassLit => &self.glass_lit,
-            Brush::White => &self.white,
-            Brush::Paper => &self.paper,
             Brush::CrossInk => &self.cross_ink,
             Brush::NotePaper => &self.note_paper,
             Brush::NoteInk => &self.note_ink,

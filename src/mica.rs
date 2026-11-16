@@ -49,7 +49,6 @@ const TEXTURE_SCALE: f32 = 0.17;
 /// pixels wide, so decoding past 1024 only retains temporary memory.
 const DECODE_SIDE: u32 = 1024;
 
-/// One texture pixel in DIP at 96 DPI, used to map the texture to the screen.
 /// The app's glass white, one channel (the fill is `#F7F7F7`).
 const WHITE: u32 = 0xF7;
 

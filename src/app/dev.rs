@@ -146,7 +146,6 @@ impl Dev {
         self.demo
             || self.panic_test
             || self.editor_demo
-            || self.editor_demo_at.is_some()
             || self.annotate_demo
             || self.note_demo
             || self.note_hover_demo
@@ -420,7 +419,6 @@ impl super::App {
             true,
             (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
             image,
-            None,
             true,
             false,
             true,
@@ -461,7 +459,6 @@ impl super::App {
             false,
             (notes::CARD_WIDTH as u32, notes::CARD_HEIGHT as u32),
             image,
-            None,
             false,
             false,
             true,

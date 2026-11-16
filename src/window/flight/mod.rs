@@ -713,7 +713,6 @@ fn flight_thread(
                 };
                 if let Err(error) = run_flight(
                     &mut renderer,
-                    hwnd.0,
                     token,
                     generation,
                     &interrupt,
@@ -734,7 +733,6 @@ fn flight_thread(
             } => {
                 if let Err(error) = run_drop(
                     &mut renderer,
-                    hwnd.0,
                     token,
                     generation,
                     &interrupt,
@@ -861,8 +859,6 @@ struct FlightPlan {
     pre_roll: bool,
     /// The travel has reached the destination; the landing fade is running.
     landed: bool,
-    /// The hand-off happened on an earlier frame, so the follow springs move.
-    following: bool,
     /// The previous frame's travel time, so the follow springs advance by the
     /// same delta whether the flight is interpolated or handed over.
     last_elapsed: f32,
@@ -962,7 +958,6 @@ fn prepare(
         has_start_image: start_texture.is_some(),
         pre_roll: entry && !blend,
         landed: false,
-        following: false,
         last_elapsed: 0.0,
     };
     let textures = FlightTextures {
@@ -984,7 +979,7 @@ impl FlightPlan {
         // After the hand-off the flight image mirrors the real card's row
         // spring and landing sway, so the two never drift apart. An editor
         // flight lands on a still editor card, so it skips the sway.
-        if self.landed && self.following {
+        if self.landed {
             let dt = (elapsed - self.last_elapsed).clamp(0.0, MAX_FRAME_DT);
             self.follow.step(dt);
         }
@@ -1046,7 +1041,6 @@ impl FlightPlan {
         if landed_now {
             self.landed = true;
         }
-        self.following = self.landed;
         let alpha = if self.landed {
             // The real card underneath is already fully opaque, so only this
             // copy has to dissolve. A smoothstep keeps the fade gentle; the
@@ -1130,7 +1124,6 @@ fn elapsed_ms(start: f64) -> f32 {
 /// frame.
 fn run_flight(
     renderer: &mut Renderer,
-    hwnd: HWND,
     token: u64,
     generation: u64,
     interrupt: &AtomicU64,
@@ -1138,7 +1131,6 @@ fn run_flight(
     on_event: &dyn Fn(FlightEvent),
 ) -> Result<(), String> {
     let (mut plan, textures) = prepare(renderer, request)?;
-    let _ = hwnd;
 
     let start = win32::now_seconds();
     // The travel clock; an annotation pre-roll hands over to it when the card
@@ -1212,7 +1204,6 @@ fn run_flight(
 #[allow(clippy::too_many_arguments)]
 fn run_drop(
     renderer: &mut Renderer,
-    _hwnd: HWND,
     token: u64,
     generation: u64,
     interrupt: &AtomicU64,
@@ -1512,7 +1503,6 @@ mod tests {
             has_start_image: true,
             pre_roll: false,
             landed: false,
-            following: false,
             last_elapsed: 0.0,
         }
     }

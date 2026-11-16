@@ -506,14 +506,6 @@ impl Scene {
         scene
     }
 
-    pub fn card_count(&self) -> usize {
-        self.cards.len()
-    }
-
-    pub fn slide_value(&self) -> f32 {
-        self.slide.value
-    }
-
     /// Seconds until the next automatic gust, when the frame loop may sleep
     /// until then. `None` means no timer is pending (hidden line, no cards, or
     /// a drag in progress).
@@ -560,28 +552,6 @@ impl Scene {
                 grab.moved = true;
             }
         }
-    }
-
-    /// Debug summary of the cards, for the trace log.
-    pub fn debug_cards(&self) -> String {
-        self.cards
-            .iter()
-            .map(|card| {
-                format!(
-                    "id{} x={:.1} top={:.1} drop={:.1} swing={:.1} op={:.3}",
-                    card.id,
-                    card.x.value,
-                    layout::rope_y(card.x.value, self.width_dip) - layout::PIN_ABOVE
-                        + card.drop.value
-                        + self.slide.value
-                        + layout::CARD_OFFSET_BELOW_TOP,
-                    card.drop.value,
-                    card.swing.value,
-                    card.opacity
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
     }
 
     pub fn set_layout(&mut self, width_px: u32, height_px: u32, dpi: u32) {
@@ -1337,7 +1307,6 @@ impl Scene {
                 primary_button,
                 primary_action,
                 open_button,
-                note: card.note,
                 angle: card.swing.value + card.tilt + card.lean.value,
                 pin,
                 pin_box: RectF::new(pin.0 - 10.0, pin.1 - 4.0, pin.0 + 10.0, pin.1 + 30.0),

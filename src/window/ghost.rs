@@ -159,14 +159,6 @@ impl Ghost {
         })
     }
 
-    pub fn hwnd(&self) -> HWND {
-        self.hwnd
-    }
-
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-
     /// Shows `image` (the card thumbnail) at 90 % of `card_dip`, centred on the
     /// pointer horizontally and 12 DIP below it, in screen pixels.
     ///

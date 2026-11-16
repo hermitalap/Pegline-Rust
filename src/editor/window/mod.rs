@@ -183,7 +183,6 @@ impl Editor {
     ///
     /// `visible` false creates the window hidden; the app shows it when the
     /// card-to-editor flight lands.
-    #[allow(clippy::too_many_arguments)]
     pub fn open(
         path: &Path,
         source_size: (u32, u32),
@@ -715,8 +714,8 @@ fn handle_close(hwnd: HWND, shared: &Shared) -> LRESULT {
 
 /// `WM_APP_EDITOR_DONE`: the render thread has published a result; hand it to
 /// the app here, on the UI thread.
-fn handle_deliver(hwnd: HWND, shared: &Shared) -> LRESULT {
-    deliver_pending(shared, hwnd);
+fn handle_deliver(_hwnd: HWND, shared: &Shared) -> LRESULT {
+    deliver_pending(shared);
     LRESULT(0)
 }
 
@@ -1093,7 +1092,7 @@ fn utf16_to_byte(text: &str, units: usize) -> usize {
 }
 
 /// Hands the queued result to the app, then destroys the window.
-fn deliver_pending(shared: &Shared, hwnd: HWND) {
+fn deliver_pending(shared: &Shared) {
     if shared.stopping.load(Ordering::Acquire) {
         return;
     }
@@ -1102,7 +1101,7 @@ fn deliver_pending(shared: &Shared, hwnd: HWND) {
         Err(_) => None,
     };
     if let Some(event) = event {
-        deliver(shared, hwnd, event);
+        deliver(shared, event);
     }
 }
 
@@ -1111,7 +1110,7 @@ fn deliver_pending(shared: &Shared, hwnd: HWND) {
 /// when the flight's first frame is up, and destroys it when the flight ends.
 /// Destroying it here would leave one frame with neither the editor nor the
 /// flight on screen.
-fn deliver(shared: &Shared, _hwnd: HWND, event: EditorEvent) {
+fn deliver(shared: &Shared, event: EditorEvent) {
     if shared.delivered.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -2240,12 +2239,13 @@ impl EditorState {
 
     /// Uploads the mosaic textures the document needs, once per mark.
     fn prepare_mosaics(&mut self) {
-        let Some(source) = self.doc.as_ref().and_then(|doc| doc.source()) else {
+        let Some(doc) = self.doc.as_ref() else {
             return;
         };
-        let Some(marks) = self.doc.as_ref().map(|doc| doc.marks()) else {
+        let Some(source) = doc.source() else {
             return;
         };
+        let marks = doc.marks();
         for mark in marks {
             let Mark::Mosaic { rect, block } = mark else {
                 continue;
@@ -2401,7 +2401,7 @@ fn mosaic_key(rect: (f32, f32, f32, f32), block: u32, source: (u32, u32)) -> Opt
         y: top,
         width: (right - left) as u32,
         height: (bottom - top) as u32,
-        block: block.max(1),
+        block,
     })
 }
 
@@ -2427,9 +2427,6 @@ impl MosaicKey {
 /// Averages every `block x block` cell of `key`'s area in the source image.
 fn build_mosaic(source: &ImageData, key: MosaicKey) -> Option<ImageData> {
     let (blocks_x, blocks_y) = key.blocks();
-    if blocks_x == 0 || blocks_y == 0 {
-        return None;
-    }
     let bytes = blocks_x as u64 * blocks_y as u64 * 4;
     if bytes > 64 * 1024 * 1024 {
         return None;
@@ -2535,14 +2532,6 @@ impl Assets {
     }
 
     fn set_source(&mut self, image: &ImageData) -> Result<(), String> {
-        if !image.is_valid() {
-            return Err(format!(
-                "upload: invalid image ({}x{}, {} bytes)",
-                image.width,
-                image.height,
-                image.bgra.len()
-            ));
-        }
         let properties = D2D1_BITMAP_PROPERTIES {
             pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
             dpiX: 96.0,
@@ -2779,13 +2768,24 @@ impl Surface {
 
     /// Binds the opaque card bitmap for `photo` and starts painting on it.
     fn begin_card(&mut self, photo: RectF, dpi: f32) -> Result<(), String> {
-        self.ensure_card(photo, dpi)?;
-        let Some(card) = self.card.as_ref() else {
-            return Err("card bitmap missing".to_string());
+        let scale = dpi.max(96.0) / 96.0;
+        let width = ((photo.width() * scale).round() as u32).max(1);
+        let height = ((photo.height() * scale).round() as u32).max(1);
+        let card = match self.card.take() {
+            Some(bitmap) => {
+                // SAFETY: a pure query on a live bitmap.
+                let size = unsafe { bitmap.GetPixelSize() };
+                if size.width == width && size.height == height {
+                    bitmap
+                } else {
+                    self.create_card(width, height)?
+                }
+            }
+            None => self.create_card(width, height)?,
         };
         // SAFETY: the card is a target for this context and stays alive.
         unsafe {
-            self.context.SetTarget(card);
+            self.context.SetTarget(&card);
             self.context.SetDpi(self.dpi, self.dpi);
             self.context.SetTransform(&Matrix3x2::identity());
             self.context
@@ -2798,6 +2798,7 @@ impl Surface {
                 a: 1.0,
             }));
         }
+        self.card = Some(card);
         Ok(())
     }
 
@@ -2807,59 +2808,37 @@ impl Surface {
             .map_err(|error| format!("EndDraw(card): {error}"))
     }
 
-    fn ensure_card(&mut self, photo: RectF, dpi: f32) -> Result<(), String> {
-        let scale = dpi.max(96.0) / 96.0;
-        let width = ((photo.width() * scale).round() as u32).max(1);
-        let height = ((photo.height() * scale).round() as u32).max(1);
-        if self
-            .card
-            .as_ref()
-            .map(|bitmap| {
-                // SAFETY: a pure query on a live bitmap.
-                let size = unsafe { bitmap.GetPixelSize() };
-                size.width == width && size.height == height
-            })
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
+    fn create_card(&mut self, width: u32, height: u32) -> Result<ID2D1Bitmap1, String> {
         // SAFETY: the context is ours and the target bitmap is created with the
         // photo's exact pixel size.
-        self.card = Some(
-            unsafe {
-                self.context
-                    .CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &self.card_props)
-            }
-            .map_err(|error| format!("CreateBitmap(card {width}x{height}): {error}"))?,
-        );
-        Ok(())
+        unsafe {
+            self.context
+                .CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &self.card_props)
+        }
+        .map_err(|error| format!("CreateBitmap(card {width}x{height}): {error}"))
     }
 
     /// Binds the transparent swap-chain buffer and starts a window frame.
     fn begin_window(&mut self) -> Result<(), String> {
-        // SAFETY: the swap chain is ours and the returned index is checked.
+        // SAFETY: the swap chain is ours and it has two buffers.
         let index = unsafe { self.swap_chain3.GetCurrentBackBufferIndex() } as usize;
-        if index >= self.targets.len() {
-            return Err(format!("back buffer index {index}"));
-        }
-        if self.targets[index].is_none() {
-            // SAFETY: the swap chain owns the buffer and the surface is alive
-            // for the duration of `CreateBitmapFromDxgiSurface`.
-            let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(index as u32) }
-                .map_err(|error| format!("GetBuffer: {error}"))?;
-            let bitmap = unsafe {
-                self.context
-                    .CreateBitmapFromDxgiSurface(&surface, Some(&self.target_props))
+        let bitmap = match self.targets[index].take() {
+            Some(bitmap) => bitmap,
+            None => {
+                // SAFETY: the swap chain owns the buffer and the surface is alive
+                // for the duration of `CreateBitmapFromDxgiSurface`.
+                let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(index as u32) }
+                    .map_err(|error| format!("GetBuffer: {error}"))?;
+                unsafe {
+                    self.context
+                        .CreateBitmapFromDxgiSurface(&surface, Some(&self.target_props))
+                }
+                .map_err(|error| format!("CreateBitmapFromDxgiSurface: {error}"))?
             }
-            .map_err(|error| format!("CreateBitmapFromDxgiSurface: {error}"))?;
-            self.targets[index] = Some(bitmap);
-        }
-        let Some(bitmap) = self.targets[index].as_ref() else {
-            return Ok(());
         };
         // SAFETY: the bitmap is a target for this context and stays alive.
         unsafe {
-            self.context.SetTarget(bitmap);
+            self.context.SetTarget(&bitmap);
             self.context.SetDpi(self.dpi, self.dpi);
             self.context.SetTransform(&Matrix3x2::identity());
             // Text sits on the translucent pills; ClearType is reserved for
@@ -2875,6 +2854,7 @@ impl Surface {
                 a: 0.0,
             }));
         }
+        self.targets[index] = Some(bitmap);
         Ok(())
     }
 

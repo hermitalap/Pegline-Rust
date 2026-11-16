@@ -34,7 +34,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PCWSTR;
 
-use crate::capture::wic::IMAGE_EXTENSIONS;
+use crate::capture::wic;
 use crate::logging;
 use crate::win32::werr;
 
@@ -632,20 +632,8 @@ fn log_error_once(last: &mut Option<String>, message: String) {
 fn is_candidate(name: &str, attributes: u32) -> bool {
     attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
         && attributes & FILE_ATTRIBUTE_HIDDEN.0 == 0
-        && has_image_extension(name)
+        && wic::is_image_path(Path::new(name))
         && !is_excluded_name(name)
-}
-
-/// Whether the name has one of the extensions WIC can decode, ignoring case.
-fn has_image_extension(name: &str) -> bool {
-    Path::new(name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            IMAGE_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
 }
 
 /// Whether the name is one of the files Windows and tools keep in a folder.
@@ -694,18 +682,6 @@ fn close_handle(handle: HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn image_extensions_are_matched_without_case() {
-        assert!(has_image_extension("shot.png"));
-        assert!(has_image_extension("SHOT.PNG"));
-        assert!(has_image_extension("shot.JpEg"));
-        assert!(has_image_extension("scan.tiff"));
-        assert!(!has_image_extension("shot.txt"));
-        assert!(!has_image_extension("png"));
-        assert!(!has_image_extension("shot.png.txt"));
-        assert!(!has_image_extension(""));
-    }
 
     #[test]
     fn thumbnail_files_are_excluded_without_case() {

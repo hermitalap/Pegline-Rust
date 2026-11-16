@@ -30,8 +30,6 @@ use crate::logging;
 
 /// Tray icon callback: `lParam` is the mouse message, `wParam` the icon id.
 pub const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
-/// The app asks itself to quit (used by workers and menus).
-pub const WM_APP_QUIT: u32 = WM_APP + 2;
 /// Forces a tick even if the 33 ms timer is not due yet (captures, clipboard).
 pub const WM_APP_WAKE: u32 = WM_APP + 3;
 

@@ -93,10 +93,6 @@ impl Doc {
         self.caret
     }
 
-    pub fn anchor(&self) -> usize {
-        self.anchor
-    }
-
     /// The non-empty selection, in source byte order.
     pub fn selection(&self) -> Option<Range<usize>> {
         if self.caret == self.anchor {
@@ -118,7 +114,7 @@ impl Doc {
     /// Places the caret at `offset`, clamped to a character boundary. With
     /// `extend` the selection anchor stays put (Shift+click / Shift+arrows).
     pub fn set_caret(&mut self, offset: usize, extend: bool) {
-        let offset = floor_boundary(&self.text, offset.min(self.text.len()));
+        let offset = floor_boundary(&self.text, offset);
         self.caret = offset;
         if !extend {
             self.anchor = offset;
@@ -147,7 +143,7 @@ impl Doc {
 
     /// The line containing `offset`, without the newline.
     pub fn line_at(&self, offset: usize) -> Range<usize> {
-        line_range(&self.text, offset.min(self.text.len()))
+        line_range(&self.text, offset)
     }
 
     /// Inserts text, replacing the selection, and moves the caret after it.
@@ -215,8 +211,8 @@ impl Doc {
     /// The list commands use this to drop a whole marker (`- `, `2. `) with one
     /// Backspace or by pressing Enter on an empty item.
     pub fn delete_range(&mut self, range: Range<usize>, now: f64) {
-        let start = floor_boundary(&self.text, range.start.min(self.text.len()));
-        let end = floor_boundary(&self.text, range.end.min(self.text.len()));
+        let start = floor_boundary(&self.text, range.start);
+        let end = floor_boundary(&self.text, range.end);
         if start >= end {
             return;
         }
@@ -239,10 +235,6 @@ impl Doc {
     }
 
     /// Inserts clipboard text at the caret (Ctrl+V), replacing a selection.
-    pub fn paste(&mut self, text: &str, now: f64) {
-        self.insert(text, now);
-    }
-
     /// Wraps the selection in `marker` (Ctrl+B/I/backtick). With no selection
     /// the markers are inserted and the caret sits between them.
     pub fn toggle_marker(&mut self, marker: &str, now: f64) {
@@ -299,8 +291,8 @@ impl Doc {
 
     fn restore(&mut self, snapshot: Snapshot) {
         self.text = snapshot.text;
-        self.caret = floor_boundary(&self.text, snapshot.caret.min(self.text.len()));
-        self.anchor = floor_boundary(&self.text, snapshot.anchor.min(self.text.len()));
+        self.caret = floor_boundary(&self.text, snapshot.caret);
+        self.anchor = floor_boundary(&self.text, snapshot.anchor);
         self.last_edit_at = f64::NEG_INFINITY;
     }
 
@@ -458,7 +450,7 @@ pub fn word_right(text: &str, offset: usize) -> usize {
 /// The whole word containing `offset`, for a double-click. Returns an empty
 /// range when the character at the caret is not a word character.
 pub fn word_range(text: &str, offset: usize) -> Range<usize> {
-    let offset = floor_boundary(text, offset.min(text.len()));
+    let offset = floor_boundary(text, offset);
     let mut start = offset;
     while start > 0 {
         let previous = previous_char(text, start);
@@ -678,7 +670,7 @@ mod tests {
         doc.set_caret(11, true);
         assert_eq!(doc.cut(0.0).as_deref(), Some("world"));
         assert_eq!(doc.text(), "hello ");
-        doc.paste("a\r\nb", 1.0);
+        doc.insert("a\r\nb", 1.0);
         assert_eq!(doc.text(), "hello a\nb");
     }
 

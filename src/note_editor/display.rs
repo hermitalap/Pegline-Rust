@@ -32,10 +32,6 @@ pub const RESIZE_GRIP_DIP: f32 = 2.0;
 /// from the paper's bottom-right corner into the paper and out over the shadow
 /// margin (BEHAVIOR §10.1). The right and bottom edge bands stay thin; only
 /// the corner is enlarged, so it is easy to hit without stealing the edges.
-///
-/// 2.6.2 shrank it from 24 to 16 DIP: 24² = 576 DIP² of corner area becomes
-/// 16² = 256 DIP², a 56 % reduction. A whole DIP keeps the 100 % and 200 %
-/// device-pixel boxes aligned with the pointer grid.
 pub const RESIZE_CORNER_DIP: f32 = 16.0;
 
 /// A paper size, DIP. The window is always `MARGIN_DIP` larger on every side
@@ -139,20 +135,11 @@ pub const MIN_PAPER: PaperSize = PaperSize::new(PAPER_WIDTH, PAPER_HEIGHT);
 pub const DEFAULT_PAPER: PaperSize = MIN_PAPER;
 /// Largest paper the editor can be dragged to, DIP.
 pub const MAX_PAPER: PaperSize = PaperSize::new(820.0, 640.0);
-/// Default window size, DIP (paper plus the shadow margin).
-pub const WINDOW_WIDTH_DIP: f32 = PAPER_WIDTH + MARGIN_DIP * 2.0;
-pub const WINDOW_HEIGHT_DIP: f32 = PAPER_HEIGHT + MARGIN_DIP * 2.0;
-/// Width available to text at the default paper size, DIP.
-pub const CONTENT_WIDTH: f32 = PAPER_WIDTH - PAD_LEFT - PAD_RIGHT;
-
 /// Parse the `noteSize:<file>` value (`460x360`, whole DIP). Rejects empty,
 /// negative, zero and malformed values; sizes outside the resize range clamp.
 pub fn parse_note_size(text: &str) -> Option<PaperSize> {
     let text = text.trim();
     let (width, height) = text.split_once(['x', 'X'])?;
-    if height.contains(['x', 'X']) {
-        return None;
-    }
     let width: u32 = width.trim().parse().ok()?;
     let height: u32 = height.trim().parse().ok()?;
     if width == 0 || height == 0 {
@@ -215,17 +202,14 @@ pub fn hit_test(x_px: i32, y_px: i32, paper: PaperSize, dpi: u32) -> Hit {
     let grip = RESIZE_GRIP_DIP;
     let right_band = x >= right - grip && y >= top - grip && y <= bottom + grip;
     let bottom_band = y >= bottom - grip && x >= left - grip && x <= right + grip;
-    match (right_band, bottom_band) {
-        (true, true) => Hit::Resize(ResizeZone::Corner),
-        (true, false) => Hit::Resize(ResizeZone::Right),
-        (false, true) => Hit::Resize(ResizeZone::Bottom),
-        (false, false) => {
-            if paper.contains(x, y) {
-                Hit::Paper
-            } else {
-                Hit::Margin
-            }
-        }
+    if right_band {
+        Hit::Resize(ResizeZone::Right)
+    } else if bottom_band {
+        Hit::Resize(ResizeZone::Bottom)
+    } else if paper.contains(x, y) {
+        Hit::Paper
+    } else {
+        Hit::Margin
     }
 }
 /// Body metrics, DIP.
@@ -291,15 +275,12 @@ pub struct Run {
 pub struct LineMetrics {
     pub font_size: f32,
     pub line_spacing: f32,
-    pub bold: bool,
     pub mono: bool,
     /// Left inset of the content, DIP.
     pub indent: f32,
     /// Gap above and below the line, DIP. Applied only at block boundaries.
     pub space_before: f32,
     pub space_after: f32,
-    /// Ink opacity: quotes are drawn at 80 %.
-    pub ink: f32,
 }
 
 /// One source line, projected.
@@ -498,12 +479,10 @@ impl DisplayDoc {
                 metrics: LineMetrics {
                     font_size: BODY_SIZE,
                     line_spacing: BODY_SPACING,
-                    bold: false,
                     mono: false,
                     indent: 0.0,
                     space_before: 0.0,
                     space_after: 0.0,
-                    ink: 1.0,
                 },
             });
         }
@@ -556,12 +535,10 @@ fn metrics_for(block: Block) -> LineMetrics {
     let mut metrics = LineMetrics {
         font_size: BODY_SIZE,
         line_spacing: BODY_SPACING,
-        bold: false,
         mono: false,
         indent: 0.0,
         space_before: 0.0,
         space_after: 0.0,
-        ink: 1.0,
     };
     match block {
         Block::Heading(level) => {
@@ -572,12 +549,10 @@ fn metrics_for(block: Block) -> LineMetrics {
                 4 => 16.0,
                 _ => 15.0,
             };
-            metrics.bold = true;
             metrics.line_spacing = 1.3;
         }
         Block::Quote => {
             metrics.indent = 12.0;
-            metrics.ink = 0.8;
         }
         Block::List { .. } => metrics.indent = 18.0,
         Block::Code { .. } => {
@@ -1038,7 +1013,6 @@ mod tests {
         assert_eq!(line.block, Block::Heading(2));
         assert_eq!(text_of(line, false), "Title");
         assert_eq!(text_of(line, true), "## Title");
-        assert!(line.metrics.bold);
         assert!(line.metrics.font_size > BODY_SIZE);
         assert!(line.runs[0].marker);
     }
@@ -1287,8 +1261,6 @@ mod tests {
     fn the_default_paper_matches_the_window_constants() {
         assert_eq!(DEFAULT_PAPER, PaperSize::new(460.0, 360.0));
         assert_eq!(DEFAULT_PAPER.window_size(), (500.0, 400.0));
-        assert_eq!(WINDOW_WIDTH_DIP, 500.0);
-        assert_eq!(WINDOW_HEIGHT_DIP, 400.0);
         assert_eq!(DEFAULT_PAPER.content_width(), 400.0);
         assert_eq!(DEFAULT_PAPER.view_height(), 304.0);
     }
