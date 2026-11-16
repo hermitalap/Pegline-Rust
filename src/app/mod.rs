@@ -1907,10 +1907,8 @@ impl App {
             return;
         }
         logging::trace("new note editor requested");
-        self.cancel_note_hover();
-        // The flight window is about to be taken over for the trip to the
-        // editor; any card it was carrying must become visible in the scene.
-        self.release_flying_card();
+        // Read the entry pose before cancelling the hover: the flight starts
+        // from the peeking corner (or the blank card that was on screen).
         let from = self.note_hover_card_px();
         let angle = self
             .state
@@ -1918,6 +1916,10 @@ impl App {
             .as_ref()
             .map(|hover| hover.angle)
             .unwrap_or(0.0);
+        self.cancel_note_hover();
+        // The flight window is about to be taken over for the trip to the
+        // editor; any card it was carrying must become visible in the scene.
+        self.release_flying_card();
         // The card's own blank paper dissolves into the editor view before the
         // flight starts; the editor image itself is rendered by its render
         // thread and taken below.
