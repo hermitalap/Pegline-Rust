@@ -389,8 +389,6 @@ impl DisplayLine {
 #[derive(Clone, Debug, Default)]
 pub struct DisplayDoc {
     pub lines: Vec<DisplayLine>,
-    /// Byte length of the source that was projected.
-    pub text_len: usize,
 }
 
 impl DisplayDoc {
@@ -491,10 +489,7 @@ impl DisplayDoc {
             };
             lines[index].metrics = metrics;
         }
-        Self {
-            lines,
-            text_len: text.len(),
-        }
+        Self { lines }
     }
 
     /// The line containing `offset`. The offset may sit on a newline: that
