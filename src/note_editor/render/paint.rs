@@ -15,7 +15,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL, IDWriteTextLayout,
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -296,28 +296,18 @@ impl super::EditorState {
             return;
         };
         let display = &self.display.lines[line.index];
+        let mut stack = [DWRITE_HIT_TEST_METRICS::default(); RANGE_METRICS_ON_STACK];
+        let mut spill: Vec<DWRITE_HIT_TEST_METRICS> = Vec::new();
         let mut offset = 0usize;
         for run in display.runs.iter().filter(|run| !run.marker) {
             if run.style == Style::Code {
                 let start = utf16_offset(&line.text, offset);
                 let length = run.text.encode_utf16().count() as u32;
                 if length > 0 {
-                    let mut metrics = [DWRITE_HIT_TEST_METRICS::default(); 8];
-                    let mut count = 0u32;
-                    // SAFETY: live layout, buffer and out-param.
-                    unsafe {
-                        let _ = layout.HitTestTextRange(
-                            start,
-                            length,
-                            0.0,
-                            0.0,
-                            Some(&mut metrics[..]),
-                            &mut count,
-                        );
-                    }
+                    let metrics = hit_test_range(layout, start, length, &mut stack, &mut spill);
                     // SAFETY: drawing on the paper target.
                     unsafe {
-                        for metric in metrics.iter().take(count as usize) {
+                        for metric in metrics {
                             let rect = D2D1_ROUNDED_RECT {
                                 rect: D2D_RECT_F {
                                     left: origin_x + line.indent + metric.left - 2.0,
@@ -345,6 +335,8 @@ impl super::EditorState {
         let Some(selection) = self.doc.selection() else {
             return;
         };
+        let mut stack = [DWRITE_HIT_TEST_METRICS::default(); RANGE_METRICS_ON_STACK];
+        let mut spill: Vec<DWRITE_HIT_TEST_METRICS> = Vec::new();
         for line in &self.lines {
             if !in_view(line, self.scroll, self.view_height) {
                 continue;
@@ -365,22 +357,10 @@ impl super::EditorState {
                 }
                 let from = utf16_offset(&line.text, start);
                 let length = (utf16_offset(&line.text, end) - from).max(1);
-                let mut metrics = [DWRITE_HIT_TEST_METRICS::default(); 16];
-                let mut count = 0u32;
-                // SAFETY: live layout, buffer and out-param.
-                unsafe {
-                    let _ = layout.HitTestTextRange(
-                        from,
-                        length,
-                        0.0,
-                        0.0,
-                        Some(&mut metrics[..]),
-                        &mut count,
-                    );
-                }
+                let metrics = hit_test_range(layout, from, length, &mut stack, &mut spill);
                 // SAFETY: drawing on the paper target.
                 unsafe {
-                    for metric in metrics.iter().take(count as usize) {
+                    for metric in metrics {
                         let rect = D2D_RECT_F {
                             left: origin_x + line.indent + metric.left,
                             top: PAD_TOP + line.text_top - self.scroll + metric.top,
@@ -565,6 +545,58 @@ impl super::EditorState {
             }
         }
     }
+}
+
+/// Visual rows a range can cover before the metrics spill to the heap. One
+/// entry per wrapped row, so only a long single line needs more.
+const RANGE_METRICS_ON_STACK: usize = 16;
+
+/// The visual-row rectangles `HitTestTextRange` reports for a range.
+///
+/// A range that wraps into at most [`RANGE_METRICS_ON_STACK`] rows fills
+/// `stack`. A longer one fills `spill`, which the caller keeps across paints so
+/// the buffer is allocated at most once.
+fn hit_test_range<'a>(
+    layout: &IDWriteTextLayout,
+    start: u32,
+    length: u32,
+    stack: &'a mut [DWRITE_HIT_TEST_METRICS; RANGE_METRICS_ON_STACK],
+    spill: &'a mut Vec<DWRITE_HIT_TEST_METRICS>,
+) -> &'a [DWRITE_HIT_TEST_METRICS] {
+    let mut count = 0u32;
+    // SAFETY: live layout, a stack buffer and an out-param.
+    unsafe {
+        let _ = layout.HitTestTextRange(start, length, 0.0, 0.0, Some(&mut stack[..]), &mut count);
+    }
+    let count = count as usize;
+    if count >= RANGE_METRICS_ON_STACK {
+        // A full buffer means the range may have more rows than fit, so ask
+        // with no buffer: DWrite then reports the count the range needs.
+        let mut needed = 0u32;
+        // SAFETY: live layout; a null buffer makes `actualCount` the required
+        // count.
+        unsafe {
+            let _ = layout.HitTestTextRange(start, length, 0.0, 0.0, None, &mut needed);
+        }
+        if needed as usize > RANGE_METRICS_ON_STACK {
+            spill.clear();
+            spill.resize(needed as usize, DWRITE_HIT_TEST_METRICS::default());
+            let mut filled = 0u32;
+            // SAFETY: live layout, a buffer of the requested length.
+            unsafe {
+                let _ = layout.HitTestTextRange(
+                    start,
+                    length,
+                    0.0,
+                    0.0,
+                    Some(&mut spill[..]),
+                    &mut filled,
+                );
+            }
+            return &spill[..(filled as usize).min(spill.len())];
+        }
+    }
+    &stack[..count.min(RANGE_METRICS_ON_STACK)]
 }
 
 /// True when any part of `line` can land on the paper and therefore be seen.
