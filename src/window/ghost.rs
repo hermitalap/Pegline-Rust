@@ -375,15 +375,9 @@ unsafe extern "system" fn ghost_wndproc(
 ) -> LRESULT {
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // process. Contain it here.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+    crate::window::guard("ghost_wndproc", || unsafe {
         ghost_wndproc_inner(hwnd, message, wparam, lparam)
-    })) {
-        Ok(result) => result,
-        Err(_) => {
-            crate::logging::error("panic in ghost_wndproc");
-            LRESULT(0)
-        }
-    }
+    })
 }
 
 /// The real handler; plain `unsafe fn` so a panic unwinds into the guard above.

@@ -539,15 +539,9 @@ unsafe extern "system" fn overlay_wndproc(
     // A panic may not unwind out of an `extern "system"` function: it aborts the
     // whole process. Contain it so one bad message cannot take the tray icon
     // down with it.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+    crate::window::guard("overlay_wndproc", || unsafe {
         overlay_wndproc_inner(hwnd, message, wparam, lparam)
-    })) {
-        Ok(result) => result,
-        Err(_) => {
-            crate::logging::error("panic in overlay_wndproc");
-            LRESULT(0)
-        }
-    }
+    })
 }
 
 /// Rebuilds the wallpaper texture and wakes the render thread. Used for both

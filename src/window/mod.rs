@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{
     COINIT, COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
 };
@@ -193,6 +193,20 @@ pub fn create_message_window(
         );
     }
     Ok(hwnd)
+}
+
+/// Runs a window procedure body under `catch_unwind`.
+///
+/// A panic may not unwind out of an `extern "system"` function: it aborts the
+/// process. The panic is logged with `name` and answered with 0 instead.
+pub fn guard(name: &'static str, body: impl FnOnce() -> LRESULT) -> LRESULT {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(_) => {
+            logging::error(format!("panic in {name}"));
+            LRESULT(0)
+        }
+    }
 }
 
 /// Runs the message loop until `WM_QUIT`. Returns the quit code.
