@@ -13,11 +13,11 @@ use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
-    IDC_ARROW, IDC_HAND, IDC_SIZEWE, LoadCursorW, MA_NOACTIVATE, SPI_SETDESKWALLPAPER, SW_HIDE,
-    SetCursor, SetWindowLongPtrW, ShowWindow, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_MOUSEACTIVATE,
-    WM_SETCURSOR, WM_SETTINGCHANGE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT, IDC_ARROW, IDC_HAND,
+    IDC_SIZEWE, LoadCursorW, MA_NOACTIVATE, SPI_SETDESKWALLPAPER, SW_HIDE, SetCursor,
+    SetWindowLongPtrW, ShowWindow, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -63,37 +63,26 @@ pub struct Overlay {
 impl Overlay {
     /// Creates the window on the calling (UI) thread and starts its renderer.
     pub fn create(work: RectI, dpi: u32) -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(overlay_wndproc))?;
         let width_px = work.width().max(1) as u32;
         let height_px = ((layout::PANEL_HEIGHT * dpi as f32 / 96.0).ceil() as i32).max(1) as u32;
-        let instance = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                .map_err(|e| format!("GetModuleHandleW: {e}"))?
-        };
-        // SAFETY: the class is registered; the window is never shown activated
-        // and starts click-through.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_TOPMOST
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
+        let hwnd = window::create_window(
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            WS_EX_NOREDIRECTIONBITMAP
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | WS_EX_TOPMOST
+                | WS_EX_LAYERED
+                | WS_EX_TRANSPARENT,
+            RectI::new(
                 work.left,
                 work.top,
-                width_px as i32,
-                height_px as i32,
-                None,
-                None,
-                Some(windows::Win32::Foundation::HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|e| format!("CreateWindowExW(overlay): {e}"))?;
+                work.left + width_px as i32,
+                work.top + height_px as i32,
+            ),
+            Some(overlay_wndproc),
+        )?;
         // The window starts hidden; the app shows it on the first reveal.
         // SAFETY: our own window.
         unsafe {

@@ -21,8 +21,8 @@ use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, IDC_HAND, LoadCursorW, MA_NOACTIVATE,
-    SW_HIDE, SetCursor, ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_LAYERED,
+    DefWindowProcW, DestroyWindow, HTCLIENT, IDC_HAND, LoadCursorW, MA_NOACTIVATE, SW_HIDE,
+    SetCursor, ShowWindow, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -115,35 +115,21 @@ pub struct Preview {
 
 impl Preview {
     pub fn create() -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(preview_wndproc))?;
-        let instance = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                .map_err(|e| format!("GetModuleHandleW: {e}"))?
-        };
-        // SAFETY: the class is registered; the window starts hidden at 2x2 and
-        // is placed by the render thread before it is ever shown.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_TOPMOST
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                0,
-                0,
-                2,
-                2,
-                None,
-                None,
-                Some(windows::Win32::Foundation::HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|e| format!("CreateWindowExW(preview): {e}"))?;
+        // The window starts hidden at 2x2 and is placed by the render thread
+        // before it is ever shown.
+        let hwnd = window::create_window(
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            WS_EX_NOREDIRECTIONBITMAP
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | WS_EX_TOPMOST
+                | WS_EX_LAYERED
+                | WS_EX_TRANSPARENT,
+            RectI::new(0, 0, 2, 2),
+            Some(preview_wndproc),
+        )?;
         // SAFETY: our own window.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);

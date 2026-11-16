@@ -15,8 +15,8 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetMessageW, MSG, PostMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, WM_APP, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_QUIT, WNDCLASSW,
+    WNDPROC, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -35,6 +35,7 @@ pub(crate) struct SendHwnd(pub(crate) HWND);
 unsafe impl Send for SendHwnd {}
 
 use crate::logging;
+use crate::types::RectI;
 
 /// Tray icon callback: `lParam` is the mouse message, `wParam` the icon id.
 pub const WM_TRAY_CALLBACK: u32 = WM_APP + 1;
@@ -127,6 +128,42 @@ pub fn register_class(
     Ok(())
 }
 
+/// Creates a window of `class`, registered here with `wndproc`, with the given
+/// style, extended style and bounds.
+///
+/// The caller owns `GWLP_USERDATA`; this only brings the window into existence.
+pub fn create_window(
+    class: PCWSTR,
+    title: PCWSTR,
+    style: WINDOW_STYLE,
+    ex_style: WINDOW_EX_STYLE,
+    bounds: RectI,
+    wndproc: WNDPROC,
+) -> Result<HWND, String> {
+    register_class(class, wndproc)?;
+    let instance =
+        unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
+    // SAFETY: the class is registered; `title` is NUL-terminated and alive for
+    // the call, and no parent or menu is requested.
+    unsafe {
+        CreateWindowExW(
+            ex_style,
+            class,
+            title,
+            style,
+            bounds.left,
+            bounds.top,
+            bounds.width(),
+            bounds.height(),
+            None,
+            None,
+            Some(HINSTANCE(instance.0)),
+            None,
+        )
+    }
+    .map_err(|e| format!("CreateWindowExW({class:?}): {e}"))
+}
+
 /// Creates a hidden message-only window owned by `owner`.
 ///
 /// `owner` is stored in `GWLP_USERDATA` and must stay alive until the window is
@@ -137,29 +174,16 @@ pub fn create_message_window(
     wndproc: windows::Win32::UI::WindowsAndMessaging::WNDPROC,
     owner: *mut (),
 ) -> Result<HWND, String> {
-    register_class(class, wndproc)?;
-    let instance =
-        unsafe { GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
-    // SAFETY: class registered above; no parent (message-only via HWND_MESSAGE
-    // would suppress broadcasts we need for TaskbarCreated, so a tool window is
-    // used instead and simply never shown).
-    let hwnd = unsafe {
-        CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            class,
-            title,
-            WS_POPUP,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            Some(HINSTANCE(instance.0)),
-            None,
-        )
-    }
-    .map_err(|e| format!("CreateWindowExW({class:?}): {e}"))?;
+    // No parent: a message-only window (HWND_MESSAGE) would suppress the
+    // broadcasts TaskbarCreated needs, so a hidden tool window is used instead.
+    let hwnd = create_window(
+        class,
+        title,
+        WS_POPUP,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        RectI::new(0, 0, 0, 0),
+        wndproc,
+    )?;
     // SAFETY: the window was just created and belongs to this thread.
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(

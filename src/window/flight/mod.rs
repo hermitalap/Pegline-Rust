@@ -17,9 +17,9 @@ use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -232,34 +232,20 @@ pub struct Flight {
 impl Flight {
     /// Creates the hidden window and its render thread.
     pub fn create(on_event: Box<dyn Fn(FlightEvent) + Send>) -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(flight_wndproc))?;
-        let instance = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                .map_err(|e| format!("GetModuleHandleW: {e}"))?
-        };
-        // SAFETY: the class is registered; the window starts hidden and 2x2.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_TOPMOST
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                0,
-                0,
-                2,
-                2,
-                None,
-                None,
-                Some(windows::Win32::Foundation::HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|e| format!("CreateWindowExW(flight): {e}"))?;
+        // The window starts hidden and 2x2; the render thread places it.
+        let hwnd = window::create_window(
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            WS_EX_NOREDIRECTIONBITMAP
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | WS_EX_TOPMOST
+                | WS_EX_LAYERED
+                | WS_EX_TRANSPARENT,
+            RectI::new(0, 0, 2, 2),
+            Some(flight_wndproc),
+        )?;
         // SAFETY: our own window.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);

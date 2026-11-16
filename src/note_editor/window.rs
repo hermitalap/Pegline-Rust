@@ -17,9 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, GCS_COMPSTR, GCS_RESULTSTR, HIMC,
     ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetCompositionStringW,
@@ -32,16 +31,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LEFT, VK_OEM_3, VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_TAB, VK_UP, VK_V, VK_X, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW, HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE,
-    IDC_SIZEWE, LoadCursorW, MINMAXINFO, PostMessageW, SPI_SETWORKAREA, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO,
-    WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SETTINGCHANGE, WM_SIZE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+    HCURSOR, HTCLIENT, IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, LoadCursorW,
+    MINMAXINFO, PostMessageW, SPI_SETWORKAREA, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WA_INACTIVE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_GETDLGCODE, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -499,30 +497,14 @@ impl Drop for NoteEditor {
 /// Creates the editor window at `frame`, still hidden. The window class must
 /// already be registered.
 fn create_window(frame: crate::types::RectI) -> Result<HWND, String> {
-    let (width, height) = (frame.width(), frame.height());
-    // SAFETY: the module handle is this process and the class is registered.
-    let instance =
-        unsafe { GetModuleHandleW(None) }.map_err(|error| format!("GetModuleHandleW: {error}"))?;
-    // SAFETY: the class is registered, the title is shared, and no parent is
-    // requested; the window is positioned before it is shown.
-    let hwnd = unsafe {
-        CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            CLASS_NAME,
-            WINDOW_TITLE,
-            WS_POPUP,
-            frame.left,
-            frame.top,
-            width,
-            height,
-            None,
-            None,
-            Some(HINSTANCE(instance.0)),
-            None,
-        )
-    }
-    .map_err(|error| format!("CreateWindowExW(note editor): {error}"))?;
-    Ok(hwnd)
+    window::create_window(
+        CLASS_NAME,
+        WINDOW_TITLE,
+        WS_POPUP,
+        WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        frame,
+        Some(note_wndproc),
+    )
 }
 
 /// A plain Win32 window needs an IME context on Windows 11 TSF before

@@ -16,9 +16,9 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow,
-    WM_ERASEBKGND, WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -74,36 +74,21 @@ impl Ghost {
     /// drag: it owns a swap chain and a render thread. Failure is not fatal, the
     /// drag simply runs with the system cursor.
     pub fn create() -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(ghost_wndproc))?;
-        // SAFETY: queries this module's handle; no argument is dereferenced.
-        let instance = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                .map_err(|e| format!("GetModuleHandleW: {e}"))?
-        };
-        // SAFETY: the class is registered; the window starts hidden at 2x2 and
-        // is placed by the render thread before it is ever shown.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP
-                    | WS_EX_TOOLWINDOW
-                    | WS_EX_NOACTIVATE
-                    | WS_EX_TOPMOST
-                    | WS_EX_LAYERED
-                    | WS_EX_TRANSPARENT,
-                CLASS_NAME,
-                WINDOW_TITLE,
-                WS_POPUP,
-                0,
-                0,
-                2,
-                2,
-                None,
-                None,
-                Some(windows::Win32::Foundation::HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|e| format!("CreateWindowExW(ghost): {e}"))?;
+        // The window starts hidden at 2x2 and is placed by the render thread
+        // before it is ever shown.
+        let hwnd = window::create_window(
+            CLASS_NAME,
+            WINDOW_TITLE,
+            WS_POPUP,
+            WS_EX_NOREDIRECTIONBITMAP
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | WS_EX_TOPMOST
+                | WS_EX_LAYERED
+                | WS_EX_TRANSPARENT,
+            RectI::new(0, 0, 2, 2),
+            Some(ghost_wndproc),
+        )?;
         // SAFETY: our own window.
         unsafe {
             let _ = ShowWindow(hwnd, SW_HIDE);

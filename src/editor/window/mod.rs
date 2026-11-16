@@ -22,7 +22,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
@@ -52,7 +52,6 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory2, IWICImagingFactory};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{
     CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, GCS_COMPSTR,
     GCS_CURSORPOS, GCS_RESULTSTR, HIMC, IME_COMPOSITION_STRING, ISC_SHOWUICOMPOSITIONWINDOW,
@@ -65,11 +64,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_CONTROL, VK_ESCAPE, VK_S, VK_Y, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW, HTCLIENT, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW,
-    PostMessageW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetCursorPos, GetWindowLongPtrW,
+    HTCLIENT, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, LoadCursorW, PostMessageW, SW_HIDE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
     WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -192,7 +191,6 @@ impl Editor {
         visible: bool,
         notify: Box<dyn Fn(EditorEvent) + Send>,
     ) -> Result<Self, String> {
-        window::register_class(CLASS_NAME, Some(editor_wndproc))?;
         let dpi = monitor.dpi.max(dpi).max(96);
         let scale = dpi as f32 / 96.0;
         let work = monitor.work;
@@ -204,33 +202,18 @@ impl Editor {
         let height = (height_dip * scale).round().max(240.0) as i32;
         let left = work.left + (work.width() - width).max(0) / 2;
         let top = work.top + (work.height() - height).max(0) / 2;
-        // SAFETY: the module handle is this process and the class is registered
-        // above; the call has no other preconditions.
-        let instance = unsafe { GetModuleHandleW(None) }
-            .map_err(|error| format!("GetModuleHandleW: {error}"))?;
         let title = win32::wide(i18n::s().editor_title);
         // A frameless, topmost popup: the editor is a floating hanging picture,
         // not a document window. It has no caption buttons and no border; the
         // card, the pin and the floating pills are the whole image.
-        // SAFETY: the class is registered, `title` is NUL-terminated and alive
-        // for the call, and no parent or menu is requested.
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                CLASS_NAME,
-                PCWSTR(title.as_ptr()),
-                WS_POPUP,
-                left,
-                top,
-                width,
-                height,
-                None,
-                None,
-                Some(HINSTANCE(instance.0)),
-                None,
-            )
-        }
-        .map_err(|error| format!("CreateWindowExW(editor): {error}"))?;
+        let hwnd = window::create_window(
+            CLASS_NAME,
+            PCWSTR(title.as_ptr()),
+            WS_POPUP,
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            RectI::new(left, top, left + width, top + height),
+            Some(editor_wndproc),
+        )?;
 
         let (tx, rx) = mpsc::channel();
         let initial = layout::fit(width as f32 / scale, height as f32 / scale, source_size);
