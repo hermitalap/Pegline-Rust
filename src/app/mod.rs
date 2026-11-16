@@ -4022,19 +4022,29 @@ fn step_hover_physics(
     }
 
     // Keep the whole preview window (card + shadow padding) inside the work
-    // area; drop the velocity that pushed it out so it does not buzz against
-    // the edge.
+    // area; drop only the velocity pointing outwards so it does not buzz
+    // against the edge, but keep the velocity pointing back inwards.
     let (card_w, card_h) = layout::note_card_size();
     let half_width = (card_w * 0.5 + NOTE_PADDING_DIP) * scale;
     let half_height = (card_h * 0.5 + NOTE_PADDING_DIP) * scale;
-    let clamped = clamp_center(hover.pos, half_width, half_height, work);
-    if clamped.0 != hover.pos.0 {
-        hover.vel.0 = 0.0;
+    let min_x = work.left as f32 + half_width;
+    let max_x = work.right as f32 - half_width;
+    let min_y = work.top as f32 + half_height;
+    let max_y = work.bottom as f32 - half_height;
+    if hover.pos.0 < min_x {
+        hover.pos.0 = min_x;
+        hover.vel.0 = hover.vel.0.max(0.0);
+    } else if hover.pos.0 > max_x {
+        hover.pos.0 = max_x;
+        hover.vel.0 = hover.vel.0.min(0.0);
     }
-    if clamped.1 != hover.pos.1 {
-        hover.vel.1 = 0.0;
+    if hover.pos.1 < min_y {
+        hover.pos.1 = min_y;
+        hover.vel.1 = hover.vel.1.max(0.0);
+    } else if hover.pos.1 > max_y {
+        hover.pos.1 = max_y;
+        hover.vel.1 = hover.vel.1.min(0.0);
     }
-    hover.pos = clamped;
     hover.center = hover.pos;
     if now >= hover.trace_at {
         logging::trace_args(format_args!(
