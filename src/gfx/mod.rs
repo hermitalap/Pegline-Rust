@@ -11,7 +11,8 @@
 pub(crate) mod device;
 
 pub(crate) use device::{
-    create_composition, create_d2d, create_d3d_device, create_dwrite, create_swap_chain,
-    create_text_format, create_text_layout, d2d_rect, pixel_format, rounded, solid, text_metrics,
-    upload_bitmap,
+    attach_content, begin_draw, bind_back_buffer, bitmap_target_props, create_composition,
+    create_d2d, create_d3d_device, create_dwrite, create_swap_chain, create_text_format,
+    create_text_layout, d2d_rect, end_draw, pixel_format, present, resize_swap_chain, rounded,
+    solid, swap_chain_props, text_metrics, upload_bitmap,
 };

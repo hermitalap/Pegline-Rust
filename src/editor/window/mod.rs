@@ -15,7 +15,6 @@ mod paint;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -24,17 +23,16 @@ use std::thread::{self, JoinHandle};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
+    D2D_SIZE_F, D2D_SIZE_U, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE,
-    D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND, D2D1_ROUNDED_RECT,
-    D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+    D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND,
+    D2D1_DASH_STYLE, D2D1_DASH_STYLE_CUSTOM, D2D1_DASH_STYLE_SOLID, D2D1_LINE_JOIN_ROUND,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1Bitmap,
     ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory, ID2D1Factory1, ID2D1Geometry,
-    ID2D1Image, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 use windows::Win32::Graphics::DirectComposition::{
@@ -44,11 +42,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_HIT_TEST_METRICS,
     DWRITE_TEXT_RANGE, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Dxgi::{
-    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_PRESENT,
-    IDXGIDevice, IDXGISurface, IDXGISwapChain1, IDXGISwapChain3,
-};
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISwapChain1, IDXGISwapChain3};
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory2, IWICImagingFactory};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance};
@@ -2572,20 +2566,8 @@ impl Surface {
         // The window is transparent around the card and the pills, so the swap
         // chain is premultiplied; the opaque card bitmap below it keeps
         // ClearType for the text marks.
-        let target_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX: dpi_f,
-            dpiY: dpi_f,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            colorContext: ManuallyDrop::new(None),
-        };
-        let card_props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: pixel_format(D2D1_ALPHA_MODE_IGNORE),
-            dpiX: dpi_f,
-            dpiY: dpi_f,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-            colorContext: ManuallyDrop::new(None),
-        };
+        let target_props = crate::gfx::swap_chain_props(dpi_f);
+        let card_props = crate::gfx::bitmap_target_props(dpi_f);
         let stroke_round = stroke_style(&factory, D2D1_DASH_STYLE_SOLID, None)?;
         let stroke_dash = stroke_style(&factory, D2D1_DASH_STYLE_CUSTOM, Some(&[4.0, 3.0]))?;
         let triangle = create_triangle(&factory)?;
@@ -2593,7 +2575,7 @@ impl Surface {
         let dwrite = create_dwrite()?;
         let shadow = crate::render::bake_card_shadow(&context, dpi_f, 20.0, 5.0)
             .map_err(|error| format!("bake card shadow: {error}"))?;
-        let mut surface = Self {
+        let surface = Self {
             hwnd,
             swap_chain,
             swap_chain3,
@@ -2622,25 +2604,8 @@ impl Surface {
             _d2d_device: d2d_device,
             _d3d_device: device,
         };
-        surface.attach_content()?;
+        crate::gfx::attach_content(&surface.swap_chain, &surface._visual, &surface._dcomp)?;
         Ok(surface)
-    }
-
-    fn attach_content(&mut self) -> Result<(), String> {
-        let content: windows::core::IUnknown = self
-            .swap_chain
-            .cast()
-            .map_err(|error| format!("swap chain -> IUnknown: {error}"))?;
-        // SAFETY: the visual and the DComp device are alive and owned by self.
-        unsafe {
-            self._visual
-                .SetContent(&content)
-                .map_err(|error| format!("SetContent: {error}"))?;
-            self._dcomp
-                .Commit()
-                .map_err(|error| format!("Commit: {error}"))?;
-        }
-        Ok(())
     }
 
     fn resize(&mut self, width_px: u32, height_px: u32, dpi: u32) -> Result<(), String> {
@@ -2648,32 +2613,19 @@ impl Surface {
         if width_px == self.width_px && height_px == self.height_px && dpi_f == self.dpi {
             return Ok(());
         }
-        // SAFETY: release the D2D targets before resizing their buffers.
-        unsafe {
-            self.context.SetTarget(None::<&ID2D1Image>);
-        }
-        self.targets = [None, None];
         self.card = None;
-        // SAFETY: every D2D target was released above.
-        unsafe {
-            self.swap_chain.ResizeBuffers(
-                2,
-                width_px,
-                height_px,
-                DXGI_FORMAT_B8G8R8A8_UNORM,
-                windows::Win32::Graphics::Dxgi::DXGI_SWAP_CHAIN_FLAG(0),
-            )
-        }
-        .map_err(|error| format!("ResizeBuffers: {error}"))?;
+        crate::gfx::resize_swap_chain(
+            &self.swap_chain,
+            &self.context,
+            &mut self.targets,
+            &mut self.target_props,
+            width_px,
+            height_px,
+            dpi_f,
+        )?;
         self.width_px = width_px;
         self.height_px = height_px;
         self.dpi = dpi_f;
-        // SAFETY: the context is ours; a DPI change must be pushed down.
-        unsafe {
-            self.context.SetDpi(self.dpi, self.dpi);
-        }
-        self.target_props.dpiX = self.dpi;
-        self.target_props.dpiY = self.dpi;
         self.card_props.dpiX = self.dpi;
         self.card_props.dpiY = self.dpi;
         match crate::render::bake_card_shadow(&self.context, self.dpi, 20.0, 5.0) {
@@ -2722,9 +2674,7 @@ impl Surface {
     }
 
     fn end_card(&mut self) -> Result<(), String> {
-        // SAFETY: `begin_card` called `BeginDraw` on this thread.
-        unsafe { self.context.EndDraw(None, None) }
-            .map_err(|error| format!("EndDraw(card): {error}"))
+        crate::gfx::end_draw(&self.context, "EndDraw(card)")
     }
 
     fn create_card(&mut self, width: u32, height: u32) -> Result<ID2D1Bitmap1, String> {
@@ -2739,63 +2689,31 @@ impl Surface {
 
     /// Binds the transparent swap-chain buffer and starts a window frame.
     fn begin_window(&mut self) -> Result<(), String> {
-        // SAFETY: the swap chain is ours and it has two buffers.
-        let index = unsafe { self.swap_chain3.GetCurrentBackBufferIndex() } as usize;
-        let bitmap = match self.targets[index].take() {
-            Some(bitmap) => bitmap,
-            None => {
-                // SAFETY: the swap chain owns the buffer and the surface is alive
-                // for the duration of `CreateBitmapFromDxgiSurface`.
-                let surface: IDXGISurface = unsafe { self.swap_chain.GetBuffer(index as u32) }
-                    .map_err(|error| format!("GetBuffer: {error}"))?;
-                unsafe {
-                    self.context
-                        .CreateBitmapFromDxgiSurface(&surface, Some(&self.target_props))
-                }
-                .map_err(|error| format!("CreateBitmapFromDxgiSurface: {error}"))?
-            }
-        };
-        // SAFETY: the bitmap is a target for this context and stays alive.
-        unsafe {
-            self.context.SetTarget(&bitmap);
-            self.context.SetDpi(self.dpi, self.dpi);
-            self.context.SetTransform(&Matrix3x2::identity());
-            // Text sits on the translucent pills; ClearType is reserved for
-            // the opaque card bitmap.
-            self.context
-                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            self.mica.borrow_mut().refresh(&self.context);
-            self.context.BeginDraw();
-            self.context.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
-        }
-        self.targets[index] = Some(bitmap);
+        crate::gfx::bind_back_buffer(
+            &self.swap_chain,
+            &self.swap_chain3,
+            &self.context,
+            &mut self.targets,
+            &self.target_props,
+            self.dpi,
+        )?;
+        self.mica.borrow_mut().refresh(&self.context);
+        // Text sits on the translucent pills; ClearType is reserved for the
+        // opaque card bitmap.
+        crate::gfx::begin_draw(
+            &self.context,
+            Some(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE),
+            Some(0.0),
+        );
         Ok(())
     }
 
     fn end(&mut self) -> Result<(), String> {
-        // SAFETY: `begin_window` called `BeginDraw` on this thread.
-        unsafe { self.context.EndDraw(None, None) }.map_err(|error| format!("EndDraw: {error}"))
+        crate::gfx::end_draw(&self.context, "EndDraw")
     }
 
     fn present(&self, sync: bool) -> crate::render::Present {
-        // SAFETY: the swap chain is ours; `Present` is the only call that may
-        // block, and it is deliberately on the render thread.
-        let result = unsafe { self.swap_chain.Present(u32::from(sync), DXGI_PRESENT(0)) };
-        if result.is_ok() {
-            crate::render::Present::Ok
-        } else if result == DXGI_ERROR_WAS_STILL_DRAWING {
-            crate::render::Present::Retry
-        } else if result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET {
-            crate::render::Present::DeviceLost
-        } else {
-            logging::error(format!("editor Present failed: 0x{:08X}", result.0));
-            crate::render::Present::DeviceLost
-        }
+        crate::gfx::present(&self.swap_chain, sync, "editor Present")
     }
 }
 
