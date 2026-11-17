@@ -606,8 +606,11 @@ impl LandingFollow {
                 self.swing.velocity = 0.0;
                 self.swing.set_stiffness(38.0, 2.4);
             } else {
+                // The same curve `Scene::Card::step_swing` uses for the landing
+                // nudge (F4): a mismatch would show as the flight copy and the
+                // real card swinging apart during the 0.16 s fade.
                 self.swing.value = self.nudge_from
-                    + (self.nudge_to - self.nudge_from) * ease::out_quad(self.nudge_t);
+                    + (self.nudge_to - self.nudge_from) * ease::smoothstep(self.nudge_t);
             }
         } else {
             self.swing.step(dt);
