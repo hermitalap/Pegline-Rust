@@ -70,6 +70,10 @@ const ENTRY_CROSSFADE_SECONDS: f32 = 0.12;
 /// eases out instead of snapping.
 const ENTRY_SETTLE_RESPONSE: f32 = 0.16;
 const ENTRY_SETTLE_DAMPING: f32 = 0.9;
+/// Residual tilt that lets the annotation flight start moving, degrees. The
+/// spring is far inside one pixel by then, and whatever is left finishes
+/// during the travel instead of delaying it (O1).
+const SETTLE_READY_DEG: f32 = 0.5;
 /// Padding around the travel bounds: 60 DIP plus 5% of the longer side.
 const PAD_DIP: f32 = 60.0;
 const PAD_FRACTION: f32 = 0.05;
@@ -935,7 +939,7 @@ impl FlightPlan {
     /// easing and both springs can be driven at any frame rate from a test.
     fn step(&mut self, elapsed: f32, frame_dt: f32) -> FlightPose {
         let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
-        let k = ease::in_out_cubic(t);
+        let k = ease::standard(t);
 
         // After the hand-off the flight image mirrors the real card's row
         // spring and landing sway, so the two never drift apart. An editor
@@ -970,20 +974,15 @@ impl FlightPlan {
         } else {
             0.0
         };
-        // A blended note entry keeps its starting lean and settles while it
-        // travels; the annotation pre-roll has already brought it to zero.
-        let settle_now = if self.blend {
-            self.settle.as_mut().map_or(0.0, |spring| {
+        // An entry that carries a settle spring keeps turning during the
+        // travel, so the sub-degree of tilt left when it starts never snaps
+        // back. Every other flight ramps its fixed tilt in over the trip.
+        let angle = match self.settle.as_mut() {
+            Some(spring) => {
                 spring.step(frame_dt);
                 spring.value
-            })
-        } else {
-            0.0
-        };
-        let angle = if self.blend {
-            settle_now
-        } else {
-            self.tilt * k
+            }
+            None => self.tilt * k,
         } + swing;
         let card = RectF::from_xywh(
             cx - width * 0.5 + x_offset,
@@ -1055,7 +1054,10 @@ impl FlightPlan {
         } else {
             1.0
         };
-        let settled = self.settle.as_ref().is_none_or(|spring| spring.settled());
+        let settled = self
+            .settle
+            .as_ref()
+            .is_none_or(|spring| spring.value.abs() < SETTLE_READY_DEG);
         let card = self.pre_roll_card;
         PreRollPose {
             card,

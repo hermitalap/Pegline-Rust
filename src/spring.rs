@@ -117,6 +117,50 @@ pub mod ease {
         x * x * (3.0 - 2.0 * x)
     }
 
+    /// CSS `ease`, `cubic-bezier(0.25, 0.1, 0.25, 1.0)`.
+    ///
+    /// A thrown card leaves fast and slows into the landing; `in_out_cubic`
+    /// spent the first fifth of the flight barely moving. Newton solves
+    /// `x(s) = t` on the curve's x, with a bisection fallback so a flat slope
+    /// can never spin; no allocation.
+    pub fn standard(x: f32) -> f32 {
+        // x1, y1, x2, y2 of the curve.
+        const P: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
+        fn bezier(a: f32, b: f32, s: f32) -> f32 {
+            let u = 1.0 - s;
+            3.0 * u * u * s * a + 3.0 * u * s * s * b + s * s * s
+        }
+        fn slope(a: f32, b: f32, s: f32) -> f32 {
+            let u = 1.0 - s;
+            3.0 * u * u * a + 6.0 * u * s * (b - a) + 3.0 * s * s * (1.0 - b)
+        }
+        let x = x.clamp(0.0, 1.0);
+        let mut s = x;
+        for _ in 0..4 {
+            let error = bezier(P[0], P[2], s) - x;
+            if error.abs() < 1e-5 {
+                break;
+            }
+            let slope = slope(P[0], P[2], s);
+            if slope.abs() < 1e-6 {
+                break;
+            }
+            s = (s - error / slope).clamp(0.0, 1.0);
+        }
+        if (bezier(P[0], P[2], s) - x).abs() > 1e-3 {
+            let (mut low, mut high) = (0.0f32, 1.0f32);
+            for _ in 0..16 {
+                s = 0.5 * (low + high);
+                if bezier(P[0], P[2], s) < x {
+                    low = s;
+                } else {
+                    high = s;
+                }
+            }
+        }
+        bezier(P[1], P[3], s)
+    }
+
     /// Hermite h10: adds a start velocity to any ease without moving its ends.
     /// `value = from + delta * ease(t) + v0 * duration * carry(t)`.
     ///
@@ -135,6 +179,24 @@ pub mod ease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flight_ease_leaves_fast_and_lands_slow() {
+        assert!(ease::standard(0.0).abs() < 1e-6);
+        assert!((ease::standard(1.0) - 1.0).abs() < 1e-5);
+        // 100 ms into a 650 ms flight is 19 % of the way, where in_out_cubic
+        // had covered 1.5 %.
+        let early = ease::standard(0.1 / 0.65);
+        assert!((0.15..=0.23).contains(&early), "early={early}");
+        // Monotonic, and never outside the unit square.
+        let mut previous = 0.0;
+        for step in 0..=200 {
+            let value = ease::standard(step as f32 / 200.0);
+            assert!(value >= previous - 1e-5, "step={step} value={value}");
+            assert!((-1e-5..=1.0 + 1e-5).contains(&value));
+            previous = value;
+        }
+    }
 
     #[test]
     fn converges_to_target() {
