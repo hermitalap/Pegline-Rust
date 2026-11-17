@@ -86,6 +86,31 @@ impl super::App {
         ))
     }
 
+    /// The card's rectangle, angle and scale from **one** published snapshot.
+    ///
+    /// A drop starts in exactly the pose the card has on the line, so the three
+    /// values must not come from three different frames: while the line is
+    /// sliding or a card is being dragged, a frame is 16-33 DIP of travel and
+    /// mixing frames would make the first dropped frame jump (F9).
+    pub(super) fn current_card_pose(&self, id: CardId) -> Option<(RectI, f32, f32)> {
+        let overlay = self.windows.overlay.as_ref()?;
+        let window = win32::window_rect(overlay.hwnd())?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        let card = snapshot.cards.iter().find(|card| card.id == id)?;
+        let scale = snapshot.scale.max(0.1);
+        Some((
+            RectI::new(
+                window.left + (card.frame.left * scale).round() as i32,
+                window.top + (card.frame.top * scale).round() as i32,
+                window.left + (card.frame.right * scale).round() as i32,
+                window.top + (card.frame.bottom * scale).round() as i32,
+            ),
+            card.angle,
+            card.scale,
+        ))
+    }
+
     /// The card's current visual angle in degrees, published with the same
     /// snapshot as its frame. `None` when it is not on the line.
     pub(super) fn current_card_angle(&self, id: CardId) -> Option<f32> {
@@ -97,19 +122,6 @@ impl super::App {
             .iter()
             .find(|card| card.id == id)
             .map(|card| card.angle)
-    }
-
-    /// The card's current visual scale, published with the same snapshot as
-    /// its frame (press spring times the lift a card in hand gets).
-    pub(super) fn current_card_scale(&self, id: CardId) -> Option<f32> {
-        let overlay = self.windows.overlay.as_ref()?;
-        let snapshot = overlay.snapshot();
-        let snapshot = snapshot.lock().ok()?;
-        snapshot
-            .cards
-            .iter()
-            .find(|card| card.id == id)
-            .map(|card| card.scale)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -3457,13 +3457,11 @@ impl App {
             return;
         };
         let thumb = item.thumb.clone();
-        let fallback = item.tilt;
         // The drop has to start in exactly the pose the card has on the line:
         // the swing angle (swing + tilt + lean) and the press/lift scale, about
-        // the clothespin (H12).
-        let angle = self.current_card_angle(id).unwrap_or(fallback);
-        let scale = self.current_card_scale(id).unwrap_or(1.0);
-        let Some(rect) = self.current_card_px(id) else {
+        // the clothespin (H12). One snapshot supplies all three so a frame
+        // boundary between the reads cannot move the card under the drop.
+        let Some((rect, angle, scale)) = self.current_card_pose(id) else {
             return;
         };
         let Some(dpi) = self.screen_dpi() else {
