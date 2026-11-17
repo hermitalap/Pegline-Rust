@@ -1603,6 +1603,10 @@ impl App {
         let (card_w, card_h) = layout::note_card_size();
         let window_height = (card_h + NOTE_PADDING_DIP * 2.0) * scale;
         let work = screen.work;
+        // The entry may have reflowed since the last tick; the hovered note
+        // follows its slot on the existing spring (H16). Read it before the
+        // mutable borrow of the hover state.
+        let home_now = self.note_entry_home_px(scale);
         let mut bounds = None;
         let mut finished = false;
         let slow = self.dev.note_slow as f64;
@@ -1623,6 +1627,20 @@ impl App {
                     );
                     hover.center = center;
                     hover.angle = layout::NOTE_PEEK_ANGLE_DEG * (1.0 - k);
+                    // The fly-in's own speed, so a pointer that leaves now
+                    // hands over to the fly-out without stopping dead (H18).
+                    let rate = if t < 0.5 {
+                        12.0 * t * t
+                    } else {
+                        3.0 * (2.0 - 2.0 * t) * (2.0 - 2.0 * t)
+                    };
+                    let fly = (NOTE_FLY_IN_SECONDS * slow) as f32;
+                    if fly > 0.0 {
+                        hover.vel = (
+                            (hover.to.0 - hover.from.0) * rate / fly,
+                            (hover.to.1 - hover.from.1) * rate / fly,
+                        );
+                    }
                     if now >= hover.trace_at {
                         logging::trace_args(format_args!(
                             "hover fly-in t={t:.2} center={:?}",
@@ -1661,6 +1679,9 @@ impl App {
                         hover.from = hover.center;
                         hover.to = (hover.center.0, work.top as f32 - window_height * 0.7);
                     } else {
+                        if let Some(home) = home_now {
+                            hover.home = home;
+                        }
                         step_hover_physics(hover, pointer_x, pointer_y, now, scale, work);
                     }
                 }
@@ -1668,9 +1689,17 @@ impl App {
                     let t = ((now - hover.started) / (NOTE_FLY_OUT_SECONDS * slow)).clamp(0.0, 1.0)
                         as f32;
                     let k = ease::in_out_cubic(t);
+                    // Start from the paper's speed when it left: `vel` is frozen
+                    // on this segment, so the hand-off never stops dead (H17).
+                    let duration = (NOTE_FLY_OUT_SECONDS * slow) as f32;
+                    let carry = ease::carry(t);
                     hover.center = (
-                        hover.from.0 + (hover.to.0 - hover.from.0) * k,
-                        hover.from.1 + (hover.to.1 - hover.from.1) * k,
+                        hover.from.0
+                            + (hover.to.0 - hover.from.0) * k
+                            + hover.vel.0 * duration * carry,
+                        hover.from.1
+                            + (hover.to.1 - hover.from.1) * k
+                            + hover.vel.1 * duration * carry,
                     );
                     // The pointer no longer pulls: the paper straightens out
                     // while it climbs away, on the same angular spring.
