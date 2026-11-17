@@ -197,7 +197,7 @@ struct Card {
   `probe` 同时报告 p50 / p95 / max，p95 超过预算即视为不达标。
 - 可选帧率上限：`fps=auto|60|120`（默认 `auto`）。`60` 用于省电或在 120 Hz 屏上
   保持和旧版一致的手感；实现方式是跳过 `Present` 并在下一帧合并 `dt`，
-  **不要**用 `Sleep` 凑帧。
+  **不要**用 `Sleep` 凑帧。上限不低于显示器刷新率时等同 `auto`（例如在 60 Hz 屏上选 120），不会为了凑到 120 而空转。
 - 窗口隐藏时不进入帧循环（`WaitForSingleObject` 等命令或显示事件），空闲 CPU 归零。
 - 垂直同步之外的同步手段：如果某些驱动上 `Present(1,0)` 的节流不稳定，
   退回 `Present(0, DXGI_PRESENT_DO_NOT_WAIT)` + `IDXGIOutput::WaitForVBlank`，
