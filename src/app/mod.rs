@@ -831,6 +831,20 @@ impl App {
         }
     }
 
+    /// Frame cap period for `screen`. A cap at or above the display's refresh
+    /// rate is the same as `auto`: sleeping toward it only drifts off the
+    /// vblank, so the display keeps its natural cadence (H20).
+    fn frame_cap_period(&self, screen: Monitor) -> f64 {
+        let period = self.settings.fps_cap().period();
+        if period <= 0.0 {
+            return 0.0;
+        }
+        match win32::monitor_refresh_hz(screen.handle) {
+            Some(hz) if hz > 0 && 1.0 / period >= hz as f64 - 1.0 => 0.0,
+            _ => period,
+        }
+    }
+
     fn open_overlay(&mut self) {
         let screen = Self::pointer_screen().or_else(|| win32::monitors().into_iter().next());
         let Some(screen) = screen else {
@@ -844,7 +858,7 @@ impl App {
         match Overlay::create(screen.work, screen.dpi) {
             Ok(overlay) => {
                 // The frame cap follows `fps=auto|60|120` from settings.ini.
-                overlay.set_frame_cap(self.settings.fps_cap().period());
+                overlay.set_frame_cap(self.frame_cap_period(screen));
                 self.windows.overlay = Some(overlay);
                 self.screen = Some(screen);
             }

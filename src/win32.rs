@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, ScreenToClient,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
+    HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint,
+    ScreenToClient,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -133,6 +134,44 @@ pub fn monitor_at(x: i32, y: i32) -> Option<Monitor> {
     // SAFETY: MonitorFromPoint takes a point by value and returns a handle.
     let handle = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
     monitors().into_iter().find(|m| m.handle == handle)
+}
+
+/// Current refresh rate of a monitor in Hz, as Windows reports it.
+///
+/// The frame cap compares against this: a cap at or above the refresh rate is
+/// the same as `auto`, because sleeping toward such a cap only drifts off the
+/// vblank (see `DECISIONS.md` D19).
+pub fn monitor_refresh_hz(monitor: HMONITOR) -> Option<u32> {
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: `info` is a MONITORINFOEXW whose first field is a sized
+    // MONITORINFO, and the handle comes from the window's current monitor.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let mut devmode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    // SAFETY: `szDevice` is NUL-terminated by Windows and `devmode` is a
+    // correctly sized DEVMODEW for ENUM_CURRENT_SETTINGS to fill.
+    let ok = unsafe {
+        EnumDisplaySettingsW(
+            PCWSTR(info.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut devmode,
+        )
+    };
+    if ok.as_bool() && devmode.dmDisplayFrequency > 1 {
+        Some(devmode.dmDisplayFrequency)
+    } else {
+        None
+    }
 }
 
 /// The cursor position in device pixels. Returns `None` if the call fails,

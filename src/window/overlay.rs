@@ -292,13 +292,18 @@ fn render_thread(
     let mut frame_cap = 0.0f64;
     let mut last_present = 0.0f64;
     let mut last = win32::now_seconds();
+    // Step of the last frame that ran without waiting. A wake-up frame reuses
+    // it, so an idle gap does not become one giant animation step (H1).
+    let mut last_dt = 0.0f32;
     let mut lost = 0u32;
 
     'outer: loop {
+        let mut waited = false;
         // Wait for work when the line is hidden or nothing is moving: this is
         // what makes idle CPU exactly zero. While the line is visible with
         // cards on it, wake up for the next breeze instead of blocking forever.
         if !visible || !needs_frame {
+            waited = true;
             let wake = if visible {
                 scene.next_wake_in(win32::now_seconds())
             } else {
@@ -374,9 +379,19 @@ fn render_thread(
             }
         }
 
+        if waited {
+            // The wait blocked for an arbitrary time (a command, the next
+            // breeze, or minutes of idle). Pretend the previous frame ended
+            // `last_dt` ago so the scene advances by one normal step instead
+            // of the whole gap; wake frames never update `last_dt`.
+            last = win32::now_seconds() - last_dt as f64;
+        }
         let now = win32::now_seconds();
         let dt = ((now - last) as f32).clamp(0.0, 0.05);
         last = now;
+        if !waited {
+            last_dt = dt;
+        }
 
         // A pin drag is sampled here, once per frame, at the display's rate:
         // the 33 ms UI tick and the command queue would both make the card lag

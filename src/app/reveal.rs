@@ -167,10 +167,11 @@ impl super::App {
         self.cancel_note_hover();
         self.hide_preview();
         self.state.preview_state.reset();
+        let cap = self.frame_cap_period(screen);
         if let Some(overlay) = self.windows.overlay.as_mut() {
             overlay.place(screen.work, screen.dpi);
             overlay.send(Command::SetVisible(self.state.is_present));
-            overlay.set_frame_cap(self.settings.fps_cap().period());
+            overlay.set_frame_cap(cap);
         }
         self.screen = Some(screen);
         self.enforce_capacity();
