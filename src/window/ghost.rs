@@ -202,10 +202,17 @@ fn ghost_thread(hwnd: SendHwnd, rx: Receiver<GhostCommand>, ready: Sender<Result
         // an alias that the pointer did not always survive. The ghost now
         // follows itself.
         let command = if shown {
-            match rx.recv_timeout(Duration::from_millis(FOLLOW_MS)) {
+            // `recv_timeout(15 ms)` waits on the system timer, which rounds the
+            // wait up to its tick (30 ms here): the ghost then stepped every
+            // other frame. A high-resolution sleep keeps the 15 ms cadence
+            // without touching the process-wide timer resolution.
+            match rx.try_recv() {
                 Ok(command) => Some(command),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(FOLLOW_MS));
+                    None
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
         } else {
             match rx.recv() {
