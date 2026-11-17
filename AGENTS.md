@@ -110,7 +110,7 @@ frame woken from idle keeps one normal `dt`. Landing is mirrored in
 `docs/DECISIONS.md` D19: a gust starting from rest differs from 2.6.2 by up to
 0.94°, and retract→reveal still jumps 38 % at 60 Hz because reveal is a spring
 while retract is an ease. 223 lib + 1 main tests, clippy/fmt clean, probe
-60.00 fps / draw p50 0.820 ms / private 97.3 MB, exe 1,885,696 B (2.6.2:
+60.00 fps / draw p50 0.820 ms / private 97.3 MB, exe 1,885,184 B (2.6.2:
 1,903,104 B). Tag `v2.7.0`; 120 Hz, a second monitor and sleep/wake remain
 unmeasured.
 

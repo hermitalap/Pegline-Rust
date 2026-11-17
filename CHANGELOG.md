@@ -24,7 +24,7 @@
 - 223 个 lib 测试 + 1 个 main 测试通过（新增 3 个：收起中途放下的速度连续、落卡首帧姿态、
   CSS 飞行曲线）；`cargo clippy --all-targets -- -D warnings` 与 `cargo fmt --check` 干净。
 - `probe --mode=line`：60.00 fps，p50 16.66 / p95 16.93 ms，draw p50 0.820 / p95 1.291 ms，
-  private 97.3 MB；`--mode=flight`：60.39 fps，private 94.6 MB。`pegline.exe` 1,885,696 B
+  private 97.3 MB；`--mode=flight`：60.39 fps，private 94.6 MB。`pegline.exe` 1,885,184 B
   （2.6.2：1,903,104 B）。
 - 仓库外副本用审计同一套导出器复测 15 处修改：7 项达成、8 项部分，逐条改前/改后数字已随修复记录归档；独立复核 0 阻断。
 
