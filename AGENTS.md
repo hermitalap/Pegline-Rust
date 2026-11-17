@@ -93,6 +93,27 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
+**2.7.0 (2026-11-17)** ships the animation-continuity round: every phase hand-off
+now carries its velocity instead of dropping it. The line's retract/submerge
+eases from the current `slide.velocity` (`carry`/`carry_rate` in `spring::ease`),
+a gust starts at the card's current angular speed (`smoothstep` base, which
+equals `out_quad − 2·carry`), releasing a pin folds the 4° drag lean into the
+swing spring instead of zeroing it, a note flight-out inherits the fly-in
+velocity, and a drop starts from the published `HitCard` pose (angle + press/lift
+scale, about the clothespin) on an `e = t²` curve. The four `FlightPlan` paths
+use CSS `ease` (`cubic-bezier(0.25,0.1,0.25,1)`) and the annotation pre-roll
+starts at 0.5° of residual tilt (233 → 67 ms). The drag ghost polls with
+`try_recv` + a 15 ms sleep (30.8 → 16.4 ms, duplicate frames 66.7 % → 1.0 %),
+the note entry re-reads its home every tick, alphas are `1 − exp(−k·dt)`, and a
+frame woken from idle keeps one normal `dt`. Landing is mirrored in
+`LandingFollow` (0.6519° → 0.00000°). The known trade-offs are recorded in
+`docs/DECISIONS.md` D19: a gust starting from rest differs from 2.6.2 by up to
+0.94°, and retract→reveal still jumps 38 % at 60 Hz because reveal is a spring
+while retract is an ease. 223 lib + 1 main tests, clippy/fmt clean, probe
+60.00 fps / draw p50 0.820 ms / private 97.3 MB, exe 1,885,696 B (2.6.2:
+1,903,104 B). Tag `v2.7.0`; 120 Hz, a second monitor and sleep/wake remain
+unmeasured.
+
 **2.6.2 (2026-11-13)**: it replaces the 2.6.1 pin-drag paper model with direct
 manipulation. The dragged card is placed on the pointer 1:1 (no follow spring,
 no lag), the neighbour glides one slot on a single critically damped 0.24 s
