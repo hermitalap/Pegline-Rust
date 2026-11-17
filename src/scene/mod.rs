@@ -201,6 +201,9 @@ struct Card {
     nudge_to: f32,
     /// -1 is idle, 0..1 is the ease-out progress of an active nudge.
     nudge_t: f32,
+    /// Angular speed at the instant the active nudge started: the ease takes
+    /// over from it so the card never jumps speed (H2).
+    nudge_v0: f32,
     /// The hanging card's sway. The only rotation the drag adds on top of
     /// `swing`: up to [`DRAG_LEAN_MAX_DEG`] of trailing lean while the card is
     /// in hand, straight in rest.
@@ -239,6 +242,7 @@ impl Card {
             nudge_from: 0.0,
             nudge_to: 0.0,
             nudge_t: -1.0,
+            nudge_v0: 0.0,
             lean: Spring::new(DRAG_LEAN_RESPONSE, DRAG_LEAN_DAMPING, 0.0),
             pin_scale: Spring::new(0.16, 0.85, 1.0),
             pin_glow: Spring::new(0.16, 0.85, 0.0),
@@ -269,6 +273,7 @@ impl Card {
         self.nudge_to = degrees;
         self.nudge_t = 0.0;
         self.nudge_delay = 0.0;
+        self.nudge_v0 = self.swing.velocity;
     }
 
     /// Schedules a gust for this card: it keeps swinging for `delay` seconds,
@@ -280,6 +285,7 @@ impl Card {
             self.nudge_from = self.swing.value;
             self.nudge_t = 0.0;
             self.nudge_delay = 0.0;
+            self.nudge_v0 = self.swing.velocity;
         } else {
             self.nudge_delay = delay;
             self.nudge_t = -1.0;
@@ -288,13 +294,15 @@ impl Card {
 
     /// Whether the swing is visually at rest. The generic spring threshold
     /// (0.001) is far below one pixel for a rotation, and a lightly damped
-    /// spring takes many seconds to reach its velocity; stopping the frame loop
-    /// at a twentieth of a degree is what matters here.
+    /// spring takes many seconds to reach it. 0.05° is 0.17 DIP at the bottom
+    /// edge of a 200 DIP card (0.35 physical pixels at 200 %), and 0.3 °/s is
+    /// the peak speed of a 0.05° swing, so the two thresholds stop the frame
+    /// loop together (H9).
     fn swing_at_rest(&self) -> bool {
         self.nudge_delay <= 0.0
             && self.nudge_t < 0.0
-            && self.swing.value.abs() < 0.02
-            && self.swing.velocity.abs() < 0.1
+            && self.swing.value.abs() < 0.05
+            && self.swing.velocity.abs() < 0.3
     }
 
     /// Advances the swing by `dt`: a pending gust counts down, an active gust
@@ -310,6 +318,7 @@ impl Card {
                 self.nudge_delay = 0.0;
                 self.nudge_from = self.swing.value;
                 self.nudge_t = 0.0;
+                self.nudge_v0 = self.swing.velocity;
             }
             return;
         }
@@ -321,8 +330,16 @@ impl Card {
                 self.swing.velocity = 0.0;
                 self.swing.set_stiffness(38.0, 2.4);
             } else {
+                // Smoothstep base plus a carry term: the ease starts at exactly
+                // the card's current angular speed and ends at rest, while the
+                // endpoints stay `nudge_from`/`nudge_to` (H2).
+                let t = self.nudge_t;
+                let delta = self.nudge_to - self.nudge_from;
                 self.swing.value = self.nudge_from
-                    + (self.nudge_to - self.nudge_from) * ease::out_quad(self.nudge_t);
+                    + delta * ease::smoothstep(t)
+                    + self.nudge_v0 * 0.3 * ease::carry(t);
+                self.swing.velocity =
+                    (delta * 6.0 * t * (1.0 - t) + self.nudge_v0 * 0.3 * ease::carry_rate(t)) / 0.3;
             }
             return;
         }
@@ -421,6 +438,9 @@ pub struct Scene {
     slide: Spring,
     hide_t: f32,
     hide_from: f32,
+    /// Vertical speed the line had when the close began; the quadratic close
+    /// carries it so a reveal interrupted mid-way does not stop dead (H4).
+    hide_v0: f32,
     /// 0 = the entry note is hidden, 1 = its 16 DIP top corner is showing.
     note_peek: Spring,
     /// Horizontal centre of the entry's peeking corner, in window DIP. It
@@ -477,6 +497,7 @@ impl Scene {
             slide: Spring::new(0.42, 0.82, layout::HIDDEN_SLIDE),
             hide_t: -1.0,
             hide_from: layout::HIDDEN_SLIDE,
+            hide_v0: 0.0,
             note_peek: Spring::new(0.22, 1.0, 0.0),
             note_peek_x: Spring::new(ROW_RESPONSE, ROW_DAMPING, note_peek_x),
             cards: Vec::new(),
@@ -840,7 +861,16 @@ impl Scene {
             card.x.velocity = grab.speed.clamp(-600.0, 600.0);
             card.drop.set_response(RELEASE_RESPONSE, RELEASE_DAMPING);
             card.drop.target = 0.0;
-            card.lean.target = 0.0;
+            // Hand the drag's lean to the hanging sway: the card keeps the
+            // angle it was released at and swings back through zero instead of
+            // snapping straight (H6). A running gust is cancelled first so it
+            // cannot overwrite the merged angle on the next frame.
+            card.nudge_t = -1.0;
+            card.nudge_delay = 0.0;
+            card.swing.value += card.lean.value;
+            card.swing.velocity += card.lean.velocity;
+            card.lean.snap(0.0);
+            card.swing.set_stiffness(38.0, 2.4);
             card.press.set_response(0.3, 0.6);
             card.press.target = 1.0;
             card.release_spring = true;
@@ -1030,13 +1060,22 @@ impl Scene {
             if self.hide_t < 0.0 {
                 self.hide_t = 0.0;
                 self.hide_from = self.slide.value;
+                self.hide_v0 = self.slide.velocity;
             }
             if self.hide_t < 1.0 {
                 animating = true;
                 self.hide_t = (self.hide_t + dt / HIDE_SECONDS).min(1.0);
-                self.slide.value = self.hide_from
-                    + (layout::HIDDEN_SLIDE - self.hide_from) * self.hide_t * self.hide_t;
-                self.slide.velocity = 0.0;
+                let t = self.hide_t;
+                let delta = layout::HIDDEN_SLIDE - self.hide_from;
+                self.slide.value =
+                    self.hide_from + delta * t * t + self.hide_v0 * HIDE_SECONDS * ease::carry(t);
+                self.slide.velocity = if t >= 1.0 {
+                    // Fully tucked away: the next reveal starts from rest.
+                    0.0
+                } else {
+                    (2.0 * delta * t + self.hide_v0 * HIDE_SECONDS * ease::carry_rate(t))
+                        / HIDE_SECONDS
+                };
                 self.dirty = true;
             }
         }
@@ -1053,7 +1092,8 @@ impl Scene {
         // Hint fades with the card count.
         let hint_target = if self.cards.is_empty() { 1.0 } else { 0.0 };
         if (self.hint_alpha - hint_target).abs() > 0.001 {
-            self.hint_alpha += (hint_target - self.hint_alpha) * (dt / 0.3 * 2.0).min(1.0);
+            let k = (dt / 0.3 * 2.0) as f64;
+            self.hint_alpha += (hint_target - self.hint_alpha) * (1.0 - (-k).exp()) as f32;
             animating = true;
             self.dirty = true;
         }
@@ -1170,19 +1210,22 @@ impl Scene {
                     card.arrived = true;
                 }
             } else {
-                card.opacity += (1.0 - card.opacity) * (dt / FADE_SECONDS * 2.0).min(1.0);
+                // Exponential approach: frame-rate independent, unlike
+                // `x += (1 - x) * k * dt` (H5).
+                let k = (dt / FADE_SECONDS * 2.0) as f64;
+                card.opacity += (1.0 - card.opacity) * (1.0 - (-k).exp()) as f32;
                 if card.drop.value < -0.5 {
                     card.opacity = (1.0 + card.drop.value / 46.0).clamp(0.0, 1.0);
                 }
             }
 
-            card.cross_alpha +=
-                ((if hovered { 1.0 } else { 0.0 }) - card.cross_alpha) * (dt * 12.0).min(1.0);
-            card.copied_alpha +=
-                ((if copying { 1.0 } else { 0.0 }) - card.copied_alpha) * (dt * 12.0).min(1.0);
+            card.cross_alpha += ((if hovered { 1.0 } else { 0.0 }) - card.cross_alpha)
+                * (1.0 - (-(dt * 12.0) as f64).exp()) as f32;
+            card.copied_alpha += ((if copying { 1.0 } else { 0.0 }) - card.copied_alpha)
+                * (1.0 - (-(dt * 12.0) as f64).exp()) as f32;
             let show_actions = hovered && !copying && !pressed_here && card.arrived;
             card.actions_alpha += ((if show_actions { 1.0 } else { 0.0 }) - card.actions_alpha)
-                * (dt * 14.0).min(1.0);
+                * (1.0 - (-(dt * 14.0) as f64).exp()) as f32;
 
             animating |= !card.x.settled()
                 || !card.drop.settled()
@@ -1583,6 +1626,51 @@ mod tests {
         assert!(scene.cards[1].nudge_t >= 0.0, "landing must sway");
         scene.publish();
         assert_eq!(snapshot.lock().unwrap().cards.len(), 2);
+    }
+
+    #[test]
+    fn a_reveal_mid_close_keeps_the_slide_moving() {
+        let snapshot =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::types::FrameSnapshot::default()));
+        let mut scene = Scene::new(
+            1920,
+            96,
+            crate::render::ActionsLayout::default(),
+            crate::render::ActionsLayout::default(),
+            32.0,
+            snapshot,
+        );
+        scene.visible = true;
+        scene.revealed = true;
+        scene.slide.snap(0.0);
+
+        // Close for three frames: the quadratic ease is at full speed.
+        scene.revealed = false;
+        let mut before = scene.slide.value;
+        for _ in 0..3 {
+            before = scene.slide.value;
+            scene.update(1.0 / 60.0, 0.0);
+        }
+        let closing_step = scene.slide.value - before;
+        assert!(closing_step < -1.0, "the close is moving: {closing_step}");
+        let closing_speed = scene.slide.velocity;
+
+        // Re-reveal mid-close: the spring has to inherit that speed. The old
+        // code zeroed `slide.velocity` on every closing frame, so the reveal
+        // frame moved ~0 DIP and the line stopped dead (H4).
+        let frame_start = scene.slide.value;
+        scene.revealed = true;
+        scene.update(1.0 / 60.0, 0.0);
+        let reveal_step = scene.slide.value - frame_start;
+        assert!(
+            reveal_step < 0.0 && reveal_step.abs() > closing_step.abs() * 0.5,
+            "reveal frame moved {reveal_step} against a closing step of {closing_step}"
+        );
+        assert!(
+            scene.slide.velocity < 0.0 && scene.slide.velocity.abs() > closing_speed.abs() * 0.4,
+            "speed {} vs closing {closing_speed}",
+            scene.slide.velocity
+        );
     }
 
     fn card() -> Card {

@@ -108,6 +108,28 @@ pub mod ease {
     pub fn out_quad(x: f32) -> f32 {
         1.0 - (1.0 - x) * (1.0 - x)
     }
+
+    /// The smoothstep ramp `3t² − 2t³`: zero speed at both ends.
+    ///
+    /// It is exactly `out_quad(t) − 2 * carry(t)`, which is why a nudge can
+    /// start from the card's current angular speed without moving its ends.
+    pub fn smoothstep(x: f32) -> f32 {
+        x * x * (3.0 - 2.0 * x)
+    }
+
+    /// Hermite h10: adds a start velocity to any ease without moving its ends.
+    /// `value = from + delta * ease(t) + v0 * duration * carry(t)`.
+    ///
+    /// `carry(0) = carry(1) = 0`, `carry_rate(0) = 1`, `carry_rate(1) = 0`, so
+    /// the segment starts at exactly `v0` and ends at the ease's own speed.
+    pub fn carry(t: f32) -> f32 {
+        t * (1.0 - t) * (1.0 - t)
+    }
+
+    /// Derivative of [`carry`] with respect to `t`.
+    pub fn carry_rate(t: f32) -> f32 {
+        (1.0 - t) * (1.0 - 3.0 * t)
+    }
 }
 
 #[cfg(test)]
