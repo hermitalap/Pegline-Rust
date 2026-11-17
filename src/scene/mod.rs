@@ -1341,6 +1341,7 @@ impl Scene {
                 primary_action,
                 open_button,
                 angle: card.swing.value + card.tilt + card.lean.value,
+                scale: card.press.value * if grabbed { DRAG_LIFT_SCALE } else { 1.0 },
                 pin,
                 pin_box: RectF::new(pin.0 - 10.0, pin.1 - 4.0, pin.0 + 10.0, pin.1 + 30.0),
                 // A card in flight is drawn by the flight window, and the card

@@ -225,6 +225,10 @@ pub struct HitCard {
     /// The card's current visual angle, degrees, swing plus its fixed tilt.
     /// The annotations flight starts from this angle and settles upright.
     pub angle: f32,
+    /// The card's visual scale: the press spring times the lift a card in hand
+    /// gets. The drop flight starts from it so the hand-off does not pop the
+    /// card smaller.
+    pub scale: f32,
     /// The rotation origin of that angle, in window DIP: the clothespin at the
     /// top of the frame. The card is drawn swung about this point, so the hit
     /// tests turn the pointer back around it.
@@ -396,6 +400,7 @@ mod tests {
             primary_action: ActionKind::Annotate,
             open_button: RectF::new(186.0, 206.0, 280.0, 232.0),
             angle: 0.0,
+            scale: 1.0,
             // The clothespin sits PIN_ABOVE the frame's top, on the centre.
             pin: (200.0, 36.0),
             pin_box: RectF::new(190.0, 32.0, 210.0, 66.0),

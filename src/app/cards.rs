@@ -99,6 +99,19 @@ impl super::App {
             .map(|card| card.angle)
     }
 
+    /// The card's current visual scale, published with the same snapshot as
+    /// its frame (press spring times the lift a card in hand gets).
+    pub(super) fn current_card_scale(&self, id: CardId) -> Option<f32> {
+        let overlay = self.windows.overlay.as_ref()?;
+        let snapshot = overlay.snapshot();
+        let snapshot = snapshot.lock().ok()?;
+        snapshot
+            .cards
+            .iter()
+            .find(|card| card.id == id)
+            .map(|card| card.scale)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn add_item(
         &mut self,

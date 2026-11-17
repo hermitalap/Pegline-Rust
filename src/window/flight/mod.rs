@@ -193,7 +193,10 @@ enum FlightCommand {
         generation: u64,
         image: ImageData,
         rect: RectI,
-        tilt: f32,
+        /// The card's visual angle on the line, degrees (swing + tilt + lean).
+        angle: f32,
+        /// The card's press/lift scale when it left the line.
+        scale: f32,
         origin: RectI,
         dpi: u32,
     },
@@ -440,11 +443,12 @@ impl Flight {
         token: u64,
         image: ImageData,
         rect: RectI,
-        tilt: f32,
+        angle: f32,
+        scale: f32,
         dpi: u32,
     ) -> bool {
-        let scale = dpi as f32 / 96.0;
-        let travel = (DROP_DISTANCE * scale) as i32;
+        let dpi_scale = dpi as f32 / 96.0;
+        let travel = (DROP_DISTANCE * dpi_scale) as i32;
         let bounds = clamp_to_desktop(
             RectI::new(rect.left, rect.top, rect.right, rect.bottom).inflate(travel + 64),
         );
@@ -465,7 +469,8 @@ impl Flight {
             generation: self.generation,
             image,
             rect,
-            tilt,
+            angle,
+            scale,
             origin: bounds,
             dpi,
         });
@@ -681,7 +686,8 @@ fn flight_thread(
                 generation,
                 image,
                 rect,
-                tilt,
+                angle,
+                scale,
                 origin,
                 dpi,
             } => {
@@ -692,7 +698,8 @@ fn flight_thread(
                     &interrupt,
                     &image,
                     rect,
-                    tilt,
+                    angle,
+                    scale,
                     origin,
                     dpi,
                     &on_event,
@@ -1163,7 +1170,8 @@ fn run_drop(
     interrupt: &AtomicU64,
     image: &ImageData,
     rect: RectI,
-    tilt: f32,
+    angle: f32,
+    pose_scale: f32,
     origin: RectI,
     dpi: u32,
     on_event: &dyn Fn(FlightEvent),
@@ -1171,13 +1179,13 @@ fn run_drop(
     let width_px = origin.width().max(1) as u32;
     let height_px = origin.height().max(1) as u32;
     renderer.resize(width_px, height_px, dpi)?;
-    let scale = dpi as f32 / 96.0;
+    let dpi_scale = dpi as f32 / 96.0;
     let texture = renderer.upload(image)?;
 
-    let width = rect.width() as f32 / scale;
-    let height = rect.height() as f32 / scale;
-    let cx = (rect.left + rect.right) as f32 * 0.5 / scale - origin.left as f32 / scale;
-    let top = rect.top as f32 / scale - origin.top as f32 / scale;
+    let width = rect.width() as f32 / dpi_scale;
+    let height = rect.height() as f32 / dpi_scale;
+    let cx = (rect.left + rect.right) as f32 * 0.5 / dpi_scale - origin.left as f32 / dpi_scale;
+    let top = rect.top as f32 / dpi_scale - origin.top as f32 / dpi_scale;
     logging::trace(format!(
         "drop render start size={width:.1}x{height:.1} origin={origin:?}"
     ));
@@ -1191,7 +1199,7 @@ fn run_drop(
         }
         let elapsed = (win32::now_seconds() - start) as f32;
         let t = (elapsed / DROP_SECONDS).clamp(0.0, 1.0);
-        let (transform, opacity) = drop_pose(t, cx - width * 0.5, top, width, tilt);
+        let (transform, opacity) = drop_pose(t, cx - width * 0.5, top, width, angle, pose_scale);
         renderer.begin()?;
         renderer.set_transform(transform);
         // `push_opacity` returns false for a fully opaque group because it skips
@@ -1391,24 +1399,62 @@ mod tests {
 
     #[test]
     fn a_falling_card_only_moves_down() {
-        let (left, top, width, tilt) = (123.0, 41.0, 144.0, 2.0);
+        let (left, top, width, angle, scale) = (123.0, 41.0, 144.0, 2.0, 1.0);
         let cx = left + width * 0.5;
         for step in 0..=20 {
             let t = step as f32 / 20.0;
-            let (transform, opacity) = drop_pose(t, left, top, width, tilt);
+            let (transform, opacity) = drop_pose(t, left, top, width, angle, scale);
             // The pin is the rotation centre, so rotating never moves it and
             // the card falls in the column above its slot.
-            let pin = apply(&transform, width * 0.5, 0.0);
+            let pin = apply(&transform, width * 0.5, -layout::CARD_OFFSET_BELOW_TOP);
             assert!((pin.0 - cx).abs() < 1e-3, "t={t} pin={pin:?}");
-            let e = t * t * t;
-            assert!((pin.1 - (top + DROP_DISTANCE * e)).abs() < 1e-3);
+            let e = t * t;
+            assert!(
+                (pin.1 - (top - layout::CARD_OFFSET_BELOW_TOP + DROP_DISTANCE * e)).abs() < 1e-3,
+                "t={t} pin={pin:?}"
+            );
             assert!((opacity - (1.0 - e)).abs() < 1e-4);
         }
         // The timeline ends with the card one full drop below and invisible.
-        let (transform, opacity) = drop_pose(1.0, 0.0, 10.0, 144.0, 0.0);
-        let pin = apply(&transform, 72.0, 0.0);
-        assert!((pin.1 - (10.0 + DROP_DISTANCE)).abs() < 1e-3);
+        let (transform, opacity) = drop_pose(1.0, 0.0, 10.0, 144.0, 0.0, 1.0);
+        let pin = apply(&transform, 72.0, -layout::CARD_OFFSET_BELOW_TOP);
+        assert!((pin.1 - (10.0 - layout::CARD_OFFSET_BELOW_TOP + DROP_DISTANCE)).abs() < 1e-3);
         assert!(opacity.abs() < 1e-4);
+    }
+
+    /// The first dropped frame must land exactly on the frame the line drew:
+    /// same angle, same scale, same rotation origin (`draw_card`'s composition
+    /// reproduced here, since the scene's painter is private).
+    #[test]
+    fn the_first_dropped_frame_matches_the_line_pose() {
+        let (card_w, card_h) = (150.0f32, 100.0f32);
+        let (left, top) = (320.0f32, 40.0f32);
+        let angle = 12.5f32;
+        let scale = 1.035f32;
+        let (transform, opacity) = drop_pose(0.0, left, top, card_w, angle, scale);
+        assert!((opacity - 1.0).abs() < 1e-6);
+
+        let line = Matrix3x2::scale_around(
+            scale,
+            scale,
+            Vector2 {
+                X: card_w * 0.5,
+                Y: 0.0,
+            },
+        ) * Matrix3x2::rotation_around(
+            angle,
+            Vector2 {
+                X: card_w * 0.5,
+                Y: -layout::CARD_OFFSET_BELOW_TOP,
+            },
+        ) * Matrix3x2::translation(left, top);
+
+        for (x, y) in [(0.0, 0.0), (card_w, 0.0), (0.0, card_h), (card_w, card_h)] {
+            let a = apply(&transform, x, y);
+            let b = apply(&line, x, y);
+            let distance = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+            assert!(distance < 1e-3, "corner ({x},{y}) moved {distance} DIP");
+        }
     }
 
     #[test]

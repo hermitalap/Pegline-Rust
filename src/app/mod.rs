@@ -3428,7 +3428,12 @@ impl App {
             return;
         };
         let thumb = item.thumb.clone();
-        let tilt = item.tilt;
+        let fallback = item.tilt;
+        // The drop has to start in exactly the pose the card has on the line:
+        // the swing angle (swing + tilt + lean) and the press/lift scale, about
+        // the clothespin (H12).
+        let angle = self.current_card_angle(id).unwrap_or(fallback);
+        let scale = self.current_card_scale(id).unwrap_or(1.0);
         let Some(rect) = self.current_card_px(id) else {
             return;
         };
@@ -3440,7 +3445,7 @@ impl App {
         // visible at its slot before it falls.
         self.release_flying_card();
         if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
-            if flight.drop_card(id, thumb, rect, tilt, dpi) {
+            if flight.drop_card(id, thumb, rect, angle, scale, dpi) {
                 self.windows.flight_idle_at = None;
             }
         }

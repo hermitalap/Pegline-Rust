@@ -112,20 +112,36 @@ pub(super) fn paint_pre_roll(
 
 /// The transform and group opacity of a falling card at progress `t` (0..1).
 ///
-/// The card only travels down and fades. Its fixed tilt is applied about its
-/// own top centre (the pin) *before* the placement: rotating after the
-/// placement, around a point in window space, is what used to swing the card
-/// out to the left while it fell (`BEHAVIOR.md` §6.4).
-pub(super) fn drop_pose(t: f32, left: f32, top: f32, width: f32, tilt: f32) -> (Matrix3x2, f32) {
+/// `left`/`top` are the frame's top-left in window DIP, `angle` the card's
+/// visual angle and `scale` its press/lift scale. The card is scaled about the
+/// frame's top centre and turned about the clothespin
+/// (`CARD_OFFSET_BELOW_TOP` above that centre), the same composition
+/// `scene/paint.rs` `draw_card` uses, so the hand-off frame matches the last
+/// frame on the line (`BEHAVIOR.md` §6.4).
+pub(super) fn drop_pose(
+    t: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    angle: f32,
+    scale: f32,
+) -> (Matrix3x2, f32) {
     let t = t.clamp(0.0, 1.0);
-    let e = t * t * t;
-    let transform = Matrix3x2::rotation_around(
-        tilt,
-        Vector2 {
-            X: width * 0.5,
-            Y: 0.0,
-        },
-    ) * Matrix3x2::translation(left, top + DROP_DISTANCE * e);
+    // Quadratic fall (U1): the last 160 ms still cover a visible distance.
+    let e = t * t;
+    let frame_centre = Vector2 {
+        X: width * 0.5,
+        Y: 0.0,
+    };
+    // The flight draws the frame with its top-left at the local origin, so the
+    // pin sits `CARD_OFFSET_BELOW_TOP` above it.
+    let pin = Vector2 {
+        X: width * 0.5,
+        Y: -layout::CARD_OFFSET_BELOW_TOP,
+    };
+    let transform = Matrix3x2::scale_around(scale, scale, frame_centre)
+        * Matrix3x2::rotation_around(angle, pin)
+        * Matrix3x2::translation(left, top + DROP_DISTANCE * e);
     (transform, 1.0 - e)
 }
 
