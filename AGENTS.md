@@ -93,6 +93,32 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
+**2.7.2 (2026-11-18)** fixes the two hand-off flashes around the note editor. The
+flight window is pooled and hidden without touching its swap chain, so the last
+animation's frame stays in it; the next flight shows the window with new bounds on
+the UI thread before the render thread repaints, and for those one or two frames
+DWM stretches the leftover picture into the new window, clipped. Ordinary flights
+end transparent and the drop ends at 2 % opacity, but the tumble's last presented
+frame is opaque — its "paper left the window" test runs before drawing — so
+"new note → discard → new note again within 30 s" flashed a slice of paper. All
+three `run_*` loops now call `clear_frame` (`begin` + `end` + `present`, one fully
+transparent frame) before leaving, on the normal and the interrupted paths alike;
+it never fails, because it runs after the animation has ended and an error would
+skip the `Finished` event that resets `flying_card` and `flight_idle_at`. The
+discard's hand-off also joins properly: `run_tumble` calls `DwmFlush` after its
+first `present` and only then reports `Started` (`Present` merely queues, three
+frames of latency by default), and it holds the start pose for
+`TUMBLE_HANDOFF_SECONDS = 0.05` — `holds_start_pose` keeps the first frame there
+unconditionally — before resetting the physics clock to that instant. The motion
+is unchanged, only shifted: 60–62 frames and 0.90–0.92 s in the trace, three of
+them the hand-off. 227 lib + 1 main tests, clippy/fmt clean; probe A/B against a
+2.7.1 worktree is identical (line 59.97–60.10 fps, draw p50 0.743–0.783 ms,
+private 96.8–97.6 MB); exe 1,889,280 B locally (2.7.1 local build: 1,886,720 B). Decision
+D21 and the report in `audit/261118-note-handoff/` carry the details. The
+per-frame captures were skipped at the user's request and checked by eye; the
+other three flights still hide their source on `Started`, which D21 records as
+out of scope.
+
 **2.7.1 (2026-11-18)** stops a note flight from carrying the line's 4 DIP Mica
 glass frame (`draw_glass` + `stroke_card` + shadow) across the whole path. The
 frame belongs to the card on the rope, not to the editor's paper, which has no
