@@ -188,7 +188,7 @@ impl FlightImage {
 #[derive(Clone, Copy, Debug)]
 pub enum FlightEvent {
     /// The first frame is with the compositor, so whatever the flight took over
-    /// from can be hidden without a visible gap.
+    /// from can be hidden.
     Started(u64),
     /// The card reached the line; the real card is opaque underneath it.
     Landed {
@@ -1342,8 +1342,9 @@ fn run_flight(
             return Err("device lost during flight".to_string());
         }
         if frames == 0 {
-            // The first frame is with the compositor: whatever the flight took over from
-            // can be hidden now without leaving an empty frame behind it.
+            // The first frame is with the compositor, so whatever the flight
+            // took over from can be hidden now.
+            // The swap chain queues it; the compositor shows it on the next vblank.
             on_event(FlightEvent::Started(token));
         }
         frames += 1;
@@ -1673,8 +1674,10 @@ mod tests {
 
     /// The hand-off: a discarded note repeats the editor's paper exactly until
     /// the editor has had time to hide, and the fall that follows is the same
-    /// motion one hand-off later — it starts from rest, so its first moving frame
-    /// is what the old code drew at `t = 0` plus one ordinary frame of `dt`.
+    /// motion one hand-off later — it starts from rest, so the position and angle of
+    /// its first moving frame are one ordinary frame into the old motion. Its size is
+    /// not: that frame still reads `elapsed = 0`, so the sheet stays full size for one
+    /// frame longer than the old code kept it.
     #[test]
     fn the_tumble_holds_the_editor_paper_before_it_falls() {
         let start = (320.0f32, 180.0f32);

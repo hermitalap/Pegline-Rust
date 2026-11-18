@@ -1162,7 +1162,7 @@ impl App {
     }
 
     /// The flight window's first frame is with the compositor: whatever it took
-    /// over from may disappear now without leaving a visible gap behind it.
+    /// over from may disappear now.
     fn on_flight_started(&mut self, token: u64) {
         if token == TUMBLE_FLIGHT_TOKEN {
             // The thrown-away paper is drawn: the editor behind it
@@ -1171,8 +1171,8 @@ impl App {
                 editor.hide();
             }
         } else if token == NOTE_FLIGHT_TOKEN {
-            // The flight's first frame is on screen, so the note's
-            // card can vanish from the line without a gap. It is
+            // The flight's first frame is with the compositor, so the note's
+            // card can vanish from the line. It is
             // hidden only now: hiding it before the first frame
             // would leave the slot empty for a frame.
             self.hide_note_card();
@@ -1180,7 +1180,7 @@ impl App {
             // Same hand-off for a picture growing into the editor.
             self.hide_annotated_card();
         } else if token == ANNOTATE_CLOSE_TOKEN {
-            // The return flight is on screen: the editor behind it
+            // The return flight is with the compositor: the editor behind it
             // can go without a frame of empty desktop.
             if let Some(editor) = self.windows.editor.as_mut() {
                 editor.hide();
