@@ -886,6 +886,9 @@ struct FlightPose {
     /// grows to fill the card as the frame fades in; a note's paper keeps the
     /// line's inset so its rect never jumps.
     inset: f32,
+    /// The picture's corner radius, DIP. A note flight carries the paper from
+    /// the line card's radius to the note editor's sheet and back.
+    radius: f32,
     /// The flight image's own opacity, which fades out after the hand-off.
     alpha: f32,
     /// Whether this copy still draws the shadow.
@@ -1046,12 +1049,29 @@ impl FlightPlan {
             ChromeMode::Leave => 1.0 - ease::smooth(k, 0.0, NOTE_CHROME_LEAVE_END),
             ChromeMode::Arrive => ease::smooth(k, NOTE_CHROME_ARRIVE_START, 1.0),
         };
-        // The photo inset follows the frame, not the clock: a note's paper
-        // grows to fill the card as the frame leaves, and shrinks back into it
-        // as the frame returns. A capture keeps the line's inset throughout.
+        // A capture's photo grows to fill the card as the frame fades in, so
+        // its inset follows `chrome`. A note's paper keeps the line's inset for
+        // the whole trip: its rect must not jump, or the landing frame would
+        // stop lining up with the editor's paper.
         let inset = match self.chrome {
             ChromeMode::FadeIn => layout::PHOTO_INSET * chrome,
             ChromeMode::Full | ChromeMode::Leave | ChromeMode::Arrive => layout::PHOTO_INSET,
+        };
+        // The corner radius is the other half of the same hand-off: the line's
+        // card has a 12 DIP paper radius, the note editor's sheet 22 DIP. A
+        // note flight carries the paper from one to the other along the path,
+        // so the take-off frame matches the card and the landing frame the
+        // editor. A capture keeps the card's radius throughout.
+        let radius = match self.chrome {
+            ChromeMode::FadeIn | ChromeMode::Full => layout::PHOTO_RADIUS,
+            ChromeMode::Leave => {
+                layout::PHOTO_RADIUS
+                    + (crate::note_editor::display::RADIUS_DIP - layout::PHOTO_RADIUS) * k
+            }
+            ChromeMode::Arrive => {
+                crate::note_editor::display::RADIUS_DIP
+                    + (layout::PHOTO_RADIUS - crate::note_editor::display::RADIUS_DIP) * k
+            }
         };
         // The hand-off: the travel is over and the real card underneath takes
         // over, but this copy still has to dissolve over it.
@@ -1081,6 +1101,7 @@ impl FlightPlan {
             ),
             chrome,
             inset,
+            radius,
             alpha,
             shadow: !self.landed,
             pin: pin_alpha(self.pin, t),
@@ -1273,6 +1294,7 @@ fn run_drop(
             RectF::from_xywh(0.0, 0.0, width, height),
             1.0,
             layout::PHOTO_INSET,
+            layout::PHOTO_RADIUS,
             1.0,
             true,
             1.0,
@@ -1376,14 +1398,16 @@ fn run_tumble(
             * Matrix3x2::translation(pos.0 - width * 0.5, pos.1 - height * 0.5);
         renderer.begin()?;
         renderer.set_transform(transform);
-        // A discarded note is a bare sheet: no glass frame and no inset, so the
-        // first frame matches the paper the editor was showing.
+        // A discarded note is a bare sheet: no glass frame, no inset, and the
+        // editor's own 22 DIP radius, so the first frame matches the paper the
+        // editor was showing.
         draw_flight_card(
             renderer,
             &texture,
             RectF::from_xywh(0.0, 0.0, width, height),
             0.0,
             layout::PHOTO_INSET,
+            crate::note_editor::display::RADIUS_DIP,
             1.0,
             true,
             0.0,
@@ -1687,6 +1711,35 @@ mod tests {
             let want = ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END);
             assert!((pose.chrome - want).abs() < 1e-6, "chrome at t={t}");
             assert!((pose.inset - layout::PHOTO_INSET * want).abs() < 1e-6);
+            assert!((pose.radius - layout::PHOTO_RADIUS).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_note_paper_carries_the_editor_radius_across_the_path() {
+        // The line's card paper is 12 DIP, the note editor's sheet 22 DIP. The
+        // flight is the hand-off between them, so each end must match the real
+        // surface it hands over to, and a capture must keep the card's radius.
+        let dt = 1.0 / 60.0;
+        let card = layout::PHOTO_RADIUS;
+        let sheet = crate::note_editor::display::RADIUS_DIP;
+
+        let first = plan_with_chrome(ChromeMode::Leave).step(0.0, dt);
+        assert!((first.radius - card).abs() < 1e-4, "{}", first.radius);
+        let last = plan_with_chrome(ChromeMode::Leave).step(FLIGHT_SECONDS, dt);
+        assert!((last.radius - sheet).abs() < 1e-4, "{}", last.radius);
+
+        let first = plan_with_chrome(ChromeMode::Arrive).step(0.0, dt);
+        assert!((first.radius - sheet).abs() < 1e-4, "{}", first.radius);
+        let last = plan_with_chrome(ChromeMode::Arrive).step(FLIGHT_SECONDS, dt);
+        assert!((last.radius - card).abs() < 1e-4, "{}", last.radius);
+
+        for chrome in [ChromeMode::FadeIn, ChromeMode::Full] {
+            let mut plan = plan_with_chrome(chrome);
+            for frame in 1..=39 {
+                let pose = plan.step(dt * frame as f32, dt);
+                assert!((pose.radius - card).abs() < 1e-6, "{chrome:?} moved");
+            }
         }
     }
 

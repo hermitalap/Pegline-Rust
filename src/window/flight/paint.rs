@@ -36,6 +36,7 @@ pub(super) fn paint(
         pose.card,
         pose.chrome,
         pose.inset,
+        pose.radius,
         pose.alpha,
         pose.shadow,
         pose.pin,
@@ -66,7 +67,7 @@ fn paint_start_image(renderer: &mut Renderer, textures: &FlightTextures, pose: &
     );
     let start_alpha = (1.0 - ease::smooth(pose.crossfade, 0.0, 1.0)).max(0.01);
     let pushed = renderer.push_opacity(photo, start_alpha);
-    renderer.draw_photo(start_texture, photo, layout::PHOTO_RADIUS);
+    renderer.draw_photo(start_texture, photo, pose.radius);
     if pushed {
         renderer.pop_opacity();
     }
@@ -87,6 +88,7 @@ pub(super) fn paint_pre_roll(
         pose.card,
         1.0,
         layout::PHOTO_INSET,
+        layout::PHOTO_RADIUS,
         1.0,
         true,
         pose.pin,
@@ -150,10 +152,11 @@ pub(super) fn drop_pose(
 /// Draws the card: photo, then the glass frame and (when `pin` is set) the
 /// clothespin at `chrome` opacity.
 ///
-/// `inset` is how far the picture sits inside the card, in DIP. It is passed in
-/// rather than derived from `chrome`: a capture's photo grows to fill the card
-/// as the frame fades in, while a note's paper keeps the line's inset so its
-/// rect never jumps.
+/// `inset` is how far the picture sits inside the card and `radius` the
+/// picture's corner radius, both in DIP. They are passed in rather than derived
+/// from `chrome`: a capture's photo grows to fill the card as the frame fades
+/// in, while a note's paper keeps the line's inset and only its radius follows
+/// the frame out to the editor's sheet.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_flight_card(
     renderer: &mut Renderer,
@@ -161,6 +164,7 @@ pub(super) fn draw_flight_card(
     card: RectF,
     chrome: f32,
     inset: f32,
+    radius: f32,
     alpha: f32,
     shadow: bool,
     pin: f32,
@@ -195,7 +199,7 @@ pub(super) fn draw_flight_card(
             renderer.pop_opacity();
         }
     }
-    renderer.draw_photo(texture, photo, layout::PHOTO_RADIUS);
+    renderer.draw_photo(texture, photo, radius);
     if pin > 0.01 && chrome > 0.01 {
         // The card rotates about this point, exactly like the real card on the
         // line: the pin top, not the frame top (which is 14 DIP lower).
