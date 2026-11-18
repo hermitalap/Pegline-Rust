@@ -115,9 +115,10 @@ pub enum PinMode {
 ///
 /// The frame is the line's card, not the editor's paper: a note editor draws a
 /// 22 DIP paper with no 4 DIP glass border, so a note's frame has to leave the
-/// card on the way in and rejoin it on the way out. A capture and an annotation
-/// flight both start and end on a real decorated card, so their frame is
-/// opaque for the whole trip.
+/// card on the way in and rejoin it on the way out. An annotation flight starts
+/// and ends on a real decorated card, so its frame is opaque for the whole
+/// trip; a capture starts from the screen, so its frame fades in near the
+/// landing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChromeMode {
     /// Fade in over the first part of the flight (a capture arriving on the
@@ -350,14 +351,13 @@ impl Flight {
         )
     }
 
-    /// Flies a card back onto the line with its glass frame and pin already
-    /// drawn from the first frame. The editor behind it is still visible, so a
-    /// chrome fade would read as the frame blinking away.
+    /// Flies a card back onto the line from an editor's card rectangle.
     ///
-    /// `chrome` says how the frame behaves: an annotation flight keeps it
-    /// opaque (`Full`, the editor's card carries the same frame), a note flight
-    /// fades it in over the last part of the path (`Arrive`), because the note
-    /// editor's paper has no glass border to hand over to.
+    /// `chrome` says how the glass frame behaves. An annotation flight passes
+    /// `Full`: its editor is hidden behind a card that carries the same frame,
+    /// so fading it would read as the frame blinking away. A note flight passes
+    /// `Arrive`: the note editor's paper has no glass border to hand over to, so
+    /// the frame fades in over the last part of the path.
     #[allow(clippy::too_many_arguments)]
     pub fn fly_decorated(
         &mut self,
@@ -1398,9 +1398,9 @@ fn run_tumble(
             * Matrix3x2::translation(pos.0 - width * 0.5, pos.1 - height * 0.5);
         renderer.begin()?;
         renderer.set_transform(transform);
-        // A discarded note is a bare sheet: no glass frame, no inset, and the
-        // editor's own 22 DIP radius, so the first frame matches the paper the
-        // editor was showing.
+        // A discarded note is a bare sheet: no glass frame, the usual 4 DIP
+        // inset, and the editor's own 22 DIP radius, so the first frame matches
+        // the paper the editor was showing.
         draw_flight_card(
             renderer,
             &texture,
@@ -1633,7 +1633,7 @@ mod tests {
         // The glass frame belongs to the line's card, not to the editor's
         // paper: a note flight must be bare by the time the card is a third of
         // the way to the editor, and decorated only over the last third of the
-        // way home. Sampled at 60 Hz across the whole travel.
+        // way home. Sixty samples across the whole travel (~92 Hz).
         let frames = 60;
         let dt = FLIGHT_SECONDS / frames as f32;
         let mut leave = plan_with_chrome(ChromeMode::Leave);
