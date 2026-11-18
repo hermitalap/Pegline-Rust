@@ -110,8 +110,8 @@ passed into `draw_flight_card` instead of being derived from `chrome`, so the
 paper rect stays pixel-identical every frame while the radius walks 12 DIP ↔
 22 DIP. Screenshot flights and both annotation flights are bit-identical to
 2.7.0 (31 exported columns, diff 0); 226 lib + 1 main tests, clippy/fmt clean;
-probe 60.04 fps / draw p50 0.624 ms / private 97.4 MB, exe 1,886,720 B locally
-(2.7.0: 1,885,696 B). Decisions D20 and the D10 revision are in
+probe 60.04 fps / draw p50 0.624 ms / private 97.4 MB, exe 1,886,208 B on CI
+(2.7.0 CI: 1,885,184 B). Decisions D20 and the D10 revision are in
 `docs/DECISIONS.md`; the per-frame evidence is in `audit/261118-note-chrome/`.
 120 Hz, a second monitor and sleep/wake remain unmeasured.
 

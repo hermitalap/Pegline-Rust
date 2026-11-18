@@ -28,7 +28,7 @@
 - `probe --mode=line`：60.04 fps，p50 16.67 / p95 17.01 ms，draw p50 0.624 / p95 0.914 ms，
   private 97.4 MB；`--mode=flight`：60.40 fps，private 94.4 MB。与 2.7.0 的 60.00 / 0.820 / 97.3
   在 5 % 以内。
-- `pegline.exe` 1,886,720 B（本地构建；2.7.0 同法构建 1,885,696 B）。
+- `pegline.exe` 1,886,208 B（CI 构建；2.7.0 为 1,885,184 B）。
 
 ## 已知限制
 
