@@ -15,6 +15,7 @@
 - 丢弃交接实测（release，200 % DPI，trace）：`tumble render start` → `tumble finished after 60–62 frames, 0.90–0.92s`，墙钟 0.956–0.975 s，其中前 3 帧是交接段，运动帧数与 2.7.1 的 56–58 帧一致。
 - `probe` 与 2.7.1 的独立 worktree 构建 A/B：line 59.97–60.10 fps、draw p50 0.743–0.783 ms、private 96.8–97.6 MB，flight 60.34–60.68 fps、private 94.2–94.5 MB，两侧一致。
 - 按用户要求，交接处的逐帧抓图（B0 的 S1–S4）没有做，改为人工目视确认。
+- `pegline.exe` 1,889,280 B（CI 构建；2.7.1 为 1,886,208 B）。
 
 ## 2.7.1 — 2026-11-18
 

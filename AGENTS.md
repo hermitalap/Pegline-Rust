@@ -113,7 +113,7 @@ unconditionally — before resetting the physics clock to that instant. The moti
 is unchanged, only shifted: 60–62 frames and 0.90–0.92 s in the trace, three of
 them the hand-off. 227 lib + 1 main tests, clippy/fmt clean; probe A/B against a
 2.7.1 worktree is identical (line 59.97–60.10 fps, draw p50 0.743–0.783 ms,
-private 96.8–97.6 MB); exe 1,889,280 B locally (2.7.1 local build: 1,886,720 B). Decision
+private 96.8–97.6 MB); exe 1,889,280 B on CI (2.7.1 CI: 1,886,208 B). Decision
 D21 and the report in `audit/261118-note-handoff/` carry the details. The
 per-frame captures were skipped at the user's request and checked by eye; the
 other three flights still hide their source on `Started`, which D21 records as
