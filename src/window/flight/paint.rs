@@ -35,6 +35,7 @@ pub(super) fn paint(
         &textures.card,
         pose.card,
         pose.chrome,
+        pose.inset,
         pose.alpha,
         pose.shadow,
         pose.pin,
@@ -56,7 +57,7 @@ fn paint_start_image(renderer: &mut Renderer, textures: &FlightTextures, pose: &
     if pose.crossfade >= 1.0 {
         return;
     }
-    let inset = layout::PHOTO_INSET * pose.chrome;
+    let inset = pose.inset;
     let photo = RectF::new(
         pose.card.left + inset,
         pose.card.top + inset,
@@ -85,6 +86,7 @@ pub(super) fn paint_pre_roll(
         &textures.card,
         pose.card,
         1.0,
+        layout::PHOTO_INSET,
         1.0,
         true,
         pose.pin,
@@ -147,17 +149,23 @@ pub(super) fn drop_pose(
 
 /// Draws the card: photo, then the glass frame and (when `pin` is set) the
 /// clothespin at `chrome` opacity.
+///
+/// `inset` is how far the picture sits inside the card, in DIP. It is passed in
+/// rather than derived from `chrome`: a capture's photo grows to fill the card
+/// as the frame fades in, while a note's paper keeps the line's inset so its
+/// rect never jumps.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_flight_card(
     renderer: &mut Renderer,
     texture: &windows::Win32::Graphics::Direct2D::ID2D1Bitmap1,
     card: RectF,
     chrome: f32,
+    inset: f32,
     alpha: f32,
     shadow: bool,
     pin: f32,
 ) {
     let width_dip = card.width();
-    let inset = layout::PHOTO_INSET * chrome;
     let photo = RectF::new(
         card.left + inset,
         card.top + inset,

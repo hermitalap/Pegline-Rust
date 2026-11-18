@@ -69,7 +69,7 @@ use crate::spring::ease;
 use crate::tray::Tray;
 use crate::types::{CardId, CardSpec, ImageData, RectF, RectI};
 use crate::win32::{self, Monitor};
-use crate::window::flight::{FlightEvent, FlightImage, PinMode};
+use crate::window::flight::{ChromeMode, FlightEvent, FlightImage, PinMode};
 use crate::window::ghost::Ghost;
 use crate::window::overlay::Overlay;
 use crate::window::preview::{NOTE_PADDING_DIP, Preview, note_preview_card_dip};
@@ -260,6 +260,10 @@ struct NoteOpen<'a> {
 struct CardFlight {
     token: u64,
     pin: PinMode,
+    /// How the glass frame behaves on the way home: `Arrive` for a note, whose
+    /// editor paper has no frame, and `Full` for the annotation editor, whose
+    /// card carries one.
+    chrome: ChromeMode,
     image: ImageData,
     from: RectI,
     target: RectI,
@@ -2415,6 +2419,7 @@ impl App {
                                 to,
                                 angle,
                                 pin,
+                                ChromeMode::Leave,
                                 dpi,
                                 true,
                             )
@@ -2684,6 +2689,7 @@ impl App {
                             tilt,
                             slide_dip,
                             PinMode::Arrive,
+                            ChromeMode::Arrive,
                             dpi,
                         );
                         if flying {
@@ -2728,6 +2734,7 @@ impl App {
         let CardFlight {
             token,
             pin,
+            chrome,
             image,
             from,
             target,
@@ -2739,7 +2746,7 @@ impl App {
         self.reveal(false, PEEK_SECONDS);
         self.send_scene(Command::SetRehang { id, flying: true });
         if let Some(flight) = self.windows.ensure_flight(&self.events_tx) {
-            if flight.fly_decorated(token, image, from, target, tilt, 0.0, pin, dpi) {
+            if flight.fly_decorated(token, image, from, target, tilt, 0.0, pin, chrome, dpi) {
                 self.windows.flight_idle_at = None;
                 self.book.flying_card = Some(id);
                 self.book.flying_rehang = true;
@@ -2770,6 +2777,7 @@ impl App {
             CardFlight {
                 token: id,
                 pin: PinMode::Arrive,
+                chrome: ChromeMode::Arrive,
                 image,
                 from,
                 target,
@@ -2919,8 +2927,9 @@ impl App {
         let lift = -(60.0 + pseudo_random(seed ^ 0x51ED_2701) * 140.0);
         let scale = dpi as f32 / 96.0;
         let inset = (layout::PHOTO_INSET * scale).round() as i32;
-        // The flight draws the paper inside its card frame, so the card starts
-        // one inset outside the editor's paper.
+        // The tumble draws the paper bare, with no glass frame, so the card
+        // starts one inset outside the editor's paper and the first frame lines
+        // up with the sheet the editor was showing.
         let from = paper.inflate(inset);
         logging::trace(format!(
             "discard new note: paper={paper:?} spin={spin:.0} velocity=({sideways:.0},{lift:.0})"
@@ -3114,6 +3123,7 @@ impl App {
                                     to,
                                     angle,
                                     PinMode::Full,
+                                    ChromeMode::Full,
                                     monitor.dpi,
                                     false,
                                 )
@@ -3282,6 +3292,7 @@ impl App {
             CardFlight {
                 token: ANNOTATE_CLOSE_TOKEN,
                 pin: PinMode::Full,
+                chrome: ChromeMode::Full,
                 image,
                 from,
                 target,

@@ -62,6 +62,15 @@ const ARC_DIP: f32 = 30.0;
 /// Chrome fades in between these two fractions of the flight.
 const CHROME_FADE_START: f32 = 0.10;
 const CHROME_FADE_END: f32 = 0.55;
+/// Where a note's glass frame leaves and rejoins the card, as a fraction of the
+/// *path* (`k`, the eased progress), not of the clock: the frame belongs to the
+/// line, so it has to be gone by the time the card is a third of the way to the
+/// editor and back only once it is two thirds of the way home.
+///
+/// On the 0.65 s CSS-`ease` flight `k = 1/3` is reached at `t ≈ 0.215`
+/// (0.14 s) and `k = 2/3` at `t ≈ 0.39` (0.25 s).
+const NOTE_CHROME_LEAVE_END: f32 = 1.0 / 3.0;
+const NOTE_CHROME_ARRIVE_START: f32 = 2.0 / 3.0;
 /// How long a note card takes to dissolve into the editor view at the start of
 /// its flight to the centre.
 const ENTRY_CROSSFADE_SECONDS: f32 = 0.12;
@@ -99,6 +108,28 @@ pub enum PinMode {
     Leave,
     /// The card is coming back: no pin while it travels, then it fades in as
     /// the card reaches its slot.
+    Arrive,
+}
+
+/// How the glass frame around the card behaves during a flight.
+///
+/// The frame is the line's card, not the editor's paper: a note editor draws a
+/// 22 DIP paper with no 4 DIP glass border, so a note's frame has to leave the
+/// card on the way in and rejoin it on the way out. A capture and an annotation
+/// flight both start and end on a real decorated card, so their frame is
+/// opaque for the whole trip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChromeMode {
+    /// Fade in over the first part of the flight (a capture arriving on the
+    /// line).
+    FadeIn,
+    /// Opaque from the first frame to the last (annotation flights).
+    Full,
+    /// The card is leaving the line for the note editor: the frame is there at
+    /// take-off and gone by [`NOTE_CHROME_LEAVE_END`] of the path.
+    Leave,
+    /// The card is coming home from the note editor: no frame while it
+    /// travels, then it fades in over the last part of the path.
     Arrive,
 }
 
@@ -176,9 +207,9 @@ enum FlightCommand {
         /// Run the settle/cross-fade during the travel instead of first waiting
         /// at the slot.
         blend_entry: bool,
-        /// Keep the glass frame and pin fully opaque from the first frame:
-        /// editor flights start from a real, fully decorated card.
-        chrome_full: bool,
+        /// How the glass frame behaves. The frame belongs to the line's card,
+        /// so a note flight to or from the editor fades it along the path.
+        chrome: ChromeMode,
         from: RectI,
         to: RectI,
         /// Fixed card tilt, degrees, applied increasingly during the flight.
@@ -308,7 +339,7 @@ impl Flight {
             FlightImage::Ready(image),
             None,
             None,
-            false,
+            ChromeMode::FadeIn,
             false,
             from,
             to,
@@ -322,6 +353,11 @@ impl Flight {
     /// Flies a card back onto the line with its glass frame and pin already
     /// drawn from the first frame. The editor behind it is still visible, so a
     /// chrome fade would read as the frame blinking away.
+    ///
+    /// `chrome` says how the frame behaves: an annotation flight keeps it
+    /// opaque (`Full`, the editor's card carries the same frame), a note flight
+    /// fades it in over the last part of the path (`Arrive`), because the note
+    /// editor's paper has no glass border to hand over to.
     #[allow(clippy::too_many_arguments)]
     pub fn fly_decorated(
         &mut self,
@@ -332,6 +368,7 @@ impl Flight {
         tilt: f32,
         slide_dip: f32,
         pin: PinMode,
+        chrome: ChromeMode,
         dpi: u32,
     ) -> bool {
         self.start_flight(
@@ -339,7 +376,7 @@ impl Flight {
             FlightImage::Ready(image),
             None,
             None,
-            true,
+            chrome,
             false,
             from,
             to,
@@ -360,6 +397,9 @@ impl Flight {
     /// where waiting would read as input lag); otherwise they happen at the
     /// slot first (annotation editor, which must be upright before it grows).
     /// `image` may be decoded from the file on the flight thread.
+    ///
+    /// `chrome` says how the glass frame behaves: a note flight leaves it on
+    /// the line (`Leave`), an annotation flight keeps it (`Full`).
     #[allow(clippy::too_many_arguments)]
     pub fn fly_entry(
         &mut self,
@@ -370,6 +410,7 @@ impl Flight {
         to: RectI,
         settle_angle: f32,
         pin: PinMode,
+        chrome: ChromeMode,
         dpi: u32,
         blend: bool,
     ) -> bool {
@@ -378,7 +419,7 @@ impl Flight {
             image,
             start_image,
             Some(settle_angle),
-            true,
+            chrome,
             blend,
             from,
             to,
@@ -396,7 +437,7 @@ impl Flight {
         image: FlightImage,
         start_image: Option<ImageData>,
         settle_angle: Option<f32>,
-        chrome_full: bool,
+        chrome: ChromeMode,
         blend_entry: bool,
         from: RectI,
         to: RectI,
@@ -429,7 +470,7 @@ impl Flight {
             start_image,
             settle_angle,
             blend_entry,
-            chrome_full,
+            chrome,
             from,
             to,
             tilt,
@@ -654,7 +695,7 @@ fn flight_thread(
                 start_image,
                 settle_angle,
                 blend_entry,
-                chrome_full,
+                chrome,
                 from,
                 to,
                 tilt,
@@ -668,7 +709,7 @@ fn flight_thread(
                     start_image,
                     settle_angle,
                     blend_entry,
-                    chrome_full,
+                    chrome,
                     from,
                     to,
                     tilt,
@@ -763,9 +804,9 @@ struct FlightRequest {
     /// Run the settle/cross-fade during the travel instead of first waiting at
     /// the slot.
     blend_entry: bool,
-    /// Keep the glass frame and pin fully opaque from the first frame: editor
-    /// flights start from a real, fully decorated card.
-    chrome_full: bool,
+    /// How the glass frame behaves. The frame belongs to the line's card, so a
+    /// note flight to or from the editor fades it along the path.
+    chrome: ChromeMode,
     /// The card's starting rect, screen pixels.
     from: RectI,
     /// The rect it lands on, screen pixels.
@@ -813,8 +854,8 @@ struct FlightPlan {
     /// Fixed card tilt, degrees, applied increasingly during the flight.
     tilt: f32,
     pin: PinMode,
-    /// The glass frame and pin are opaque from the first frame.
-    chrome_full: bool,
+    /// How the glass frame behaves along the path.
+    chrome: ChromeMode,
     /// The flight starts from a decorated card: no landing sway, and the pin
     /// follows `pin` only.
     entry: bool,
@@ -841,6 +882,10 @@ struct FlightPose {
     /// The glass frame's opacity: 0 for a bare screenshot, 1 for a card that
     /// is already decorated.
     chrome: f32,
+    /// How far the picture is inset inside the card, DIP. A capture's photo
+    /// grows to fill the card as the frame fades in; a note's paper keeps the
+    /// line's inset so its rect never jumps.
+    inset: f32,
     /// The flight image's own opacity, which fades out after the hand-off.
     alpha: f32,
     /// Whether this copy still draws the shadow.
@@ -920,7 +965,7 @@ fn prepare(
         scale,
         tilt: request.tilt,
         pin: request.pin,
-        chrome_full: request.chrome_full,
+        chrome: request.chrome,
         entry,
         blend,
         has_start_image: start_texture.is_some(),
@@ -993,10 +1038,20 @@ impl FlightPlan {
             width,
             height,
         );
-        let chrome = if self.chrome_full {
-            1.0
-        } else {
-            ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END)
+        let chrome = match self.chrome {
+            ChromeMode::FadeIn => ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END),
+            ChromeMode::Full => 1.0,
+            // The frame belongs to the line: it is gone a third of the way to
+            // the editor and back only over the last third of the way home.
+            ChromeMode::Leave => 1.0 - ease::smooth(k, 0.0, NOTE_CHROME_LEAVE_END),
+            ChromeMode::Arrive => ease::smooth(k, NOTE_CHROME_ARRIVE_START, 1.0),
+        };
+        // The photo inset follows the frame, not the clock: a note's paper
+        // grows to fill the card as the frame leaves, and shrinks back into it
+        // as the frame returns. A capture keeps the line's inset throughout.
+        let inset = match self.chrome {
+            ChromeMode::FadeIn => layout::PHOTO_INSET * chrome,
+            ChromeMode::Full | ChromeMode::Leave | ChromeMode::Arrive => layout::PHOTO_INSET,
         };
         // The hand-off: the travel is over and the real card underneath takes
         // over, but this copy still has to dissolve over it.
@@ -1025,6 +1080,7 @@ impl FlightPlan {
                 },
             ),
             chrome,
+            inset,
             alpha,
             shadow: !self.landed,
             pin: pin_alpha(self.pin, t),
@@ -1216,6 +1272,7 @@ fn run_drop(
             &texture,
             RectF::from_xywh(0.0, 0.0, width, height),
             1.0,
+            layout::PHOTO_INSET,
             1.0,
             true,
             1.0,
@@ -1319,11 +1376,14 @@ fn run_tumble(
             * Matrix3x2::translation(pos.0 - width * 0.5, pos.1 - height * 0.5);
         renderer.begin()?;
         renderer.set_transform(transform);
+        // A discarded note is a bare sheet: no glass frame and no inset, so the
+        // first frame matches the paper the editor was showing.
         draw_flight_card(
             renderer,
             &texture,
             RectF::from_xywh(0.0, 0.0, width, height),
-            1.0,
+            0.0,
+            layout::PHOTO_INSET,
             1.0,
             true,
             0.0,
@@ -1497,7 +1557,7 @@ mod tests {
             scale: 2.0,
             tilt: 0.0,
             pin: PinMode::Hidden,
-            chrome_full: false,
+            chrome: ChromeMode::FadeIn,
             entry: true,
             blend: true,
             has_start_image: true,
@@ -1534,6 +1594,100 @@ mod tests {
         assert!((pose.alpha - 1.0).abs() < 1e-4);
         assert!(!pose.shadow, "the landed copy no longer draws the shadow");
         assert!(!pose.finished, "the landing fade has not run yet");
+    }
+
+    /// A flight plan with the given chrome mode, everything else as
+    /// [`plan_for_step_tests`].
+    fn plan_with_chrome(chrome: ChromeMode) -> FlightPlan {
+        let mut plan = plan_for_step_tests();
+        plan.chrome = chrome;
+        plan
+    }
+
+    #[test]
+    fn note_frames_fade_on_the_editor_side_of_the_path() {
+        // The glass frame belongs to the line's card, not to the editor's
+        // paper: a note flight must be bare by the time the card is a third of
+        // the way to the editor, and decorated only over the last third of the
+        // way home. Sampled at 60 Hz across the whole travel.
+        let frames = 60;
+        let dt = FLIGHT_SECONDS / frames as f32;
+        let mut leave = plan_with_chrome(ChromeMode::Leave);
+        let mut arrive = plan_with_chrome(ChromeMode::Arrive);
+        let mut previous_leave = f32::INFINITY;
+        let mut previous_arrive = f32::NEG_INFINITY;
+        let mut leave_gone = None;
+        let mut arrive_back = None;
+        for frame in 1..=frames {
+            let elapsed = dt * frame as f32;
+            let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
+            let k = ease::standard(t);
+            let out = leave.step(elapsed, dt);
+            let back = arrive.step(elapsed, dt);
+            // Monotone: the frame only ever leaves, or only ever returns.
+            assert!(out.chrome <= previous_leave + 1e-6, "leave rose at t={t}");
+            assert!(
+                back.chrome >= previous_arrive - 1e-6,
+                "arrive fell at t={t}"
+            );
+            previous_leave = out.chrome;
+            previous_arrive = back.chrome;
+            // The paper rect never jumps: both note flights keep the line's
+            // inset for the whole trip, so the landing frame still lines up
+            // with the editor's paper and the take-off frame with the card.
+            assert!((out.inset - layout::PHOTO_INSET).abs() < 1e-6);
+            assert!((back.inset - layout::PHOTO_INSET).abs() < 1e-6);
+            if leave_gone.is_none() && k >= NOTE_CHROME_LEAVE_END {
+                leave_gone = Some((frame, elapsed, out.chrome));
+            }
+            if arrive_back.is_none() && k >= NOTE_CHROME_ARRIVE_START {
+                arrive_back = Some((frame, elapsed, back.chrome));
+            }
+        }
+        let (gone_frame, gone_at, gone_chrome) = leave_gone.expect("the frame never left");
+        let (back_frame, back_at, back_chrome) = arrive_back.expect("the frame never returned");
+        // A third of the path is reached around 0.14 s and two thirds around
+        // 0.25 s, i.e. well before the 0.65 s travel ends.
+        assert!(
+            (0.12..0.17).contains(&gone_at),
+            "the frame left at {gone_at}s (frame {gone_frame})"
+        );
+        assert!(
+            (0.23..0.28).contains(&back_at),
+            "the frame returned at {back_at}s (frame {back_frame})"
+        );
+        assert!(gone_chrome < 0.01, "chrome={gone_chrome} at the leave end");
+        assert!(
+            back_chrome < 0.01,
+            "chrome={back_chrome} at the arrive start"
+        );
+
+        // The endpoints are the two real cards: a decorated card at take-off
+        // and at the landing, a bare paper in between.
+        let first = plan_with_chrome(ChromeMode::Leave).step(dt, dt);
+        assert!((first.chrome - 1.0).abs() < 0.01, "chrome={}", first.chrome);
+        let last = plan_with_chrome(ChromeMode::Leave).step(FLIGHT_SECONDS, dt);
+        assert_eq!(last.chrome, 0.0);
+        let first = plan_with_chrome(ChromeMode::Arrive).step(dt, dt);
+        assert_eq!(first.chrome, 0.0);
+        let last = plan_with_chrome(ChromeMode::Arrive).step(FLIGHT_SECONDS, dt);
+        assert!((last.chrome - 1.0).abs() < 1e-6, "chrome={}", last.chrome);
+    }
+
+    #[test]
+    fn a_capture_still_fades_its_frame_in_over_the_clock() {
+        // The screenshot flight is unchanged: its frame fades in over the
+        // clock (0.10..0.55) and its photo grows to fill the card as it does.
+        let mut plan = plan_with_chrome(ChromeMode::FadeIn);
+        let dt = 1.0 / 60.0;
+        for frame in 1..=39 {
+            let elapsed = dt * frame as f32;
+            let t = (elapsed / FLIGHT_SECONDS).clamp(0.0, 1.0);
+            let pose = plan.step(elapsed, dt);
+            let want = ease::smooth(t, CHROME_FADE_START, CHROME_FADE_END);
+            assert!((pose.chrome - want).abs() < 1e-6, "chrome at t={t}");
+            assert!((pose.inset - layout::PHOTO_INSET * want).abs() < 1e-6);
+        }
     }
 
     #[test]
