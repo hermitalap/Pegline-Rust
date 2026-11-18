@@ -187,8 +187,8 @@ impl FlightImage {
 /// Messages from the render thread back to the UI thread.
 #[derive(Clone, Copy, Debug)]
 pub enum FlightEvent {
-    /// The first frame is on screen, so whatever the flight took over from can
-    /// be hidden without a gap.
+    /// The first frame is with the compositor, so whatever the flight took over
+    /// from can be hidden without a visible gap.
     Started(u64),
     /// The card reached the line; the real card is opaque underneath it.
     Landed {
@@ -1180,13 +1180,30 @@ fn elapsed_ms(start: f64) -> f32 {
 /// new window, clipped: a discarded note's opaque last frame flashed as a slice
 /// of paper (FIX_PLAN_261118 §3 F1). Clearing on the way out leaves nothing to
 /// flash.
-fn clear_frame(renderer: &mut Renderer) -> Result<(), String> {
-    renderer.begin()?;
-    renderer.end()?;
-    if renderer.present(true) == Present::DeviceLost {
-        return Err("device lost while clearing the flight window".to_string());
+///
+/// Never fails: it runs on the way out of an animation that has already ended,
+/// so a lost device only means the leftover picture stays until the next flight
+/// paints over it. Failing here would skip the `Finished` event the caller needs
+/// to reset its own state.
+fn clear_frame(renderer: &mut Renderer) {
+    if let Err(error) = renderer.begin().and_then(|()| renderer.end()) {
+        logging::trace(format!("flight window clear skipped: {error}"));
+        return;
     }
-    Ok(())
+    if renderer.present(true) == Present::DeviceLost {
+        logging::trace("flight window clear lost the device");
+    }
+}
+
+/// Whether the tumble must keep drawing its start pose instead of falling.
+///
+/// The first frame always holds, even if setting the window up took longer than
+/// the hand-off: the editor is still on screen at that point, and a first frame
+/// that had already started moving would tear away from the paper under it.
+/// Every later frame holds until `TUMBLE_HANDOFF_SECONDS` has gone by, which is
+/// how long the compositor may take to show that first frame.
+fn holds_start_pose(start: f64, now: f64, frames: u32) -> bool {
+    frames == 0 || ((now - start) as f32) < TUMBLE_HANDOFF_SECONDS
 }
 
 /// The discarded note's motion, without a window or a swap chain.
@@ -1278,7 +1295,7 @@ fn run_flight(
         // A newer capture takes over: leave without reporting a landing; the app
         // already made the old card visible again.
         if interrupt.load(Ordering::Relaxed) != generation {
-            clear_frame(renderer)?;
+            clear_frame(renderer);
             return Ok(());
         }
         let now = win32::now_seconds();
@@ -1325,14 +1342,14 @@ fn run_flight(
             return Err("device lost during flight".to_string());
         }
         if frames == 0 {
-            // The first frame is on screen: whatever the flight took over from
+            // The first frame is with the compositor: whatever the flight took over from
             // can be hidden now without leaving an empty frame behind it.
             on_event(FlightEvent::Started(token));
         }
         frames += 1;
 
         if pose.finished {
-            clear_frame(renderer)?;
+            clear_frame(renderer);
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
@@ -1371,7 +1388,7 @@ fn run_drop(
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
             logging::trace(format!("drop interrupted after {frames} frames"));
-            clear_frame(renderer)?;
+            clear_frame(renderer);
             return Ok(());
         }
         let elapsed = (win32::now_seconds() - start) as f32;
@@ -1404,7 +1421,7 @@ fn run_drop(
         }
         if t >= 1.0 {
             logging::trace(format!("drop finished after {frames} frames"));
-            clear_frame(renderer)?;
+            clear_frame(renderer);
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
@@ -1466,7 +1483,7 @@ fn run_tumble(
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
             logging::trace(format!("tumble interrupted after {frames} frames"));
-            clear_frame(renderer)?;
+            clear_frame(renderer);
             return Ok(());
         }
         let now = win32::now_seconds();
@@ -1474,11 +1491,9 @@ fn run_tumble(
         last = now;
 
         // The hand-off: keep the pose the editor's paper had until the editor has
-        // had time to go, then start the fall from rest. `frames > 0` keeps the
-        // very first frame on the start pose even if building it was slow.
-        if moved_at.is_none() && frames > 0 && (now - start) as f32 >= TUMBLE_HANDOFF_SECONDS {
+        // had time to go, then start the fall from rest.
+        if moved_at.is_none() && !holds_start_pose(start, now, frames) {
             moved_at = Some(now);
-            last = now;
         }
         let elapsed = match moved_at {
             Some(at) => (now - at) as f32,
@@ -1492,7 +1507,7 @@ fn run_tumble(
                     "tumble finished after {frames} frames, {elapsed:.2}s, angle={:.0}",
                     tumble.angle
                 ));
-                clear_frame(renderer)?;
+                clear_frame(renderer);
                 on_event(FlightEvent::Finished(token));
                 return Ok(());
             }
@@ -1658,8 +1673,8 @@ mod tests {
 
     /// The hand-off: a discarded note repeats the editor's paper exactly until
     /// the editor has had time to hide, and the fall that follows is the same
-    /// motion one hand-off later — it starts from rest, so its first frame is the
-    /// frame the old code drew at `t = 0`.
+    /// motion one hand-off later — it starts from rest, so its first moving frame
+    /// is what the old code drew at `t = 0` plus one ordinary frame of `dt`.
     #[test]
     fn the_tumble_holds_the_editor_paper_before_it_falls() {
         let start = (320.0f32, 180.0f32);
@@ -1669,13 +1684,28 @@ mod tests {
         let dt = 1.0f32 / 60.0;
 
         let mut tumble = Tumble::new(start, vel, spin, width, height);
-        // Held: full size, upright, in place — the pose the editor drew.
+        // Held: full size, upright, in place — the pose the editor drew, down to
+        // the rectangle it covers.
         assert_eq!(tumble.pos, start);
         assert_eq!(tumble.angle, 0.0);
         assert_eq!(tumble.shrink, 1.0);
         assert!(!tumble.below(640.0));
+        let held = tumble.transform();
+        assert!((apply(&held, 0.0, 0.0).0 - (start.0 - width * 0.5)).abs() < 1e-4);
+        assert!((apply(&held, 0.0, 0.0).1 - (start.1 - height * 0.5)).abs() < 1e-4);
+        assert!((apply(&held, width, height).0 - (start.0 + width * 0.5)).abs() < 1e-4);
+        assert!((apply(&held, width, height).1 - (start.1 + height * 0.5)).abs() < 1e-4);
 
-        // First frame of the fall, from rest: the old algorithm's `t = 0` frame.
+        // The hold itself: the first frame always repeats the start pose, and so
+        // does every frame until the hand-off has gone by.
+        assert!(holds_start_pose(0.0, 9.0, 0));
+        assert!(holds_start_pose(0.0, 0.0, 1));
+        assert!(holds_start_pose(0.0, 0.03, 3));
+        assert!(!holds_start_pose(0.0, TUMBLE_HANDOFF_SECONDS as f64, 3));
+        assert!(!holds_start_pose(0.0, 0.5, 30));
+
+        // First frame of the fall, from rest: the old algorithm's `t = 0` frame
+        // advanced by one frame of `dt`.
         tumble.fall(0.0, dt);
         let expected_vel = (vel.0, vel.1 + TUMBLE_GRAVITY * dt);
         let expected_pos = (start.0 + expected_vel.0 * dt, start.1 + expected_vel.1 * dt);

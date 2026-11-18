@@ -1161,8 +1161,8 @@ impl App {
         }
     }
 
-    /// The flight window's first frame is on screen: whatever it took over
-    /// from may disappear now without leaving a gap behind it.
+    /// The flight window's first frame is with the compositor: whatever it took
+    /// over from may disappear now without leaving a visible gap behind it.
     fn on_flight_started(&mut self, token: u64) {
         if token == TUMBLE_FLIGHT_TOKEN {
             // The thrown-away paper is drawn: the editor behind it
