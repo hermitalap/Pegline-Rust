@@ -1160,6 +1160,24 @@ fn elapsed_ms(start: f64) -> f32 {
     ((win32::now_seconds() - start) * 1000.0) as f32
 }
 
+/// Presents one fully transparent frame.
+///
+/// The window is pooled and hidden without touching its swap chain, so whatever
+/// the last animation drew stays in it. The next flight shows the same window
+/// with new bounds on the UI thread and only repaints later on the render
+/// thread, and until then the compositor stretches the leftover picture over the
+/// new window, clipped: a discarded note's opaque last frame flashed as a slice
+/// of paper (FIX_PLAN_261118 §3 F1). Clearing on the way out leaves nothing to
+/// flash.
+fn clear_frame(renderer: &mut Renderer) -> Result<(), String> {
+    renderer.begin()?;
+    renderer.end()?;
+    if renderer.present(true) == Present::DeviceLost {
+        return Err("device lost while clearing the flight window".to_string());
+    }
+    Ok(())
+}
+
 /// Runs one flight from the first frame to the end of the landing fade.
 ///
 /// The loop is a sequence of steps: [`prepare`] once, then
@@ -1186,6 +1204,7 @@ fn run_flight(
         // A newer capture takes over: leave without reporting a landing; the app
         // already made the old card visible again.
         if interrupt.load(Ordering::Relaxed) != generation {
+            clear_frame(renderer)?;
             return Ok(());
         }
         let now = win32::now_seconds();
@@ -1239,6 +1258,7 @@ fn run_flight(
         frames += 1;
 
         if pose.finished {
+            clear_frame(renderer)?;
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
@@ -1277,6 +1297,7 @@ fn run_drop(
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
             logging::trace(format!("drop interrupted after {frames} frames"));
+            clear_frame(renderer)?;
             return Ok(());
         }
         let elapsed = (win32::now_seconds() - start) as f32;
@@ -1309,6 +1330,7 @@ fn run_drop(
         }
         if t >= 1.0 {
             logging::trace(format!("drop finished after {frames} frames"));
+            clear_frame(renderer)?;
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
@@ -1316,8 +1338,9 @@ fn run_drop(
     }
 }
 
-/// A discarded note: it shrinks, spins and falls under gravity until the whole
-/// paper is below the window, i.e. off the screen (NOTE-EDITOR.md §5.5).
+/// A discarded note: it holds the editor's pose for a moment, then shrinks,
+/// spins and falls under gravity until the whole paper is below the window, i.e.
+/// off the screen (NOTE-EDITOR.md §5.5).
 ///
 /// The motion is integrated with the real frame `dt` rather than eased from a
 /// clock, so the note accelerates like a falling object: a short throw, a slow
@@ -1362,6 +1385,7 @@ fn run_tumble(
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
             logging::trace(format!("tumble interrupted after {frames} frames"));
+            clear_frame(renderer)?;
             return Ok(());
         }
         let now = win32::now_seconds();
@@ -1383,6 +1407,7 @@ fn run_tumble(
             logging::trace(format!(
                 "tumble finished after {frames} frames, {elapsed:.2}s, angle={angle:.0}"
             ));
+            clear_frame(renderer)?;
             on_event(FlightEvent::Finished(token));
             return Ok(());
         }
