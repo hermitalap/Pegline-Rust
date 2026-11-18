@@ -192,6 +192,7 @@ animating || dirty → publish (:1209-1212)
 | `TUMBLE_SHRINK_SECONDS` / `TUMBLE_SHRINK` | 0.30 / 0.45 | 丢弃空便签的缩小 |
 | `TUMBLE_GRAVITY` | 2600 | 重力 DIP/s² |
 | `TUMBLE_SECONDS` | 2.0 | 兜底结束 |
+| `TUMBLE_HANDOFF_SECONDS` | 0.05 | 丢弃便签先保持起始姿态多久，再开始下落（`mod.rs:70`） |
 | `ARC_DIP` | 30 | 飞行弧线高度，`-sin(π·k)·30` |
 | `CHROME_FADE_START/END` | 0.10 / 0.55 | 玻璃框淡入的时间窗（占 0.65 s 的比例），只用于截图飞行 |
 | `NOTE_CHROME_LEAVE_END` | 1/3 | 便签去编辑器时边框淡出结束的**路径**进度（`k`，不是时间） |
@@ -207,7 +208,7 @@ animating || dirty → publish (:1209-1212)
 | --- | --- | --- | --- |
 | 飞行 | `Flight::fly` `:288`、`fly_decorated` `:319`、`fly_entry` `:357` → `start_flight` `:386` | `FlightPlan::step(elapsed, frame_dt)` `:929` | `landed && elapsed >= 0.65 + 0.16`（`:1030` 附近） |
 | 掉落 | `drop_card` `:438` → `run_drop` `:1159` | `drop_pose(t)` `paint.rs:119` | `t >= 1`（0.32 s） |
-| 抛丢 | `tumble` `:481` → `run_tumble` `:1234` | 手写重力积分（`:1281-1296`） | 纸面中心完全出窗 或 2.0 s |
+| 抛丢 | `tumble` `:542` → `run_tumble` `:1423` | 手写重力积分（`Tumble::fall` `:1197`） | 纸面中心完全出窗 或 2.0 s（都从交接结束的时刻算起） |
 
 `FlightPlan::step` 关键点：
 
@@ -244,7 +245,11 @@ swing: Spring::new(1.0, 1.0),    // 落地 nudge 2.2°（0.3 s）后 set_stiffne
 
 ### 4.5 事件与中断
 
-`FlightEvent`（`:142`）`Started` / `Landed` / `Finished`；`run_flight`（`:1079`）在**画第一帧之前**报 `Landed`（`:1096-1156` 的顺序有注释说明原因），`Started` 在首帧上屏后报，`Finished` 最后报。`FlightCommand`（`:160`）与"代"（generation）计数让新截图可以抢占正在飞的窗口而不误报旧事件。
+`FlightEvent`（`:142`）`Started` / `Landed` / `Finished`；`run_flight`（`:1260`）在**画第一帧之前**报 `Landed`（`:1096-1156` 的顺序有注释说明原因），`Started` 在首帧上屏后报，`Finished` 最后报。`FlightCommand`（`:160`）与"代"（generation）计数让新截图可以抢占正在飞的窗口而不误报旧事件。
+
+三条 `run_*` 在离开循环前都要 `clear_frame`（`:1183`，`begin` + `end` + `present`，一帧全透明），正常结束和被打断两条路径都要走。窗口是复用的，隐藏时不动交换链；不擦的话下一段飞行在 UI 线程换好窗口位置、渲染线程还没画之前，DWM 会把上一段的最后一帧按新尺寸拉伸露出一块（丢弃翻滚的末帧是不透明的）。
+
+`run_tumble` 的 `Started` 与另外两条不同：先 `DwmFlush()`（`:1529`），确认第一帧已被合成，再报事件，因为编辑窗口一收到就隐藏自己的纸面；`Present` 只是排队，默认延迟三帧。失败只记日志。它同时把起始姿态保持 `TUMBLE_HANDOFF_SECONDS`，所以编辑窗口早或晚一帧消失都被同一张纸盖住。
 
 ---
 
