@@ -93,6 +93,28 @@ rope down when empty and after the pointer leaves; a full-screen app still takes
 precedence, and hiding the line by hand or clicking the top band pauses the rule
 until the next reveal. `src/app/reveal.rs` owns the rule.
 
+**2.7.1 (2026-11-18)** stops a note flight from carrying the line's 4 DIP Mica
+glass frame (`draw_glass` + `stroke_card` + shadow) across the whole path. The
+frame belongs to the card on the rope, not to the editor's paper, which has no
+frame at all: a note entering the editor now fades its frame out over the first
+third of the *path* (`ChromeMode::Leave`, gone at `k ≈ 0.366` / t = 0.150 s) and
+a note returning to the rope does not show one on its first frame, fading it in
+over the last third (`ChromeMode::Arrive`, back at `k ≈ 0.697` / t = 0.267 s).
+The curve is read off `k = ease::standard(t)`, not off `t`, because the CSS
+`ease` front-loads the travel and a clock-based cut lands visibly wrong. A
+discarded note's tumble draws a bare sheet from its first frame. `ChromeMode`
+replaces `chrome_full: bool` in `FlightCommand::Fly`, `FlightRequest` and
+`FlightPlan` (`FadeIn` = screenshot flight, `Full` = annotation editor, whose
+card really does carry the frame); the photo inset and the paper radius are now
+passed into `draw_flight_card` instead of being derived from `chrome`, so the
+paper rect stays pixel-identical every frame while the radius walks 12 DIP ↔
+22 DIP. Screenshot flights and both annotation flights are bit-identical to
+2.7.0 (31 exported columns, diff 0); 226 lib + 1 main tests, clippy/fmt clean;
+probe 60.04 fps / draw p50 0.624 ms / private 97.4 MB, exe 1,886,720 B locally
+(2.7.0: 1,885,696 B). Decisions D20 and the D10 revision are in
+`docs/DECISIONS.md`; the per-frame evidence is in `audit/261118-note-chrome/`.
+120 Hz, a second monitor and sleep/wake remain unmeasured.
+
 **2.7.0 (2026-11-17)** ships the animation-continuity round: every phase hand-off
 now carries its velocity instead of dropping it. The line's retract/submerge
 eases from the current `slide.velocity` (`carry`/`carry_rate` in `spring::ease`),
