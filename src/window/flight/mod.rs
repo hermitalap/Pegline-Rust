@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
+use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, MA_NOACTIVATE, SW_HIDE, ShowWindow, WM_ERASEBKGND,
     WM_MOUSEACTIVATE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
@@ -57,6 +58,16 @@ const TUMBLE_GRAVITY: f32 = 2600.0;
 /// Safety cap for the tumble, seconds; it normally ends when the note leaves
 /// the window.
 const TUMBLE_SECONDS: f32 = 2.0;
+/// How long a discarded note holds its first pose before it starts to fall,
+/// seconds.
+///
+/// The editor hides its own paper as soon as the tumble reports its first frame,
+/// and the compositor may not have put that frame up yet: the default swap-chain
+/// latency is three frames. Holding the exact start pose — same place, same size,
+/// no rotation — covers that gap, so whichever frame the editor disappears on is
+/// still that same sheet. The fall then starts from rest when this has passed,
+/// i.e. the whole animation is only translated in time.
+const TUMBLE_HANDOFF_SECONDS: f32 = 0.05;
 /// Arc height of the flight, DIP.
 const ARC_DIP: f32 = 30.0;
 /// Chrome fades in between these two fractions of the flight.
@@ -1178,6 +1189,69 @@ fn clear_frame(renderer: &mut Renderer) -> Result<(), String> {
     Ok(())
 }
 
+/// The discarded note's motion, without a window or a swap chain.
+///
+/// It is integrated with the real frame `dt` rather than eased from a clock, so
+/// the note accelerates like a falling object: a short throw, a slow turn at the
+/// top, then a fast drop out of sight.
+struct Tumble {
+    /// Centre of the paper in window DIP.
+    pos: (f32, f32),
+    vel: (f32, f32),
+    angle: f32,
+    shrink: f32,
+    spin: f32,
+    width: f32,
+    height: f32,
+}
+
+impl Tumble {
+    /// The pose the editor's paper had: full size, upright, in place.
+    fn new(pos: (f32, f32), vel: (f32, f32), spin: f32, width: f32, height: f32) -> Self {
+        Self {
+            pos,
+            vel,
+            angle: 0.0,
+            shrink: 1.0,
+            spin,
+            width,
+            height,
+        }
+    }
+
+    /// Advances one frame. `elapsed` is the time since the fall began, so the
+    /// shrink curve is measured from the same instant as the integration.
+    fn fall(&mut self, elapsed: f32, dt: f32) {
+        // Shrink first (the "grab and flick"), then keep that size.
+        let shrink_t = (elapsed / TUMBLE_SHRINK_SECONDS).clamp(0.0, 1.0);
+        self.shrink = 1.0 - (1.0 - TUMBLE_SHRINK) * ease::out_quad(shrink_t);
+        self.vel.1 += TUMBLE_GRAVITY * dt;
+        self.pos.0 += self.vel.0 * dt;
+        self.pos.1 += self.vel.1 * dt;
+        self.angle += self.spin * dt;
+    }
+
+    /// True once the whole (shrunk) paper is below the window.
+    fn below(&self, window_height: f32) -> bool {
+        self.pos.1 - self.height * self.shrink * 0.5 > window_height
+    }
+
+    /// Rotation and scale about the paper's own centre, then the centre moved to
+    /// `pos`: the note turns in place while it travels.
+    fn transform(&self) -> Matrix3x2 {
+        let centre = Vector2 {
+            X: self.width * 0.5,
+            Y: self.height * 0.5,
+        };
+        Matrix3x2::rotation_around(self.angle, centre)
+            * Matrix3x2::scale_around(self.shrink, self.shrink, centre)
+            * Matrix3x2::translation(
+                self.pos.0 - self.width * 0.5,
+                self.pos.1 - self.height * 0.5,
+            )
+    }
+}
+
 /// Runs one flight from the first frame to the end of the landing fade.
 ///
 /// The loop is a sequence of steps: [`prepare`] once, then
@@ -1367,13 +1441,16 @@ fn run_tumble(
 
     let width = from.width() as f32 / scale;
     let height = from.height() as f32 / scale;
-    let mut pos = (
-        (from.left + from.right) as f32 * 0.5 / scale - origin.left as f32 / scale,
-        (from.top + from.bottom) as f32 * 0.5 / scale - origin.top as f32 / scale,
+    let mut tumble = Tumble::new(
+        (
+            (from.left + from.right) as f32 * 0.5 / scale - origin.left as f32 / scale,
+            (from.top + from.bottom) as f32 * 0.5 / scale - origin.top as f32 / scale,
+        ),
+        velocity,
+        spin,
+        width,
+        height,
     );
-    let mut vel = velocity;
-    let mut angle = 0.0f32;
-    let mut shrink;
     let window_height = (origin.bottom - origin.top) as f32 / scale;
     logging::trace(format!(
         "tumble render start size={width:.1}x{height:.1} origin={origin:?}"
@@ -1381,6 +1458,10 @@ fn run_tumble(
 
     let start = win32::now_seconds();
     let mut last = start;
+    // When the fall began; `None` while the hand-off still holds the start pose.
+    // The physics clock starts here rather than at `start`, so the hand-off only
+    // delays the animation instead of changing it.
+    let mut moved_at: Option<f64> = None;
     let mut frames = 0u32;
     loop {
         if interrupt.load(Ordering::Relaxed) != generation {
@@ -1391,38 +1472,34 @@ fn run_tumble(
         let now = win32::now_seconds();
         let dt = ((now - last) as f32).clamp(0.0, 0.05);
         last = now;
-        let elapsed = (now - start) as f32;
 
-        // Shrink first (the "grab and flick"), then keep that size.
-        let shrink_t = (elapsed / TUMBLE_SHRINK_SECONDS).clamp(0.0, 1.0);
-        shrink = 1.0 - (1.0 - TUMBLE_SHRINK) * ease::out_quad(shrink_t);
-        vel.1 += TUMBLE_GRAVITY * dt;
-        pos.0 += vel.0 * dt;
-        pos.1 += vel.1 * dt;
-        angle += spin * dt;
+        // The hand-off: keep the pose the editor's paper had until the editor has
+        // had time to go, then start the fall from rest. `frames > 0` keeps the
+        // very first frame on the start pose even if building it was slow.
+        if moved_at.is_none() && frames > 0 && (now - start) as f32 >= TUMBLE_HANDOFF_SECONDS {
+            moved_at = Some(now);
+            last = now;
+        }
+        let elapsed = match moved_at {
+            Some(at) => (now - at) as f32,
+            None => 0.0,
+        };
 
-        // Done once the whole (shrunk) paper is below the window.
-        let half_height = height * shrink * 0.5;
-        if pos.1 - half_height > window_height || elapsed >= TUMBLE_SECONDS {
-            logging::trace(format!(
-                "tumble finished after {frames} frames, {elapsed:.2}s, angle={angle:.0}"
-            ));
-            clear_frame(renderer)?;
-            on_event(FlightEvent::Finished(token));
-            return Ok(());
+        if moved_at.is_some() {
+            tumble.fall(elapsed, dt);
+            if tumble.below(window_height) || elapsed >= TUMBLE_SECONDS {
+                logging::trace(format!(
+                    "tumble finished after {frames} frames, {elapsed:.2}s, angle={:.0}",
+                    tumble.angle
+                ));
+                clear_frame(renderer)?;
+                on_event(FlightEvent::Finished(token));
+                return Ok(());
+            }
         }
 
-        // Rotate and scale about the paper's own centre, then place the centre
-        // at `pos`: the note turns in place while it travels.
-        let centre = Vector2 {
-            X: width * 0.5,
-            Y: height * 0.5,
-        };
-        let transform = Matrix3x2::rotation_around(angle, centre)
-            * Matrix3x2::scale_around(shrink, shrink, centre)
-            * Matrix3x2::translation(pos.0 - width * 0.5, pos.1 - height * 0.5);
         renderer.begin()?;
-        renderer.set_transform(transform);
+        renderer.set_transform(tumble.transform());
         // A discarded note is a bare sheet: no glass frame, the usual 4 DIP
         // inset, and the editor's own 22 DIP radius, so the first frame matches
         // the paper the editor was showing.
@@ -1443,7 +1520,15 @@ fn run_tumble(
             return Err("device lost during tumble".to_string());
         }
         if frames == 0 {
-            // The note is on screen now; the editor behind it can go.
+            // `Present` only queues the frame, and the editor hides its own paper
+            // as soon as this event arrives: wait for the compositor to put the
+            // sheet up first, or it blinks out. A failure is only logged — the
+            // animation must not stall on the desktop window manager.
+            //
+            // SAFETY: `DwmFlush` takes no arguments and touches no memory we own.
+            if let Err(error) = unsafe { DwmFlush() } {
+                logging::trace(format!("DwmFlush failed: {error}"));
+            }
             on_event(FlightEvent::Started(token));
         }
         frames += 1;
@@ -1569,6 +1654,35 @@ mod tests {
             let distance = ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
             assert!(distance < 1e-3, "corner ({x},{y}) moved {distance} DIP");
         }
+    }
+
+    /// The hand-off: a discarded note repeats the editor's paper exactly until
+    /// the editor has had time to hide, and the fall that follows is the same
+    /// motion one hand-off later — it starts from rest, so its first frame is the
+    /// frame the old code drew at `t = 0`.
+    #[test]
+    fn the_tumble_holds_the_editor_paper_before_it_falls() {
+        let start = (320.0f32, 180.0f32);
+        let vel = (60.0f32, -100.0f32);
+        let spin = 200.0f32;
+        let (width, height) = (368.0f32, 288.0f32);
+        let dt = 1.0f32 / 60.0;
+
+        let mut tumble = Tumble::new(start, vel, spin, width, height);
+        // Held: full size, upright, in place — the pose the editor drew.
+        assert_eq!(tumble.pos, start);
+        assert_eq!(tumble.angle, 0.0);
+        assert_eq!(tumble.shrink, 1.0);
+        assert!(!tumble.below(640.0));
+
+        // First frame of the fall, from rest: the old algorithm's `t = 0` frame.
+        tumble.fall(0.0, dt);
+        let expected_vel = (vel.0, vel.1 + TUMBLE_GRAVITY * dt);
+        let expected_pos = (start.0 + expected_vel.0 * dt, start.1 + expected_vel.1 * dt);
+        assert!((tumble.pos.0 - expected_pos.0).abs() < 1e-4);
+        assert!((tumble.pos.1 - expected_pos.1).abs() < 1e-4);
+        assert!((tumble.angle - spin * dt).abs() < 1e-4);
+        assert!((tumble.shrink - 1.0).abs() < 1e-6);
     }
 
     #[test]

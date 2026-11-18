@@ -24,6 +24,9 @@ features = [
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_DirectComposition",
   "Win32_Graphics_DirectWrite",
+  # `DwmFlush`, so a discarded note's first frame is composed before the editor
+  # behind it is hidden (FIX_PLAN_261118 §3 F2).
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Imaging",
