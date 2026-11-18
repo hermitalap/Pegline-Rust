@@ -387,8 +387,13 @@ WPF 版一次飞行一条时间线；Rust 版加了 generation 计数：新的�
   姿态 `TUMBLE_HANDOFF_SECONDS = 0.05`（60 Hz 三帧），然后把物理时钟重置到那一刻，
   从静止开始缩小、自转、下落，`TUMBLE_SECONDS` 兜底与出窗判据也都从新起点计时——
   整段运动只是整体后移，缩小曲线、重力、初速度、自转一律没改。
-- **为什么 `DwmFlush` 只放在翻滚**：另外两条飞行在首帧就已经在动，脚下盖着的是静止的
-  真实卡片，没有任何东西等 `Started` 才隐藏；在那里阻塞一个 vblank 等于白丢一帧。
+- **为什么 `DwmFlush` 只放在翻滚**：另外三个 `Started` 回调（`NOTE_FLIGHT_TOKEN` →
+  `hide_note_card`、`ANNOTATE_OPEN_TOKEN` → `hide_annotated_card`、`ANNOTATE_CLOSE_TOKEN` →
+  `editor.hide`，见 `src/app/mod.rs` 的 `on_flight_started`）同样在首帧只是排进队列后就
+  隐藏东西，理论上存在同样的早 1–2 个 vblank 风险；但那几条飞行从首帧起就在移动，被盖住
+  的是静止的真实卡片或编辑窗口，早一帧隐藏最多在边缘露出一点桌面，而且计划把 `run_flight`
+  的 `Started` 时机明确列为范围之外（§5），用户报告的也只有翻滚。在飞行循环里阻塞一个
+  vblank 会直接白丢一帧运动，所以只给翻滚加 `DwmFlush`。
 - **为什么没补编辑器阴影（F4，SKIPPED）**：编辑纸面有 1.5 DIP 玻璃描边和 18 %／24 DIP
   阴影，交接瞬间会消失。编辑器的九宫格阴影是按**编辑窗口自己的 D2D 上下文**烘焙的，
   飞行窗口用不了；退而用 `Renderer` 现有的卡片阴影（16 DIP 圆角、20 DIP 模糊）去盖
